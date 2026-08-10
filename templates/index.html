@@ -1,0 +1,751 @@
+<title>NOR 140 · MEAS118 · Sound Level Log</title>
+<style>
+:root {
+  --bg: #EFF2F7;
+  --surface: #FFFFFF;
+  --panel: #F6F8FC;
+  --border: #D0D8E8;
+  --text: #0C1A2E;
+  --text2: #3D5270;
+  --text3: #7A92AE;
+  --accent: #C56A00;
+  --laeq: #2660C4;
+  --laeq-fill: rgba(38,96,196,0.13);
+  --peak: #C56A00;
+  --grid: rgba(10,30,80,0.065);
+  --grid-border: rgba(10,30,80,0.09);
+  --warn-line: rgba(180,60,0,0.5);
+  --sel-bar: #C56A00;
+  --font-ui: system-ui,-apple-system,'Helvetica Neue','Segoe UI',sans-serif;
+  --font-data: 'SF Mono','Cascadia Code','Consolas','Courier New',monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #090F1C;
+    --surface: #111C30;
+    --panel: #172540;
+    --border: #1E3050;
+    --text: #D0E4F8;
+    --text2: #7A9ABE;
+    --text3: #456082;
+    --accent: #F09828;
+    --laeq: #4A90E8;
+    --laeq-fill: rgba(74,144,232,0.18);
+    --peak: #F09828;
+    --grid: rgba(80,150,230,0.07);
+    --grid-border: rgba(80,150,230,0.12);
+    --warn-line: rgba(240,80,30,0.55);
+    --sel-bar: #F09828;
+  }
+}
+:root[data-theme="light"]{--bg:#EFF2F7;--surface:#FFFFFF;--panel:#F6F8FC;--border:#D0D8E8;--text:#0C1A2E;--text2:#3D5270;--text3:#7A92AE;--accent:#C56A00;--laeq:#2660C4;--laeq-fill:rgba(38,96,196,0.13);--peak:#C56A00;--grid:rgba(10,30,80,0.065);--grid-border:rgba(10,30,80,0.09);--warn-line:rgba(180,60,0,0.5);--sel-bar:#C56A00}
+:root[data-theme="dark"]{--bg:#090F1C;--surface:#111C30;--panel:#172540;--border:#1E3050;--text:#D0E4F8;--text2:#7A9ABE;--text3:#456082;--accent:#F09828;--laeq:#4A90E8;--laeq-fill:rgba(74,144,232,0.18);--peak:#F09828;--grid:rgba(80,150,230,0.07);--grid-border:rgba(80,150,230,0.12);--warn-line:rgba(240,80,30,0.55);--sel-bar:#F09828}
+
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:var(--font-ui);font-size:13px;line-height:1.5;-webkit-font-smoothing:antialiased}
+.page{max-width:1180px;margin:0 auto;padding:24px 20px 48px}
+
+/* Header */
+.header{display:flex;align-items:baseline;justify-content:space-between;padding-bottom:16px;border-bottom:1px solid var(--border);margin-bottom:24px;flex-wrap:wrap;gap:6px 20px}
+.meter-name{font-size:20px;font-weight:600;letter-spacing:-0.01em}
+.meter-sub{font-size:11px;font-weight:500;letter-spacing:.07em;text-transform:uppercase;color:var(--text3);margin-left:12px}
+.header-right{display:flex;align-items:baseline;gap:16px;flex-wrap:wrap}
+.hdr-date{font-size:13px;color:var(--text2)}
+.hdr-sd{font-size:11px;letter-spacing:.05em;text-transform:uppercase;color:var(--text3)}
+
+/* Selected session panel */
+.sess-panel{background:var(--surface);border:1px solid var(--border);border-radius:6px;margin-bottom:24px;overflow:hidden}
+.sess-panel-header{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:1px solid var(--border);gap:12px;flex-wrap:wrap}
+.sess-date-label{font-size:15px;font-weight:600;letter-spacing:-0.01em}
+.sess-meta{display:flex;gap:20px;flex-wrap:wrap}
+.sess-meta-item{text-align:right}
+.sess-meta-label{font-size:9.5px;font-weight:500;letter-spacing:.08em;text-transform:uppercase;color:var(--text3);display:block}
+.sess-meta-val{font-family:var(--font-data);font-size:15px;font-weight:500;font-variant-numeric:tabular-nums}
+.sess-meta-val.hi{color:var(--accent)}
+
+/* Runs grid */
+.runs-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(195px,1fr));gap:1px;background:var(--border)}
+.run-card{background:var(--surface);padding:0}
+.run-card-header{padding:9px 12px 7px;border-bottom:1px solid var(--grid-border)}
+.run-row{display:flex;align-items:center;justify-content:space-between;margin-bottom:5px}
+.run-id{font-size:10px;font-weight:600;letter-spacing:.09em;text-transform:uppercase;color:var(--text3)}
+.run-time{font-family:var(--font-data);font-size:11px;color:var(--text2);font-variant-numeric:tabular-nums}
+.run-stats{display:flex;gap:10px}
+.rs{font-size:10px;color:var(--text3)}
+.rs span{font-family:var(--font-data);font-size:13px;font-weight:500;color:var(--text);display:block;font-variant-numeric:tabular-nums;line-height:1.3}
+.rs span.hi{color:var(--accent)}
+.run-chart-wrap{height:110px;background:var(--panel)}
+.run-chart-wrap canvas{display:block;width:100%;height:100%}
+.run-foot{padding:4px 12px;font-size:10px;color:var(--text3);font-variant-numeric:tabular-nums;border-top:1px solid var(--grid-border)}
+
+/* No-detail state */
+.no-detail{padding:32px 20px;text-align:center;color:var(--text3)}
+.no-detail strong{display:block;color:var(--text2);font-size:14px;margin-bottom:6px}
+.no-detail code{font-family:var(--font-data);font-size:11px;background:var(--panel);padding:2px 6px;border-radius:3px;border:1px solid var(--border)}
+
+/* Summary stat tiles (non-today sessions) */
+.sum-tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:1px;background:var(--border)}
+.sum-tile{background:var(--surface);padding:14px 16px}
+.sum-tile-label{font-size:10px;font-weight:500;letter-spacing:.07em;text-transform:uppercase;color:var(--text3);margin-bottom:4px}
+.sum-tile-val{font-family:var(--font-data);font-size:20px;font-weight:500;font-variant-numeric:tabular-nums}
+
+/* History chart */
+.section-label{font-size:10px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;color:var(--text3);margin-bottom:12px}
+.hist-wrap{background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:14px 16px 10px}
+.hist-canvas-wrap{position:relative;height:130px;cursor:pointer}
+.hist-canvas-wrap canvas{display:block;width:100%;height:100%}
+.hist-tip{display:none;position:absolute;background:var(--surface);border:1px solid var(--border);border-radius:4px;padding:5px 9px;font-size:11px;pointer-events:none;z-index:10;white-space:nowrap;box-shadow:0 2px 8px rgba(0,0,0,.12);top:4px}
+.hist-legend{display:flex;gap:16px;margin-top:9px;flex-wrap:wrap}
+.leg{display:flex;align-items:center;gap:5px;font-size:10px;color:var(--text3)}
+.leg-sw{width:9px;height:9px;border-radius:2px;flex-shrink:0}
+
+/* Chart legend strip */
+.chart-leg{display:flex;gap:14px;padding:5px 12px;border-top:1px solid var(--grid-border);background:var(--panel)}
+.cl-item{display:flex;align-items:center;gap:4px;font-size:10px;color:var(--text3)}
+.cl-line{width:16px;height:2px;border-radius:1px;flex-shrink:0}
+.cl-line.laeq{background:var(--laeq)}
+.cl-line.peak{background:var(--peak);opacity:.6}
+.cl-line.ref{background:transparent;border-top:1px dashed var(--accent)}
+
+.page-footer{margin-top:28px;padding-top:14px;border-top:1px solid var(--border);font-size:11px;color:var(--text3);line-height:1.65}
+@media(max-width:600px){.runs-grid{grid-template-columns:1fr 1fr}.sum-tiles{grid-template-columns:1fr 1fr}}
+@media(max-width:380px){.runs-grid{grid-template-columns:1fr}}
+
+/* ── Modal ── */
+.modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:1000;align-items:center;justify-content:center;padding:16px}
+.modal-overlay.open{display:flex}
+.modal-box{background:var(--surface);border:1px solid var(--border);border-radius:8px;width:100%;max-width:1080px;max-height:92vh;overflow-y:auto;box-shadow:0 12px 60px rgba(0,0,0,.35)}
+.modal-hdr{display:flex;align-items:center;justify-content:space-between;padding:13px 18px;border-bottom:1px solid var(--border);position:sticky;top:0;background:var(--surface);z-index:1}
+.modal-title{font-size:15px;font-weight:600;letter-spacing:-.01em}
+.modal-sub{font-size:11px;color:var(--text3);margin-top:2px}
+.modal-close{background:none;border:1px solid var(--border);border-radius:4px;width:28px;height:28px;cursor:pointer;color:var(--text2);font-size:14px;display:flex;align-items:center;justify-content:center;flex-shrink:0;line-height:1}
+.modal-close:hover{background:var(--panel)}
+.modal-body{padding:18px}
+.modal-main-wrap{height:300px;margin-bottom:16px;background:var(--panel);border:1px solid var(--border);border-radius:4px;overflow:hidden}
+.modal-main-wrap canvas{display:block;width:100%;height:100%}
+.modal-bottom{display:grid;grid-template-columns:200px 1fr 1fr;gap:12px}
+.modal-stats{background:var(--panel);border:1px solid var(--border);border-radius:4px;padding:12px}
+.mstat{display:flex;justify-content:space-between;align-items:baseline;padding:5px 0;border-bottom:1px solid var(--grid-border);gap:8px}
+.mstat:last-child{border-bottom:none}
+.mstat-n{font-size:11px;color:var(--text3);flex-shrink:0}
+.mstat-v{font-family:var(--font-data);font-size:13px;font-weight:500;font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap}
+.mstat-v.hi{color:var(--accent)}
+.modal-chart-box{background:var(--panel);border:1px solid var(--border);border-radius:4px;padding:10px 10px 0;overflow:hidden}
+.modal-chart-lbl{font-size:9.5px;font-weight:600;letter-spacing:.09em;text-transform:uppercase;color:var(--text3);margin-bottom:8px}
+.modal-chart-cnv{height:160px}
+.modal-chart-cnv canvas{display:block;width:100%;height:100%}
+.run-card{cursor:pointer}
+.run-card:hover{box-shadow:0 0 0 2px var(--laeq) inset}
+@media(max-width:720px){.modal-bottom{grid-template-columns:1fr 1fr}.modal-stats{grid-column:span 2}}
+@media(max-width:480px){.modal-bottom{grid-template-columns:1fr}.modal-stats{grid-column:span 1}}
+
+.site-nav{display:flex;align-items:center;gap:16px;padding:8px 20px;background:var(--surface);border-bottom:1px solid var(--border);font-size:13px}
+.nav-brand{font-weight:600;letter-spacing:-.01em;flex:1}
+.nav-pi{color:var(--text3);font-size:11px}
+.nav-link{color:var(--laeq);text-decoration:none;border:1px solid var(--border);border-radius:4px;padding:4px 10px;white-space:nowrap}
+.nav-link:hover{background:var(--panel)}
+</style>
+
+<nav class="site-nav">
+  <span class="nav-brand">NOR140 Noise Monitor</span>
+  <span class="nav-pi">{{ pi_name }}</span>
+  <a href="/import" class="nav-link">Import SD card data</a>
+</nav>
+<div class="page">
+  <header class="header">
+    <div>
+      <span class="meter-name">NOR 140</span>
+      <span class="meter-sub">Norsonic · Class&nbsp;1 · MEAS118</span>
+    </div>
+    <div class="header-right">
+      <span class="hdr-date" id="hdrDate"></span>
+      <span class="hdr-sd" id="hdrSd"></span>
+    </div>
+  </header>
+
+  <div id="sessPanel" class="sess-panel">
+    <div class="sess-panel-header">
+      <div class="sess-date-label" id="sessDateLabel"></div>
+      <div class="sess-meta" id="sessMeta"></div>
+    </div>
+    <div id="sessContent"></div>
+  </div>
+
+  <div class="section-label">Session history — click to explore</div>
+  <div class="hist-wrap">
+    <div class="hist-canvas-wrap" id="histWrap">
+      <canvas id="histCanvas"></canvas>
+      <div class="hist-tip" id="histTip"></div>
+    </div>
+    <div class="hist-legend">
+      <div class="leg"><div class="leg-sw" style="background:#4BA86A"></div>Below 80 dB avg</div>
+      <div class="leg"><div class="leg-sw" style="background:#D09520"></div>80–95 dB</div>
+      <div class="leg"><div class="leg-sw" style="background:#C05028"></div>95–110 dB</div>
+      <div class="leg"><div class="leg-sw" style="background:#A02818"></div>Above 110 dB</div>
+      <div class="leg"><div class="leg-sw" style="background:var(--sel-bar)"></div>Selected</div>
+    </div>
+  </div>
+
+  <footer class="page-footer">
+    Data from MEAS118/YYMMDD/PART0000/PROJnnnn/PROFnnnn.DAT (Norsonic proprietary binary, 10 bytes/record: 5&times;uint16 LE &divide;100&nbsp;=&nbsp;dB).
+    Field&nbsp;0&nbsp;=&nbsp;LA<sub>eq,1s</sub>; Field&nbsp;4&nbsp;=&nbsp;LC<sub>peak</sub>.
+    85&nbsp;dB reference = HSE occupational exposure action level.
+    Values &gt;130&nbsp;dB may indicate impulsive events at close range or measurement saturation.
+    Chart resolution varies by run length (1&nbsp;s for short runs, up to 1/10&nbsp;s for long ones).
+  </footer>
+</div>
+
+<div id="modalOverlay" class="modal-overlay" role="dialog" aria-modal="true">
+  <div class="modal-box">
+    <div class="modal-hdr">
+      <div>
+        <div id="modalTitle" class="modal-title"></div>
+        <div id="modalSub" class="modal-sub"></div>
+      </div>
+      <button id="modalCloseBtn" class="modal-close" aria-label="Close">&#x2715;</button>
+    </div>
+    <div class="modal-body">
+      <div class="modal-main-wrap"><canvas id="modalMainCanvas"></canvas></div>
+      <div class="modal-bottom">
+        <div class="modal-stats" id="modalStats"></div>
+        <div class="modal-chart-box">
+          <div class="modal-chart-lbl">Level distribution &middot; counts per 5&thinsp;dB bin</div>
+          <div class="modal-chart-cnv"><canvas id="modalHistCanvas"></canvas></div>
+        </div>
+        <div class="modal-chart-box">
+          <div class="modal-chart-lbl">Exceedance &middot; % time above level (LA<sub>x</sub>)</div>
+          <div class="modal-chart-cnv"><canvas id="modalExcCanvas"></canvas></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script id="dataBlob" type="application/json">{{ data_json | safe }}</script>
+<script>
+(function () {
+const DATA = JSON.parse(document.getElementById('dataBlob').textContent);
+// All sessions already have projects embedded
+// Default to the most recent session
+const TODAY_DATE = DATA.sessions[DATA.sessions.length - 1].d;
+let selectedDate = TODAY_DATE;
+
+// ── Utilities ──────────────────────────────────────────────
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+function clamp(v,lo,hi){ return Math.max(lo,Math.min(hi,v)); }
+function fmtDuration(s) {
+  const m = Math.floor(s/60), r = s%60;
+  return m ? m+'m'+(r?' '+r+'s':'') : r+'s';
+}
+function fmtDate(d) {
+  const [y,mo,da] = d.split('-');
+  return `${parseInt(da)} ${['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][parseInt(mo)-1]} ${y}`;
+}
+function setupCanvas(canvas, w, h) {
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = Math.round(w*dpr); canvas.height = Math.round(h*dpr);
+  canvas.style.width = w+'px'; canvas.style.height = h+'px';
+  const ctx = canvas.getContext('2d'); ctx.scale(dpr, dpr); return ctx;
+}
+function isDarkMode() {
+  return document.documentElement.dataset.theme === 'dark' ||
+    (!document.documentElement.dataset.theme && window.matchMedia('(prefers-color-scheme: dark)').matches);
+}
+
+// ── Header ─────────────────────────────────────────────────
+document.getElementById('hdrSd').textContent = `${DATA.sessions.length} sessions · 2021–2026`;
+
+// ── Session panel ──────────────────────────────────────────
+function renderSessionPanel(date) {
+  const sess = DATA.sessions.find(s => s.d === date);
+  if (!sess) return;
+
+  document.getElementById('hdrDate').textContent = fmtDate(date);
+  document.getElementById('sessDateLabel').textContent = fmtDate(date);
+
+  const totalRecs = sess.projects
+    ? sess.projects.reduce((a,p)=>a+p.n,0)
+    : sess.n;
+
+  document.getElementById('sessMeta').innerHTML = `
+    <div class="sess-meta-item">
+      <span class="sess-meta-label">Samples</span>
+      <span class="sess-meta-val">${totalRecs.toLocaleString()}</span>
+    </div>
+    <div class="sess-meta-item">
+      <span class="sess-meta-label">LA<sub>eq</sub> avg</span>
+      <span class="sess-meta-val">${sess.avg}&nbsp;<small style="font-size:11px;font-weight:400;color:var(--text3)">dB</small></span>
+    </div>
+    <div class="sess-meta-item">
+      <span class="sess-meta-label">LA<sub>eq</sub> max</span>
+      <span class="sess-meta-val hi">${sess.mx}&nbsp;<small style="font-size:11px;font-weight:400;color:var(--text3)">dB</small></span>
+    </div>
+    ${sess.projects ? `<div class="sess-meta-item"><span class="sess-meta-label">Runs</span><span class="sess-meta-val">${sess.projects.length}</span></div>` : ''}
+  `;
+
+  const content = document.getElementById('sessContent');
+
+  if (sess.projects) {
+    renderRunsGrid(content, sess.projects);
+  } else {
+    content.innerHTML = `
+      <div class="sum-tiles">
+        <div class="sum-tile"><div class="sum-tile-label">Total samples</div><div class="sum-tile-val">${sess.n.toLocaleString()}</div></div>
+        <div class="sum-tile"><div class="sum-tile-label">Duration (est.)</div><div class="sum-tile-val">${fmtDuration(sess.n)}</div></div>
+        <div class="sum-tile"><div class="sum-tile-label">LA<sub>eq</sub> avg</div><div class="sum-tile-val">${sess.avg} dB</div></div>
+        <div class="sum-tile"><div class="sum-tile-label">LA<sub>eq</sub> max</div><div class="sum-tile-val">${sess.mx} dB</div></div>
+      </div>
+      <div class="no-detail">
+        <strong>Run detail not available</strong>
+        Re-insert the SD card and re-run extraction to load the individual runs for this session.<br>
+        Full time-series data is loaded for: <code>${TODAY_DATE}</code>
+      </div>`;
+  }
+}
+
+// ── Runs grid ──────────────────────────────────────────────
+const runCanvases = [];
+
+function renderRunsGrid(container, projects) {
+  runCanvases.length = 0;
+  container.innerHTML = `
+    <div class="runs-grid" id="runsGrid"></div>`;
+  const grid = container.querySelector('.runs-grid');
+
+  projects.forEach((proj, idx) => {
+    const card = document.createElement('div');
+    card.className = 'run-card';
+    card.innerHTML = `
+      <div class="run-card-header">
+        <div class="run-row">
+          <span class="run-id">Run ${idx+1}</span>
+          <span class="run-time">${proj.start}</span>
+        </div>
+        <div class="run-stats">
+          <div class="rs">LA<sub>eq</sub><span>${proj.avg.toFixed(1)}</span></div>
+          <div class="rs">Range<span style="font-size:11px">${proj.mn}–${proj.mx}</span></div>
+          <div class="rs">LC<sub>peak</sub><span class="hi">${proj.pmx}</span></div>
+        </div>
+      </div>
+      <div class="run-chart-wrap"><canvas data-idx="${idx}"></canvas></div>
+      <div class="chart-leg">
+        <div class="cl-item"><div class="cl-line laeq"></div>LA<sub>eq,1s</sub></div>
+        <div class="cl-item"><div class="cl-line peak"></div>LC<sub>peak</sub></div>
+        <div class="cl-item"><div class="cl-line ref"></div>85 dB</div>
+      </div>
+      <div class="run-foot">${fmtDuration(proj.n)} · ${proj.n} samples${proj.step > 1 ? ' · chart 1/'+proj.step+'s' : ''}</div>`;
+    card.addEventListener('click', () => openRunModal(proj, idx, selectedDate));
+    grid.appendChild(card);
+    runCanvases.push(card.querySelector('canvas'));
+  });
+
+  drawAllRunCharts(projects);
+}
+
+// ── Run chart drawing ──────────────────────────────────────
+const Y_MIN = 48, Y_MAX = 115;
+
+function drawRunChart(canvas, proj) {
+  const W = canvas.parentElement.offsetWidth || 200;
+  const H = 110;
+  const ctx = setupCanvas(canvas, W, H);
+  const PAD = {t:8, r:8, b:22, l:34};
+  const cW = W-PAD.l-PAD.r, cH = H-PAD.t-PAD.b;
+  const laeq = proj.laeq, lcpeak = proj.lcpeak, n = laeq.length;
+  if (!n) return;
+
+  const yP = db => PAD.t + cH*(1-(clamp(db,Y_MIN,Y_MAX)-Y_MIN)/(Y_MAX-Y_MIN));
+  const xP = i => PAD.l + (n===1 ? cW/2 : (i/(n-1))*cW);
+
+  ctx.fillStyle = css('--panel'); ctx.fillRect(0,0,W,H);
+
+  // Zone tints
+  [[Y_MIN,65,'rgba(50,160,80,.07)'],[65,80,'rgba(200,160,0,.06)'],[80,95,'rgba(210,80,20,.07)'],[95,Y_MAX,'rgba(180,20,10,.07)']].forEach(([lo,hi,c])=>{
+    ctx.fillStyle=c; ctx.fillRect(PAD.l,yP(hi),cW,yP(lo)-yP(hi));
+  });
+
+  // Grid
+  [60,70,80,90,100,110].forEach(db=>{
+    if(db<Y_MIN||db>Y_MAX)return;
+    const y=yP(db);
+    ctx.strokeStyle=css('--grid'); ctx.lineWidth=1; ctx.setLineDash([]);
+    ctx.beginPath(); ctx.moveTo(PAD.l,y); ctx.lineTo(PAD.l+cW,y); ctx.stroke();
+    ctx.fillStyle=css('--text3'); ctx.font='9px '+css('--font-data');
+    ctx.textAlign='right'; ctx.fillText(db,PAD.l-4,y+3);
+  });
+
+  // 85 dB ref
+  ctx.strokeStyle=css('--warn-line'); ctx.lineWidth=1; ctx.setLineDash([3,4]);
+  ctx.beginPath(); ctx.moveTo(PAD.l,yP(85)); ctx.lineTo(PAD.l+cW,yP(85)); ctx.stroke();
+  ctx.setLineDash([]);
+
+  // LCpeak
+  ctx.strokeStyle=css('--peak'); ctx.lineWidth=1; ctx.globalAlpha=.5;
+  ctx.beginPath();
+  lcpeak.forEach((v,i)=>{ const x=xP(i),y=yP(v); i?ctx.lineTo(x,y):ctx.moveTo(x,y); });
+  ctx.stroke(); ctx.globalAlpha=1;
+
+  // LAeq fill
+  ctx.fillStyle=css('--laeq-fill');
+  ctx.beginPath(); ctx.moveTo(xP(0),yP(Y_MIN));
+  laeq.forEach((v,i)=>ctx.lineTo(xP(i),yP(v)));
+  ctx.lineTo(xP(n-1),yP(Y_MIN)); ctx.closePath(); ctx.fill();
+
+  // LAeq line
+  ctx.strokeStyle=css('--laeq'); ctx.lineWidth=1.5;
+  ctx.beginPath();
+  laeq.forEach((v,i)=>{ const x=xP(i),y=yP(v); i?ctx.lineTo(x,y):ctx.moveTo(x,y); });
+  ctx.stroke();
+
+  // X labels
+  ctx.fillStyle=css('--text3'); ctx.font='9px '+css('--font-ui');
+  ctx.textAlign='left'; ctx.fillText('0s',PAD.l,H-3);
+  ctx.textAlign='right'; ctx.fillText(fmtDuration(proj.n),PAD.l+cW,H-3);
+
+  // Border
+  ctx.strokeStyle=css('--grid-border'); ctx.lineWidth=1; ctx.setLineDash([]);
+  ctx.strokeRect(PAD.l+.5,PAD.t+.5,cW,cH);
+  // small in-chart legend
+  const leg=[['--laeq',1,2,'LAeq'],['--peak',.5,1,'LCpk']];
+  const lx=PAD.l+cW-4, ly=PAD.t+5;
+  ctx.font='9px '+css('--font-ui');ctx.textAlign='right';
+  leg.forEach(([col,alpha,lw,lbl],i)=>{
+    const y=ly+i*12;
+    ctx.globalAlpha=alpha;ctx.strokeStyle=css(col);ctx.lineWidth=lw+1;ctx.setLineDash([]);
+    ctx.beginPath();ctx.moveTo(lx-26,y+3.5);ctx.lineTo(lx-13,y+3.5);ctx.stroke();
+    ctx.globalAlpha=1;ctx.fillStyle=css('--text2');ctx.fillText(lbl,lx,y+7);
+  });
+}
+
+function drawAllRunCharts(projects) {
+  const sess = DATA.sessions.find(s=>s.d===selectedDate);
+  if (!sess || !sess.projects) return;
+  sess.projects.forEach((proj, idx) => {
+    if (runCanvases[idx]) drawRunChart(runCanvases[idx], proj);
+  });
+}
+
+// ── History chart ──────────────────────────────────────────
+function barColor(avg) {
+  const dk = isDarkMode();
+  if (avg < 80)  return dk ? '#3A9A5A' : '#4BA86A';
+  if (avg < 95)  return dk ? '#B88018' : '#D09520';
+  if (avg < 110) return dk ? '#A84820' : '#C05028';
+  return dk ? '#902010' : '#A02818';
+}
+
+function drawHistory() {
+  const wrap = document.getElementById('histWrap');
+  const canvas = document.getElementById('histCanvas');
+  const W = wrap.offsetWidth;
+  const H = 130;
+  const PAD = {t:10,r:12,b:30,l:36};
+  const ctx = setupCanvas(canvas,W,H);
+  const sessions = DATA.sessions;
+  const n = sessions.length;
+  const cW = W-PAD.l-PAD.r, cH = H-PAD.t-PAD.b;
+
+  const barW = Math.max(5, Math.floor(cW/n)-2);
+  const spacing = (cW - barW*n) / (n+1);
+  const xP = i => PAD.l + spacing + i*(barW+spacing);
+
+  const DB_LO=50, DB_HI=130;
+  const yP = db => PAD.t + cH*(1-(clamp(db,DB_LO,DB_HI)-DB_LO)/(DB_HI-DB_LO));
+
+  ctx.fillStyle = css('--surface'); ctx.fillRect(0,0,W,H);
+
+  // Grid
+  [60,70,80,90,100,110,120].forEach(db=>{
+    const y=yP(db);
+    ctx.strokeStyle=css('--grid'); ctx.lineWidth=1; ctx.setLineDash([]);
+    ctx.beginPath(); ctx.moveTo(PAD.l,y); ctx.lineTo(PAD.l+cW,y); ctx.stroke();
+    ctx.fillStyle=css('--text3'); ctx.font='9px '+css('--font-data');
+    ctx.textAlign='right'; ctx.fillText(db,PAD.l-4,y+3);
+  });
+
+  // 85 dB ref
+  ctx.strokeStyle=css('--warn-line'); ctx.lineWidth=1; ctx.setLineDash([3,4]);
+  ctx.beginPath(); ctx.moveTo(PAD.l,yP(85)); ctx.lineTo(PAD.l+cW,yP(85)); ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Year labels + dividers
+  let prevYear='';
+  sessions.forEach((s,i)=>{
+    const yr=s.d.slice(0,4);
+    if(yr!==prevYear){
+      const x=xP(i);
+      ctx.fillStyle=css('--text3'); ctx.font='9px '+css('--font-ui'); ctx.textAlign='center';
+      ctx.fillText(yr,x+barW/2,H-4);
+      ctx.strokeStyle=css('--grid-border'); ctx.lineWidth=1; ctx.setLineDash([]);
+      ctx.beginPath(); ctx.moveTo(x,PAD.t); ctx.lineTo(x,PAD.t+cH); ctx.stroke();
+      prevYear=yr;
+    }
+  });
+
+  // Bars
+  const barMeta = [];
+  sessions.forEach((s,i)=>{
+    const x=xP(i);
+    const isSel = s.d === selectedDate;
+    const color = isSel ? css('--sel-bar') : barColor(s.avg);
+    const yTop=yP(s.avg), barH=Math.max(2,PAD.t+cH-yTop);
+    ctx.fillStyle=color;
+    ctx.globalAlpha = isSel ? 1 : 0.8;
+    ctx.fillRect(x,yTop,barW,barH);
+    ctx.globalAlpha=1;
+    // Selected: outline
+    if(isSel){
+      ctx.strokeStyle=css('--sel-bar'); ctx.lineWidth=1.5; ctx.setLineDash([]);
+      ctx.strokeRect(x-.5,yTop-.5,barW+1,barH+1);
+    }
+    barMeta.push({s,x,w:barW});
+  });
+
+  // Axis border
+  ctx.strokeStyle=css('--grid-border'); ctx.lineWidth=1; ctx.setLineDash([]);
+  ctx.strokeRect(PAD.l+.5,PAD.t+.5,cW,cH);
+
+  canvas._bars = barMeta;
+}
+
+// History interaction
+const histWrap = document.getElementById('histWrap');
+const histTip = document.getElementById('histTip');
+const histCanvas = document.getElementById('histCanvas');
+
+histWrap.addEventListener('mousemove', e=>{
+  const r=histCanvas.getBoundingClientRect(), mx=e.clientX-r.left;
+  const bars=histCanvas._bars; if(!bars)return;
+  const hit=bars.find(b=>mx>=b.x&&mx<=b.x+b.w);
+  if(hit){
+    const s=hit.s;
+    const detail=s.projects?`${s.projects.length} runs · ` :'';
+    histTip.innerHTML=`<strong>${fmtDate(s.d)}</strong> &nbsp; ${detail}avg&nbsp;${s.avg}&nbsp;dB &nbsp; max&nbsp;${s.mx}&nbsp;dB`;
+    histTip.style.display='block';
+    histTip.style.left=Math.min(mx+10,r.width-230)+'px';
+  } else { histTip.style.display='none'; }
+});
+histWrap.addEventListener('mouseleave',()=>{ histTip.style.display='none'; });
+histWrap.addEventListener('click', e=>{
+  const r=histCanvas.getBoundingClientRect(), mx=e.clientX-r.left;
+  const bars=histCanvas._bars; if(!bars)return;
+  const hit=bars.find(b=>mx>=b.x&&mx<=b.x+b.w);
+  if(hit && hit.s.d !== selectedDate){
+    selectedDate=hit.s.d;
+    renderSessionPanel(selectedDate);
+    drawHistory();
+    drawAllRunCharts(DATA.sessions.find(s=>s.d===selectedDate)?.projects||[]);
+  }
+});
+
+// ── Render & resize ────────────────────────────────────────
+function renderAll(){
+  renderSessionPanel(selectedDate);
+  drawHistory();
+}
+renderAll();
+
+let resizeTimer;
+window.addEventListener('resize',()=>{
+  clearTimeout(resizeTimer);
+  resizeTimer=setTimeout(()=>{
+    drawHistory();
+    drawAllRunCharts(DATA.sessions.find(s=>s.d===selectedDate)?.projects||[]);
+  },120);
+});
+const obs=new MutationObserver(renderAll);
+obs.observe(document.documentElement,{attributes:true,attributeFilter:['data-theme']});
+window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change',renderAll);
+
+// ── Statistics ────────────────────────────────────────────
+function computeStats(laeq, lcpeak) {
+  const n = laeq.length;
+  const sorted = [...laeq].sort((a,b)=>b-a);
+  const leq = 10*Math.log10(laeq.reduce((s,v)=>s+Math.pow(10,v/10),0)/n);
+  const at = pct => sorted[Math.max(0,Math.ceil(n*pct/100)-1)];
+  const above85 = laeq.filter(v=>v>=85).length;
+  return {
+    leq: leq.toFixed(1), la10: at(10).toFixed(1), la50: at(50).toFixed(1),
+    la90: at(90).toFixed(1), lmax: sorted[0].toFixed(1), lmin: sorted[n-1].toFixed(1),
+    pmx: Math.max(...lcpeak).toFixed(1),
+    pct85: (above85/n*100).toFixed(1),
+  };
+}
+
+// ── Modal: large time series ──────────────────────────────
+function drawModalTimeSeries(canvas, proj) {
+  const W = canvas.parentElement.offsetWidth;
+  const H = 300;
+  const ctx = setupCanvas(canvas, W, H);
+  const PAD = {t:14,r:14,b:32,l:50};
+  const cW=W-PAD.l-PAD.r, cH=H-PAD.t-PAD.b;
+  const laeq=proj.laeq, lcpeak=proj.lcpeak, n=laeq.length;
+  if(!n)return;
+  const yP=db=>PAD.t+cH*(1-(clamp(db,Y_MIN,Y_MAX)-Y_MIN)/(Y_MAX-Y_MIN));
+  const xP=i=>PAD.l+(n===1?cW/2:(i/(n-1))*cW);
+  ctx.fillStyle=css('--panel'); ctx.fillRect(0,0,W,H);
+  [[Y_MIN,65,'rgba(50,160,80,.07)'],[65,80,'rgba(200,160,0,.06)'],[80,95,'rgba(210,80,20,.07)'],[95,Y_MAX,'rgba(180,20,10,.07)']].forEach(([lo,hi,c])=>{
+    ctx.fillStyle=c; ctx.fillRect(PAD.l,yP(hi),cW,yP(lo)-yP(hi));
+  });
+  for(let db=50;db<=110;db+=5){
+    if(db<Y_MIN||db>Y_MAX)continue;
+    const y=yP(db), maj=db%10===0;
+    ctx.strokeStyle=css('--grid'); ctx.lineWidth=maj?1:.5; ctx.setLineDash([]);
+    ctx.beginPath();ctx.moveTo(PAD.l,y);ctx.lineTo(PAD.l+cW,y);ctx.stroke();
+    if(maj){ctx.fillStyle=css('--text3');ctx.font='10px '+css('--font-data');ctx.textAlign='right';ctx.fillText(db+' dB',PAD.l-6,y+3);}
+  }
+  // 85 dB ref
+  ctx.strokeStyle=css('--warn-line');ctx.lineWidth=1;ctx.setLineDash([4,5]);
+  ctx.beginPath();ctx.moveTo(PAD.l,yP(85));ctx.lineTo(PAD.l+cW,yP(85));ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle=css('--warn-line');ctx.font='9px '+css('--font-ui');ctx.textAlign='left';ctx.fillText('85 dB',PAD.l+4,yP(85)-4);
+  // Shade >85 regions
+  ctx.fillStyle='rgba(200,40,10,.07)';
+  let inA=false,sX=0;
+  laeq.forEach((v,i)=>{const x=xP(i);if(v>=85&&!inA){inA=true;sX=x;}else if(v<85&&inA){ctx.fillRect(sX,PAD.t,x-sX,cH);inA=false;}});
+  if(inA)ctx.fillRect(sX,PAD.t,xP(n-1)-sX,cH);
+  // LCpeak
+  ctx.strokeStyle=css('--peak');ctx.lineWidth=1;ctx.globalAlpha=.45;
+  ctx.beginPath();lcpeak.forEach((v,i)=>{const x=xP(i),y=yP(v);i?ctx.lineTo(x,y):ctx.moveTo(x,y);});ctx.stroke();ctx.globalAlpha=1;
+  // LAeq fill
+  ctx.fillStyle=css('--laeq-fill');
+  ctx.beginPath();ctx.moveTo(xP(0),yP(Y_MIN));
+  laeq.forEach((v,i)=>ctx.lineTo(xP(i),yP(v)));
+  ctx.lineTo(xP(n-1),yP(Y_MIN));ctx.closePath();ctx.fill();
+  // LAeq line
+  ctx.strokeStyle=css('--laeq');ctx.lineWidth=2;
+  ctx.beginPath();laeq.forEach((v,i)=>{const x=xP(i),y=yP(v);i?ctx.lineTo(x,y):ctx.moveTo(x,y);});ctx.stroke();
+  // X axis
+  const label_n=Math.min(8,Math.floor(cW/80));
+  ctx.fillStyle=css('--text3');ctx.font='10px '+css('--font-ui');
+  for(let j=0;j<=label_n;j++){
+    const frac=j/label_n,secs=Math.round(frac*proj.n),x=PAD.l+frac*cW;
+    ctx.textAlign=j===0?'left':j===label_n?'right':'center';ctx.fillText(fmtDuration(secs),x,H-4);
+  }
+  ctx.strokeStyle=css('--grid-border');ctx.lineWidth=1;ctx.setLineDash([]);ctx.strokeRect(PAD.l+.5,PAD.t+.5,cW,cH);
+  // In-chart legend (top-right, modal)
+  const mleg=[['--laeq',1,2,'LAeq,1s'],['--peak',.5,1,'LCpeak']];
+  const mlx=PAD.l+cW-8, mly=PAD.t+10;
+  ctx.font='11px '+css('--font-ui');ctx.textAlign='right';
+  mleg.forEach(([col,alpha,lw,lbl],i)=>{
+    const y=mly+i*17;
+    ctx.globalAlpha=alpha;ctx.strokeStyle=css(col);ctx.lineWidth=lw+1;ctx.setLineDash([]);
+    ctx.beginPath();ctx.moveTo(mlx-42,y+4);ctx.lineTo(mlx-22,y+4);ctx.stroke();
+    ctx.globalAlpha=1;ctx.fillStyle=css('--text2');ctx.fillText(lbl,mlx,y+8);
+  });
+}
+
+// ── Modal: histogram ──────────────────────────────────────
+function drawHistogram(canvas, laeq) {
+  const W=canvas.parentElement.offsetWidth, H=160;
+  const ctx=setupCanvas(canvas,W,H);
+  const PAD={t:8,r:10,b:26,l:36};
+  const cW=W-PAD.l-PAD.r, cH=H-PAD.t-PAD.b;
+  const BLO=45,BWI=5,NBIN=Math.ceil((120-BLO)/BWI);
+  const bins=new Array(NBIN).fill(0);
+  laeq.forEach(v=>{const b=Math.floor((clamp(v,BLO,119.9)-BLO)/BWI);bins[Math.max(0,Math.min(b,NBIN-1))]++;});
+  const mx=Math.max(...bins,1);
+  ctx.fillStyle=css('--panel');ctx.fillRect(0,0,W,H);
+  const bW=cW/NBIN;
+  bins.forEach((cnt,bi)=>{
+    const db=BLO+bi*BWI,h=cH*(cnt/mx),x=PAD.l+bi*bW,y=PAD.t+cH-h;
+    ctx.fillStyle=db<65?'rgba(50,160,80,.8)':db<80?'rgba(200,160,0,.8)':db<95?'rgba(210,80,20,.8)':'rgba(180,20,10,.8)';
+    ctx.fillRect(x+1,y,bW-2,h);
+  });
+  ctx.fillStyle=css('--text3');ctx.font='9px '+css('--font-data');ctx.textAlign='center';
+  [50,60,70,80,90,100,110].forEach(db=>{
+    if(db<BLO)return;
+    const x=PAD.l+(db-BLO)/BWI*bW;
+    ctx.fillText(db,x,H-3);
+    ctx.strokeStyle=css('--grid');ctx.lineWidth=1;ctx.setLineDash([]);
+    ctx.beginPath();ctx.moveTo(x,PAD.t);ctx.lineTo(x,PAD.t+cH);ctx.stroke();
+  });
+  ctx.strokeStyle=css('--grid-border');ctx.lineWidth=1;ctx.setLineDash([]);ctx.strokeRect(PAD.l+.5,PAD.t+.5,cW,cH);
+}
+
+// ── Modal: exceedance curve ───────────────────────────────
+function drawExceedance(canvas, laeq) {
+  const W=canvas.parentElement.offsetWidth, H=160;
+  const ctx=setupCanvas(canvas,W,H);
+  const PAD={t:8,r:14,b:26,l:36};
+  const cW=W-PAD.l-PAD.r, cH=H-PAD.t-PAD.b;
+  const XLO=48, XHI=115;
+  const xP=db=>PAD.l+(db-XLO)/(XHI-XLO)*cW;
+  const yP=pct=>PAD.t+cH*(1-pct/100);
+  const n=laeq.length;
+  const sorted=[...laeq].sort((a,b)=>a-b);
+  ctx.fillStyle=css('--panel');ctx.fillRect(0,0,W,H);
+  // Grid
+  [10,25,50,75,90].forEach(pct=>{
+    const y=yP(pct);
+    ctx.strokeStyle=css('--grid');ctx.lineWidth=1;ctx.setLineDash([]);
+    ctx.beginPath();ctx.moveTo(PAD.l,y);ctx.lineTo(PAD.l+cW,y);ctx.stroke();
+    ctx.fillStyle=css('--text3');ctx.font='9px '+css('--font-ui');ctx.textAlign='right';ctx.fillText(pct+'%',PAD.l-4,y+3);
+  });
+  [50,60,70,80,90,100,110].forEach(db=>{
+    if(db<XLO||db>XHI)return;
+    const x=xP(db);
+    ctx.strokeStyle=css('--grid');ctx.lineWidth=1;ctx.setLineDash([]);
+    ctx.beginPath();ctx.moveTo(x,PAD.t);ctx.lineTo(x,PAD.t+cH);ctx.stroke();
+    ctx.fillStyle=css('--text3');ctx.font='9px '+css('--font-data');ctx.textAlign='center';ctx.fillText(db,x,H-3);
+  });
+  // 85 ref
+  ctx.strokeStyle=css('--warn-line');ctx.lineWidth=1;ctx.setLineDash([3,4]);
+  ctx.beginPath();ctx.moveTo(xP(85),PAD.t);ctx.lineTo(xP(85),PAD.t+cH);ctx.stroke();ctx.setLineDash([]);
+  // Build curve points
+  const pts=[];
+  for(let db=XLO;db<=XHI;db+=0.5){
+    const exc=sorted.filter(v=>v>=db).length;
+    pts.push({db,pct:exc/n*100});
+  }
+  // Fill
+  ctx.fillStyle=css('--laeq-fill');
+  ctx.beginPath();ctx.moveTo(xP(XLO),yP(100));
+  pts.forEach(p=>ctx.lineTo(xP(p.db),yP(p.pct)));
+  ctx.lineTo(xP(XHI),yP(0));ctx.lineTo(xP(XLO),yP(0));ctx.closePath();ctx.fill();
+  // Curve
+  ctx.strokeStyle=css('--laeq');ctx.lineWidth=2;
+  ctx.beginPath();pts.forEach((p,i)=>{const x=xP(p.db),y=yP(p.pct);i?ctx.lineTo(x,y):ctx.moveTo(x,y);});ctx.stroke();
+  // LA10/LA50/LA90 dots + labels
+  [[10,'LA10'],[50,'LA50'],[90,'LA90']].forEach(([pct,lbl])=>{
+    const pt=pts.find(p=>p.pct<=pct)||pts[pts.length-1];
+    if(!pt)return;
+    const x=xP(pt.db),y=yP(pct);
+    ctx.fillStyle=css('--laeq');ctx.beginPath();ctx.arc(x,y,3,0,Math.PI*2);ctx.fill();
+    ctx.fillStyle=css('--text2');ctx.font='9px '+css('--font-ui');
+    ctx.textAlign=pct<=50?'right':'left';ctx.fillText(lbl+' '+pt.db.toFixed(0)+'dB',x+(pct>50?5:-5),y-4);
+  });
+  ctx.strokeStyle=css('--grid-border');ctx.lineWidth=1;ctx.setLineDash([]);ctx.strokeRect(PAD.l+.5,PAD.t+.5,cW,cH);
+}
+
+// ── Open / close modal ────────────────────────────────────
+function openRunModal(proj, runIdx, date) {
+  const stats = computeStats(proj.laeq, proj.lcpeak);
+  document.getElementById('modalTitle').textContent = `Run ${runIdx+1}  ·  ${proj.start}`;
+  document.getElementById('modalSub').textContent =
+    `${fmtDate(date)}  ·  ${fmtDuration(proj.n)}  ·  ${proj.n.toLocaleString()} samples${proj.step>1?' (downsampled 1/'+proj.step+'s)':''}`;
+  document.getElementById('modalStats').innerHTML = [
+    ['LA<sub>eq</sub> (energy avg)', stats.leq, 'dB', false],
+    ['LA10', stats.la10, 'dB', false],
+    ['LA50 (median)', stats.la50, 'dB', false],
+    ['LA90 (background)', stats.la90, 'dB', false],
+    ['LA<sub>max</sub>', stats.lmax, 'dB', false],
+    ['LA<sub>min</sub>', stats.lmin, 'dB', false],
+    ['LC<sub>peak</sub> max', stats.pmx, 'dB', true],
+    ['Time ≥ 85 dB', stats.pct85, '%', parseFloat(stats.pct85)>5],
+  ].map(([n,v,u,hi])=>`<div class="mstat"><span class="mstat-n">${n}</span><span class="mstat-v${hi?' hi':''}">${v}&thinsp;${u}</span></div>`).join('');
+  document.getElementById('modalOverlay').classList.add('open');
+  document.body.style.overflow='hidden';
+  requestAnimationFrame(()=>{
+    drawModalTimeSeries(document.getElementById('modalMainCanvas'), proj);
+    drawHistogram(document.getElementById('modalHistCanvas'), proj.laeq);
+    drawExceedance(document.getElementById('modalExcCanvas'), proj.laeq);
+  });
+}
+function closeModal(){document.getElementById('modalOverlay').classList.remove('open');document.body.style.overflow='';}
+document.getElementById('modalOverlay').addEventListener('click',e=>{if(e.target===e.currentTarget)closeModal();});
+document.getElementById('modalCloseBtn').addEventListener('click',closeModal);
+document.addEventListener('keydown',e=>{if(e.key==='Escape')closeModal();});
+
+})();
+</script>
