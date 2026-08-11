@@ -5,8 +5,8 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Add Measurements · {{ pi_name }}</title>
 <style>
-:root{--bg:#EFF2F7;--surface:#fff;--border:#D0D8E8;--text:#0C1A2E;--text2:#3D5270;--text3:#7A92AE;--accent:#2660C4;--ok:#1a7f37;--warn:#7a5000;--err:#c0392b;--font:system-ui,-apple-system,'Helvetica Neue',sans-serif}
-@media(prefers-color-scheme:dark){:root{--bg:#090F1C;--surface:#111C30;--border:#1E2E48;--text:#E8EEF8;--text2:#8BA4C4;--text3:#4A6080;--accent:#4A90E8;--ok:#2ea043;--warn:#c49a00;--err:#e05c5c}}
+:root{--bg:#EFF2F7;--surface:#fff;--border:#D0D8E8;--text:#0C1A2E;--text2:#3D5270;--text3:#7A92AE;--accent:#2660C4;--ok:#1a7f37;--err:#c0392b;--font:system-ui,-apple-system,'Helvetica Neue',sans-serif}
+@media(prefers-color-scheme:dark){:root{--bg:#090F1C;--surface:#111C30;--border:#1E2E48;--text:#E8EEF8;--text2:#8BA4C4;--text3:#4A6080;--accent:#4A90E8;--ok:#2ea043;--err:#e05c5c}}
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:var(--font);background:var(--bg);color:var(--text);min-height:100vh}
 .site-nav{display:flex;align-items:center;gap:16px;padding:8px 20px;background:var(--surface);border-bottom:1px solid var(--border);font-size:13px}
@@ -19,26 +19,36 @@ h1{font-size:22px;font-weight:700;margin-bottom:6px}
 .sub{color:var(--text3);font-size:13px;margin-bottom:32px;line-height:1.6}
 .card{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:28px;margin-bottom:20px}
 .steps{counter-reset:step;list-style:none;margin-bottom:24px}
-.steps li{counter-increment:step;display:flex;gap:14px;margin-bottom:16px;font-size:13px;color:var(--text2);line-height:1.5}
-.steps li::before{content:counter(step);background:var(--accent);color:#fff;border-radius:50%;width:22px;height:22px;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;flex-shrink:0;margin-top:1px}
+.steps li{counter-increment:step;display:flex;gap:14px;margin-bottom:16px;font-size:13px;color:var(--text2);line-height:1.6}
+.steps li::before{content:counter(step);background:var(--accent);color:#fff;border-radius:50%;width:22px;height:22px;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;flex-shrink:0;margin-top:2px}
 .mono{font-family:'SF Mono','Cascadia Code','Consolas',monospace;font-size:11px;background:var(--bg);padding:1px 5px;border-radius:3px;border:1px solid var(--border)}
-label{display:block;font-size:13px;font-weight:500;color:var(--text2);margin-bottom:6px}
-input[type=file]{width:100%;border:2px dashed var(--border);border-radius:6px;padding:20px;font-size:13px;background:var(--bg);color:var(--text);margin-bottom:16px;cursor:pointer;text-align:center}
-input[type=file]:hover{border-color:var(--accent)}
-input[type=password]{width:100%;border:1px solid var(--border);border-radius:4px;padding:9px 10px;font-size:13px;background:var(--bg);color:var(--text);margin-bottom:16px}
-.btn{display:inline-block;background:var(--accent);color:#fff;border:none;border-radius:4px;padding:10px 24px;font-size:14px;font-weight:600;cursor:pointer;width:100%}
+.note{font-size:12px;color:var(--text3);margin-top:6px;line-height:1.5}
+.section-label{font-size:11px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--text3);margin-bottom:12px}
+.field{margin-bottom:16px}
+.field:last-child{margin-bottom:0}
+label{display:block;font-size:12px;font-weight:500;color:var(--text2);margin-bottom:5px;letter-spacing:.02em}
+label span{font-weight:400;color:var(--text3)}
+input[type=text],input[type=password],input[type=number]{width:100%;border:1px solid var(--border);border-radius:4px;padding:8px 10px;font-size:13px;background:var(--bg);color:var(--text)}
+input[type=text]:focus,input[type=password]:focus,input[type=number]:focus{outline:none;border-color:var(--accent)}
+.gps-row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.file-drop{width:100%;border:2px dashed var(--border);border-radius:6px;padding:22px;font-size:13px;color:var(--text3);background:var(--bg);cursor:pointer;text-align:center;position:relative}
+.file-drop:hover{border-color:var(--accent);color:var(--text)}
+.file-drop input[type=file]{position:absolute;inset:0;opacity:0;cursor:pointer}
+.file-drop-icon{font-size:24px;margin-bottom:6px}
+.divider{border:none;border-top:1px solid var(--border);margin:22px 0}
+.btn{display:block;width:100%;background:var(--accent);color:#fff;border:none;border-radius:4px;padding:11px 24px;font-size:14px;font-weight:600;cursor:pointer;margin-top:20px}
 .btn:hover{opacity:.9}
 .flash{padding:12px 16px;border-radius:6px;font-size:13px;margin-bottom:20px;line-height:1.5}
 .flash.success{background:rgba(26,127,55,.1);color:var(--ok);border:1px solid rgba(26,127,55,.25)}
 .flash.info{background:rgba(38,96,196,.08);color:var(--accent);border:1px solid rgba(38,96,196,.2)}
 .flash.error{background:rgba(192,57,43,.08);color:var(--err);border:1px solid rgba(192,57,43,.2)}
-.divider{border:none;border-top:1px solid var(--border);margin:24px 0}
 h2{font-size:14px;font-weight:600;color:var(--text2);margin-bottom:14px}
 .log-table{width:100%;border-collapse:collapse;font-size:12px}
 .log-table th{text-align:left;padding:6px 8px;color:var(--text3);border-bottom:1px solid var(--border);font-weight:500}
 .log-table td{padding:6px 8px;border-bottom:1px solid var(--border)}
 .log-table tr:last-child td{border-bottom:none}
 .mf{font-family:'SF Mono','Cascadia Code','Consolas',monospace;font-size:11px}
+.loc-chip{display:inline-block;font-size:11px;color:var(--text3);font-style:italic}
 </style>
 </head>
 <body>
@@ -49,7 +59,7 @@ h2{font-size:14px;font-weight:600;color:var(--text2);margin-bottom:14px}
 </nav>
 <div class="page">
   <h1>Add measurements</h1>
-  <p class="sub">Upload a ZIP of your NOR140 SD card. The system will import only new sessions and automatically update the other Pi.</p>
+  <p class="sub">Upload a ZIP of the NOR140 SD card. Zip from any level — the whole card, a date folder, or a single session. The system will parse everything it finds and skip any dates already recorded.</p>
 
   {% for msg, cat in get_flashed_messages(with_categories=true) %}
   <div class="flash {{ cat }}">{{ msg }}</div>
@@ -58,18 +68,53 @@ h2{font-size:14px;font-weight:600;color:var(--text2);margin-bottom:14px}
   <div class="card">
     <ol class="steps">
       <li>Remove the SD card from the NOR140 and insert it into your computer.</li>
-      <li>Open the SD card and find the <span class="mono">MEAS118</span> folder. Select it and compress it to a ZIP file.</li>
-      <li>Upload the ZIP file below.</li>
+      <li>Select the SD card contents (or any folder on it) and compress to a ZIP. You can zip the whole card, just the <span class="mono">MEAS118</span> folder, a single date folder like <span class="mono">260810</span>, or even a single session — the system handles any of these.</li>
+      <li>Fill in the details below and upload.</li>
     </ol>
 
     <form method="POST" action="/upload" enctype="multipart/form-data">
       {% if needs_password %}
-      <label>Upload password</label>
-      <input type="password" name="upload_password" placeholder="Enter the upload password" required autocomplete="off">
+      <div class="field">
+        <label>Upload password</label>
+        <input type="password" name="upload_password" placeholder="Required to upload" required autocomplete="off">
+      </div>
+      <hr class="divider">
       {% endif %}
 
-      <label>SD card ZIP file</label>
-      <input type="file" name="file" accept=".zip,.json" required>
+      <div class="section-label">About this recording</div>
+
+      <div class="field">
+        <label>Recorded by <span>(optional)</span></label>
+        <input type="text" name="recorder_name" placeholder="e.g. Jane Smith">
+      </div>
+
+      <div class="field">
+        <label>Location description <span>(optional)</span></label>
+        <input type="text" name="location_label" placeholder="e.g. Front of 42 High Street, outside pub entrance">
+      </div>
+
+      <div class="field">
+        <label>Postcode <span>(optional)</span></label>
+        <input type="text" name="postcode" placeholder="e.g. LS1 3AA" style="width:160px">
+      </div>
+
+      <div class="field">
+        <label>GPS coordinates <span>(optional — decimal degrees)</span></label>
+        <div class="gps-row">
+          <input type="number" name="lat" placeholder="Latitude e.g. 53.7978" step="any" min="-90" max="90">
+          <input type="number" name="lng" placeholder="Longitude e.g. -1.5413" step="any" min="-180" max="180">
+        </div>
+        <p class="note">To find coordinates: on iPhone open Maps, long-press the location, tap the coordinates at the top. On Google Maps, long-press to drop a pin then read the numbers at the bottom.</p>
+      </div>
+
+      <hr class="divider">
+
+      <div class="section-label">SD card ZIP file</div>
+      <div class="file-drop" id="fileDrop">
+        <div class="file-drop-icon">📁</div>
+        <div id="fileLabel">Tap to choose a ZIP file, or drag it here</div>
+        <input type="file" name="file" accept=".zip,.json" required onchange="document.getElementById('fileLabel').textContent=this.files[0]?.name||'Choose file'">
+      </div>
 
       <button type="submit" class="btn">Upload and import</button>
     </form>
@@ -77,15 +122,16 @@ h2{font-size:14px;font-weight:600;color:var(--text2);margin-bottom:14px}
 
   {% if log %}
   <div class="card">
-    <h2>Previously imported sessions</h2>
+    <h2>Imported sessions</h2>
     <table class="log-table">
-      <tr><th>Date</th><th>Runs</th><th>LAeq avg</th><th>LA max</th><th>Imported</th></tr>
+      <tr><th>Date</th><th>Runs</th><th>LAeq avg</th><th>LA max</th><th>Location</th><th>Added</th></tr>
       {% for row in log %}
       <tr>
         <td>{{ row.date }}</td>
         <td>{{ row.run_count }}</td>
         <td class="mf">{{ '%.1f'|format(row.avg_laeq) }} dB</td>
         <td class="mf">{{ '%.1f'|format(row.max_laeq) }} dB</td>
+        <td><span class="loc-chip">{{ row.location_label or '—' }}</span></td>
         <td class="mf">{{ row.imported_at[:10] }}</td>
       </tr>
       {% endfor %}

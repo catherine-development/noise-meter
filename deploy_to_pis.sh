@@ -24,6 +24,8 @@ done
 FILES=(
     noise_app.py
     noise_db.py
+    noise_parser.py
+    sync_peer.py
     requirements.txt
     setup.sh
 )

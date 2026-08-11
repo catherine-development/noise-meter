@@ -11,16 +11,36 @@ def get_db():
     return conn
 
 
+def _migrate(conn):
+    existing = {row[1] for row in conn.execute('PRAGMA table_info(sessions)').fetchall()}
+    new_cols = [
+        ('recorder_name',  'TEXT'),
+        ('location_label', 'TEXT'),
+        ('postcode',       'TEXT'),
+        ('lat',            'REAL'),
+        ('lng',            'REAL'),
+    ]
+    for col, typ in new_cols:
+        if col not in existing:
+            conn.execute(f'ALTER TABLE sessions ADD COLUMN {col} {typ}')
+    conn.commit()
+
+
 def init_db():
     conn = get_db()
     conn.executescript('''
         CREATE TABLE IF NOT EXISTS sessions (
-            id          INTEGER PRIMARY KEY,
-            date        TEXT UNIQUE NOT NULL,
-            run_count   INTEGER,
-            avg_laeq    REAL,
-            max_laeq    REAL,
-            imported_at TEXT DEFAULT (datetime('now'))
+            id             INTEGER PRIMARY KEY,
+            date           TEXT UNIQUE NOT NULL,
+            run_count      INTEGER,
+            avg_laeq       REAL,
+            max_laeq       REAL,
+            recorder_name  TEXT,
+            location_label TEXT,
+            postcode       TEXT,
+            lat            REAL,
+            lng            REAL,
+            imported_at    TEXT DEFAULT (datetime('now'))
         );
         CREATE TABLE IF NOT EXISTS runs (
             id          INTEGER PRIMARY KEY,
@@ -45,22 +65,36 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_runs_session  ON runs(session_id);
     ''')
     conn.commit()
+    _migrate(conn)
     conn.close()
 
 
-def import_sessions(sessions_data):
+def import_sessions(sessions_data, metadata=None):
+    meta = metadata or {}
     conn = get_db()
     imported = 0
     for sess in sessions_data:
         date = sess['d']
         projects = sess.get('projects', [])
         conn.execute(
-            'INSERT INTO sessions (date, run_count, avg_laeq, max_laeq) VALUES (?,?,?,?) '
+            'INSERT INTO sessions '
+            '  (date, run_count, avg_laeq, max_laeq, recorder_name, location_label, postcode, lat, lng) '
+            'VALUES (?,?,?,?,?,?,?,?,?) '
             'ON CONFLICT(date) DO UPDATE SET '
             '  run_count=excluded.run_count, '
             '  avg_laeq=excluded.avg_laeq, '
-            '  max_laeq=excluded.max_laeq',
-            (date, len(projects), sess.get('avg', 0), sess.get('mx', 0))
+            '  max_laeq=excluded.max_laeq, '
+            '  recorder_name=COALESCE(excluded.recorder_name, sessions.recorder_name), '
+            '  location_label=COALESCE(excluded.location_label, sessions.location_label), '
+            '  postcode=COALESCE(excluded.postcode, sessions.postcode), '
+            '  lat=COALESCE(excluded.lat, sessions.lat), '
+            '  lng=COALESCE(excluded.lng, sessions.lng)',
+            (date, len(projects), sess.get('avg', 0), sess.get('mx', 0),
+             meta.get('recorder_name') or None,
+             meta.get('location_label') or None,
+             meta.get('postcode') or None,
+             meta.get('lat') or None,
+             meta.get('lng') or None)
         )
         sess_id = conn.execute('SELECT id FROM sessions WHERE date=?', (date,)).fetchone()['id']
         for i, proj in enumerate(projects, 1):
@@ -94,9 +128,14 @@ def get_all_sessions_json():
             'SELECT * FROM runs WHERE session_id=? ORDER BY run_number', (sess['id'],)
         ).fetchall()
         result.append({
-            'd': sess['date'],
-            'avg': sess['avg_laeq'],
-            'mx': sess['max_laeq'],
+            'd':    sess['date'],
+            'avg':  sess['avg_laeq'],
+            'mx':   sess['max_laeq'],
+            'name': sess['recorder_name'],
+            'loc':  sess['location_label'],
+            'post': sess['postcode'],
+            'lat':  sess['lat'],
+            'lng':  sess['lng'],
             'projects': [{
                 'start':   r['start_time'],
                 'n':       r['n_samples'],
@@ -150,9 +189,14 @@ def get_sessions_since(since):
             'SELECT * FROM runs WHERE session_id=? ORDER BY run_number', (sess['id'],)
         ).fetchall()
         result.append({
-            'd': sess['date'],
-            'avg': sess['avg_laeq'],
-            'mx': sess['max_laeq'],
+            'd':    sess['date'],
+            'avg':  sess['avg_laeq'],
+            'mx':   sess['max_laeq'],
+            'name': sess['recorder_name'],
+            'loc':  sess['location_label'],
+            'post': sess['postcode'],
+            'lat':  sess['lat'],
+            'lng':  sess['lng'],
             'projects': [{
                 'start':   r['start_time'],
                 'n':       r['n_samples'],
@@ -172,7 +216,7 @@ def get_sessions_since(since):
 def get_import_log(limit=20):
     conn = get_db()
     rows = conn.execute(
-        'SELECT date, run_count, avg_laeq, max_laeq, imported_at '
+        'SELECT date, run_count, avg_laeq, max_laeq, location_label, imported_at '
         'FROM sessions ORDER BY imported_at DESC LIMIT ?', (limit,)
     ).fetchall()
     conn.close()

@@ -145,6 +145,19 @@ def do_upload():
         flash('No valid measurement sessions found in the file.', 'error')
         return redirect(url_for('upload_page'))
 
+    # Collect optional metadata
+    def _float(key):
+        try: return float(request.form.get(key, '').strip()) or None
+        except (ValueError, TypeError): return None
+
+    metadata = {
+        'recorder_name':  request.form.get('recorder_name', '').strip() or None,
+        'location_label': request.form.get('location_label', '').strip() or None,
+        'postcode':       request.form.get('postcode', '').strip().upper() or None,
+        'lat':            _float('lat'),
+        'lng':            _float('lng'),
+    }
+
     # Duplicate check
     existing = get_existing_dates()
     new_sessions = [s for s in parsed if s['d'] not in existing]
@@ -156,7 +169,7 @@ def do_upload():
         return redirect(url_for('upload_page'))
 
     # Import new sessions
-    import_sessions(new_sessions)
+    import_sessions(new_sessions, metadata=metadata)
 
     # Push to peer Pi in background
     _push_to_peer(new_sessions)
