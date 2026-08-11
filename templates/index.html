@@ -122,6 +122,11 @@ body{background:var(--bg);color:var(--text);font-family:var(--font-ui);font-size
 .modal-sub{font-size:11px;color:var(--text3);margin-top:2px}
 .modal-close{background:none;border:1px solid var(--border);border-radius:4px;width:28px;height:28px;cursor:pointer;color:var(--text2);font-size:14px;display:flex;align-items:center;justify-content:center;flex-shrink:0;line-height:1}
 .modal-close:hover{background:var(--panel)}
+.modal-meta-row{display:flex;align-items:center;gap:8px;margin-top:6px;flex-wrap:wrap}
+.modal-meta-row .meta-chip{font-size:11px}
+.modal-meta-edit-btn{font-size:11px;color:var(--text3);border:1px solid var(--border);border-radius:4px;padding:2px 8px;background:var(--bg);cursor:pointer;font-family:var(--font)}
+.modal-meta-edit-btn:hover{color:var(--text)}
+.modal-meta-form{border-top:1px solid var(--border);padding:14px 18px;background:var(--bg);margin-bottom:14px}
 .modal-body{padding:18px}
 .modal-main-wrap{height:300px;margin-bottom:16px;background:var(--panel);border:1px solid var(--border);border-radius:4px;overflow:hidden}
 .modal-main-wrap canvas{display:block;width:100%;height:100%}
@@ -234,10 +239,34 @@ body{background:var(--bg);color:var(--text);font-family:var(--font-ui);font-size
       <div>
         <div id="modalTitle" class="modal-title"></div>
         <div id="modalSub" class="modal-sub"></div>
+        <div class="modal-meta-row">
+          <div id="modalMetaChips"></div>
+          <button class="modal-meta-edit-btn" onclick="openModalMetaEdit()">Edit metadata</button>
+        </div>
       </div>
       <button id="modalCloseBtn" class="modal-close" aria-label="Close">&#x2715;</button>
     </div>
     <div class="modal-body">
+      <div id="modalMetaForm" class="modal-meta-form" style="display:none">
+        <input type="hidden" id="modal-mf-date">
+        <div class="mf-grid">
+          <div class="mf-field"><label>Recorded by</label><input type="text" id="modal-mf-name" placeholder="e.g. Jane Smith"></div>
+          <div class="mf-field"><label>Postcode</label><input type="text" id="modal-mf-post" placeholder="e.g. LS1 3AA"></div>
+          <div class="mf-field" style="grid-column:span 2"><label>Location description</label><input type="text" id="modal-mf-loc" placeholder="e.g. Outside 42 High Street"></div>
+          <div class="mf-field" style="grid-column:span 2">
+            <label>GPS <span style="text-transform:none;font-weight:400;letter-spacing:0">(decimal degrees)</span></label>
+            <div class="mf-gps">
+              <input type="number" id="modal-mf-lat" placeholder="Latitude" step="any" min="-90" max="90">
+              <input type="number" id="modal-mf-lng" placeholder="Longitude" step="any" min="-180" max="180">
+            </div>
+          </div>
+        </div>
+        <div class="mf-footer">
+          <button class="mf-save" onclick="saveModalMetaEdit()">Save</button>
+          <button class="mf-cancel" onclick="closeModalMetaEdit()">Cancel</button>
+          <span class="mf-status" id="modal-mf-status"></span>
+        </div>
+      </div>
       <div class="modal-main-wrap"><canvas id="modalMainCanvas"></canvas></div>
       <div class="modal-bottom">
         <div class="modal-stats" id="modalStats"></div>
@@ -876,9 +905,23 @@ function drawExceedance(canvas, laeq) {
 // ── Open / close modal ────────────────────────────────────
 function openRunModal(proj, runIdx, date) {
   const stats = computeStats(proj.laeq, proj.lcpeak);
+  const sess = DATA.sessions.find(s => s.d === date);
   document.getElementById('modalTitle').textContent = `Run ${runIdx+1}  ·  ${proj.start}`;
   document.getElementById('modalSub').textContent =
     `${fmtDate(date)}  ·  ${fmtDuration(proj.n)}  ·  ${proj.n.toLocaleString()} samples${proj.step>1?' (downsampled 1/'+proj.step+'s)':''}`;
+
+  // Metadata chips
+  document.getElementById('modalMetaChips').innerHTML = metaChipsHtml(sess);
+
+  // Pre-fill edit form
+  document.getElementById('modal-mf-date').value = date;
+  document.getElementById('modal-mf-name').value = sess.name || '';
+  document.getElementById('modal-mf-loc').value  = sess.loc  || '';
+  document.getElementById('modal-mf-post').value = sess.post || '';
+  document.getElementById('modal-mf-lat').value  = sess.lat  != null ? sess.lat : '';
+  document.getElementById('modal-mf-lng').value  = sess.lng  != null ? sess.lng : '';
+  closeModalMetaEdit();
+
   document.getElementById('modalStats').innerHTML = [
     ['LA<sub>eq</sub> (energy avg)', stats.leq, 'dB', false],
     ['LA10', stats.la10, 'dB', false],
@@ -897,10 +940,73 @@ function openRunModal(proj, runIdx, date) {
     drawExceedance(document.getElementById('modalExcCanvas'), proj.laeq);
   });
 }
+function openModalMetaEdit() {
+  document.getElementById('modalMetaForm').style.display = 'block';
+  document.getElementById('modal-mf-name').focus();
+}
+function closeModalMetaEdit() {
+  document.getElementById('modalMetaForm').style.display = 'none';
+  document.getElementById('modal-mf-status').textContent = '';
+}
+function saveModalMetaEdit() {
+  const date = document.getElementById('modal-mf-date').value;
+  const g = id => document.getElementById('modal-mf-' + id).value.trim();
+  const fl = v => { const n = parseFloat(v); return isNaN(n) ? '' : n; };
+  const body = new URLSearchParams({
+    recorder_name:  g('name'),
+    location_label: g('loc'),
+    postcode:       g('post').toUpperCase(),
+    lat:            fl(g('lat')),
+    lng:            fl(g('lng')),
+  });
+  const status = document.getElementById('modal-mf-status');
+  status.style.color = 'var(--text3)';
+  status.textContent = 'Saving…';
+  fetch('/session/' + date + '/edit', {
+    method: 'POST',
+    headers: {'X-Requested-With': 'XMLHttpRequest',
+              'Content-Type': 'application/x-www-form-urlencoded'},
+    body: body.toString(),
+  })
+  .then(r => r.json())
+  .then(json => {
+    if (json.status !== 'ok') throw new Error(json.error || 'Error');
+    const sess = DATA.sessions.find(s => s.d === date);
+    if (sess) {
+      sess.name = g('name') || null;
+      sess.loc  = g('loc')  || null;
+      sess.post = g('post').toUpperCase() || null;
+      const lat = fl(g('lat')), lng = fl(g('lng'));
+      sess.lat = lat !== '' ? lat : null;
+      sess.lng = lng !== '' ? lng : null;
+    }
+    // Refresh chips in modal and in session panel (if visible)
+    document.getElementById('modalMetaChips').innerHTML = metaChipsHtml(sess);
+    const panelChips = document.getElementById('meta-chips-' + date);
+    if (panelChips) panelChips.innerHTML = metaChipsHtml(sess);
+    const locEl = document.getElementById('sessLocation');
+    if (locEl) locEl.textContent = [sess.name, sess.loc, sess.post].filter(Boolean).join(' · ');
+    status.style.color = 'var(--ok, #1a7f37)';
+    status.textContent = 'Saved ✓';
+    setTimeout(closeModalMetaEdit, 900);
+  })
+  .catch(err => {
+    status.style.color = 'var(--err, #c0392b)';
+    status.textContent = 'Error: ' + err.message;
+  });
+}
 function closeModal(){document.getElementById('modalOverlay').classList.remove('open');document.body.style.overflow='';}
 document.getElementById('modalOverlay').addEventListener('click',e=>{if(e.target===e.currentTarget)closeModal();});
 document.getElementById('modalCloseBtn').addEventListener('click',closeModal);
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closeModal();});
+
+// Expose onclick-called functions to global scope (they're inside the IIFE)
+window.openMetaEdit       = openMetaEdit;
+window.closeMetaEdit      = closeMetaEdit;
+window.saveMetaEdit       = saveMetaEdit;
+window.openModalMetaEdit  = openModalMetaEdit;
+window.closeModalMetaEdit = closeModalMetaEdit;
+window.saveModalMetaEdit  = saveModalMetaEdit;
 
 })();
 </script>
