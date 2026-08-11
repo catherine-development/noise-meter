@@ -149,6 +149,29 @@ body{background:var(--bg);color:var(--text);font-family:var(--font-ui);font-size
 .nav-tab.active{color:var(--laeq);border-bottom-color:var(--laeq)}
 .nav-tab-primary{background:var(--laeq);color:#fff!important;border-radius:4px;padding:5px 12px;margin-left:8px;border-bottom:none!important}
 .nav-tab-primary:hover{opacity:.9}
+
+/* Metadata strip below runs */
+.meta-strip{border-top:1px solid var(--border);padding:10px 16px;background:var(--panel);display:flex;align-items:center;gap:10px;flex-wrap:wrap;min-height:40px}
+.meta-chips{display:flex;gap:7px;flex-wrap:wrap;flex:1;min-width:0}
+.meta-chip{font-size:11px;color:var(--text3);background:var(--bg);border:1px solid var(--border);border-radius:12px;padding:2px 9px;white-space:nowrap}
+.meta-chip strong{color:var(--text2);font-weight:500}
+.meta-chip.empty{font-style:italic}
+.meta-edit-btn{font-size:11px;color:var(--text3);border:1px solid var(--border);border-radius:4px;padding:3px 9px;background:var(--bg);cursor:pointer;white-space:nowrap;font-family:var(--font)}
+.meta-edit-btn:hover{color:var(--text);border-color:var(--text2)}
+.meta-form-wrap{display:none;border-top:1px solid var(--border);padding:14px 16px;background:var(--bg)}
+.meta-form-wrap.open{display:block}
+.mf-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px 16px;margin-bottom:12px}
+@media(max-width:560px){.mf-grid{grid-template-columns:1fr}}
+.mf-field label{display:block;font-size:10.5px;font-weight:500;letter-spacing:.05em;text-transform:uppercase;color:var(--text3);margin-bottom:3px}
+.mf-field input{width:100%;border:1px solid var(--border);border-radius:4px;padding:6px 8px;font-size:12px;background:var(--surface);color:var(--text);font-family:var(--font)}
+.mf-field input:focus{outline:none;border-color:var(--laeq)}
+.mf-gps{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.mf-footer{display:flex;align-items:center;gap:8px}
+.mf-save{background:var(--laeq);color:#fff;border:none;border-radius:4px;padding:6px 16px;font-size:12px;font-weight:600;cursor:pointer;font-family:var(--font)}
+.mf-save:hover{opacity:.9}
+.mf-cancel{background:none;border:1px solid var(--border);border-radius:4px;padding:6px 12px;font-size:12px;cursor:pointer;color:var(--text2);font-family:var(--font)}
+.mf-cancel:hover{background:var(--surface)}
+.mf-status{font-size:11px;margin-left:4px}
 </style>
 
 <nav class="site-nav">
@@ -314,6 +337,119 @@ function renderSessionPanel(date) {
         Full time-series data is loaded for: <code>${TODAY_DATE}</code>
       </div>`;
   }
+  appendMetaSection(content, sess, date);
+}
+
+// ── Metadata strip ─────────────────────────────────────────
+function esc(s) {
+  return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function metaChipsHtml(sess) {
+  const chips = [];
+  if (sess.name) chips.push(`<span class="meta-chip"><strong>By</strong> ${esc(sess.name)}</span>`);
+  if (sess.loc)  chips.push(`<span class="meta-chip">${esc(sess.loc)}</span>`);
+  if (sess.post) chips.push(`<span class="meta-chip">${esc(sess.post)}</span>`);
+  if (sess.lat != null && sess.lng != null)
+    chips.push(`<span class="meta-chip">${sess.lat.toFixed(5)}, ${sess.lng.toFixed(5)}</span>`);
+  return chips.length
+    ? chips.join('')
+    : '<span class="meta-chip empty">No location data recorded</span>';
+}
+
+function appendMetaSection(container, sess, date) {
+  const strip = document.createElement('div');
+  strip.id = 'meta-strip-' + date;
+  strip.innerHTML = `
+    <div class="meta-strip">
+      <div class="meta-chips" id="meta-chips-${date}">${metaChipsHtml(sess)}</div>
+      <button class="meta-edit-btn" onclick="openMetaEdit('${date}')">Edit metadata</button>
+    </div>
+    <div class="meta-form-wrap" id="meta-form-${date}">
+      <div class="mf-grid">
+        <div class="mf-field">
+          <label>Recorded by</label>
+          <input id="mf-name-${date}" name="recorder_name" value="${esc(sess.name)}" placeholder="e.g. Jane Smith">
+        </div>
+        <div class="mf-field">
+          <label>Postcode</label>
+          <input id="mf-post-${date}" name="postcode" value="${esc(sess.post)}" placeholder="e.g. LS1 3AA">
+        </div>
+        <div class="mf-field" style="grid-column:span 2">
+          <label>Location description</label>
+          <input id="mf-loc-${date}" name="location_label" value="${esc(sess.loc)}" placeholder="e.g. Outside 42 High Street">
+        </div>
+        <div class="mf-field" style="grid-column:span 2">
+          <label>GPS coordinates <span style="text-transform:none;font-weight:400;letter-spacing:0">(decimal degrees)</span></label>
+          <div class="mf-gps">
+            <input id="mf-lat-${date}" type="number" name="lat" value="${sess.lat??''}" placeholder="Latitude" step="any" min="-90" max="90">
+            <input id="mf-lng-${date}" type="number" name="lng" value="${sess.lng??''}" placeholder="Longitude" step="any" min="-180" max="180">
+          </div>
+        </div>
+      </div>
+      <div class="mf-footer">
+        <button class="mf-save" onclick="saveMetaEdit('${date}')">Save</button>
+        <button class="mf-cancel" onclick="closeMetaEdit('${date}')">Cancel</button>
+        <span class="mf-status" id="mf-status-${date}"></span>
+      </div>
+    </div>`;
+  container.appendChild(strip);
+}
+
+function openMetaEdit(date) {
+  document.getElementById('meta-form-' + date).classList.add('open');
+  document.getElementById('mf-name-' + date).focus();
+}
+function closeMetaEdit(date) {
+  document.getElementById('meta-form-' + date).classList.remove('open');
+  document.getElementById('mf-status-' + date).textContent = '';
+}
+
+function saveMetaEdit(date) {
+  const g = id => document.getElementById(id + '-' + date).value.trim();
+  const fl = v => { const n = parseFloat(v); return isNaN(n) ? '' : n; };
+  const body = new URLSearchParams({
+    recorder_name:  g('mf-name'),
+    location_label: g('mf-loc'),
+    postcode:       g('mf-post').toUpperCase(),
+    lat:            fl(g('mf-lat')),
+    lng:            fl(g('mf-lng')),
+  });
+  const status = document.getElementById('mf-status-' + date);
+  status.style.color = 'var(--text3)';
+  status.textContent = 'Saving…';
+
+  fetch('/session/' + date + '/edit', {
+    method: 'POST',
+    headers: {'X-Requested-With': 'XMLHttpRequest',
+              'Content-Type': 'application/x-www-form-urlencoded'},
+    body: body.toString(),
+  })
+  .then(r => r.json())
+  .then(json => {
+    if (json.status !== 'ok') throw new Error(json.error || 'Error');
+    // Update in-memory data
+    const sess = DATA.sessions.find(s => s.d === date);
+    if (sess) {
+      sess.name = g('mf-name') || null;
+      sess.loc  = g('mf-loc')  || null;
+      sess.post = g('mf-post').toUpperCase() || null;
+      const lat = fl(g('mf-lat')), lng = fl(g('mf-lng'));
+      sess.lat = lat !== '' ? lat : null;
+      sess.lng = lng !== '' ? lng : null;
+    }
+    // Refresh chips and header subtitle
+    document.getElementById('meta-chips-' + date).innerHTML = metaChipsHtml(sess);
+    const locParts = [sess.name, sess.loc, sess.post].filter(Boolean);
+    document.getElementById('sessLocation').textContent = locParts.join(' · ');
+    status.style.color = 'var(--ok, #1a7f37)';
+    status.textContent = 'Saved ✓';
+    setTimeout(() => closeMetaEdit(date), 900);
+  })
+  .catch(err => {
+    status.style.color = 'var(--err, #c0392b)';
+    status.textContent = 'Error: ' + err.message;
+  });
 }
 
 // ── Runs grid ──────────────────────────────────────────────
@@ -555,6 +691,12 @@ histWrap.addEventListener('click', e=>{
 function renderAll(){
   renderSessionPanel(selectedDate);
   drawHistory();
+}
+
+// Pre-select a date from ?date= URL param (used by Manage → View link)
+const _urlDate = new URLSearchParams(window.location.search).get('date');
+if (_urlDate && DATA.sessions.find(s => s.d === _urlDate)) {
+  selectedDate = _urlDate;
 }
 renderAll();
 

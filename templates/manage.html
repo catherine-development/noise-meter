@@ -105,6 +105,7 @@ h1{font-size:20px;font-weight:700;margin-bottom:4px}
         </span>
         <span class="sess-loc-preview">{{ [s.recorder_name, s.location_label, s.postcode] | select | join(' · ') or '— no metadata —' }}</span>
         <span class="sess-actions" onclick="event.stopPropagation()">
+          <a class="btn-icon" href="/?date={{ s.date }}">View</a>
           <button class="btn-icon" onclick="toggleRow('{{ s.date }}')">Edit</button>
           <button class="btn-icon btn-del" onclick="confirmDel('{{ s.date }}')">Delete</button>
         </span>

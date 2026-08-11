@@ -207,6 +207,8 @@ def edit_session(date):
         lat            = _float('lat'),
         lng            = _float('lng'),
     )
+    if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
+        return jsonify({'status': 'ok', 'date': date})
     flash(f'Session {date} updated.', 'success')
     return redirect(url_for('manage_page', open=date))
 
