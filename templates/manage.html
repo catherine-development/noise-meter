@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Manage Sessions · {{ pi_name }}</title>
+<style>
+:root{--bg:#EFF2F7;--surface:#fff;--border:#D0D8E8;--text:#0C1A2E;--text2:#3D5270;--text3:#7A92AE;--accent:#2660C4;--ok:#1a7f37;--err:#c0392b;--warn:#7a5000;--font:system-ui,-apple-system,'Helvetica Neue',sans-serif;--font-data:'SF Mono','Cascadia Code','Consolas',monospace}
+@media(prefers-color-scheme:dark){:root{--bg:#090F1C;--surface:#111C30;--border:#1E2E48;--text:#E8EEF8;--text2:#8BA4C4;--text3:#4A6080;--accent:#4A90E8;--ok:#2ea043;--err:#e05c5c;--warn:#c49a00}}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:var(--font);background:var(--bg);color:var(--text);min-height:100vh}
+
+/* Nav */
+.site-nav{display:flex;align-items:center;gap:0;padding:0 20px;background:var(--surface);border-bottom:1px solid var(--border);font-size:13px}
+.nav-brand{font-weight:600;letter-spacing:-.01em;margin-right:24px}
+.nav-pi{color:var(--text3);font-size:11px;margin-right:auto;padding-right:16px}
+.nav-tab{color:var(--text2);text-decoration:none;padding:12px 14px;border-bottom:2px solid transparent;white-space:nowrap;font-size:13px;font-weight:500;transition:color .15s}
+.nav-tab:hover{color:var(--text)}
+.nav-tab.active{color:var(--accent);border-bottom-color:var(--accent)}
+.nav-tab-primary{background:var(--accent);color:#fff!important;border-radius:4px;padding:5px 12px;margin-left:8px;border-bottom:none!important}
+.nav-tab-primary:hover{opacity:.9}
+
+.page{max-width:960px;margin:32px auto;padding:0 20px 60px}
+h1{font-size:20px;font-weight:700;margin-bottom:4px}
+.sub{color:var(--text3);font-size:13px;margin-bottom:24px}
+
+.flash{padding:11px 15px;border-radius:6px;font-size:13px;margin-bottom:18px;line-height:1.5}
+.flash.success{background:rgba(26,127,55,.1);color:var(--ok);border:1px solid rgba(26,127,55,.25)}
+.flash.error{background:rgba(192,57,43,.08);color:var(--err);border:1px solid rgba(192,57,43,.2)}
+
+/* Session list */
+.sess-list{background:var(--surface);border:1px solid var(--border);border-radius:8px;overflow:hidden}
+.sess-row{border-bottom:1px solid var(--border)}
+.sess-row:last-child{border-bottom:none}
+
+.sess-summary{display:flex;align-items:center;gap:0;padding:11px 16px;cursor:pointer;user-select:none}
+.sess-summary:hover{background:var(--bg)}
+.sess-toggle{font-size:11px;color:var(--text3);width:18px;flex-shrink:0;transition:transform .2s}
+.sess-toggle.open{transform:rotate(90deg)}
+.sess-date{font-family:var(--font-data);font-size:13px;font-weight:600;font-variant-numeric:tabular-nums;width:90px;flex-shrink:0}
+.sess-stats{display:flex;gap:20px;flex:1;min-width:0}
+.sess-stat{font-size:11px;color:var(--text3);white-space:nowrap}
+.sess-stat span{font-family:var(--font-data);color:var(--text);font-size:12px}
+.sess-loc-preview{flex:1;font-size:12px;color:var(--text3);font-style:italic;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;padding:0 12px}
+.sess-actions{display:flex;gap:6px;flex-shrink:0}
+.btn-icon{border:1px solid var(--border);border-radius:4px;padding:4px 9px;font-size:11px;cursor:pointer;background:var(--bg);color:var(--text2);font-family:var(--font);white-space:nowrap}
+.btn-icon:hover{background:var(--border)}
+.btn-del{border-color:rgba(192,57,43,.3);color:var(--err)}
+.btn-del:hover{background:rgba(192,57,43,.08);border-color:var(--err)}
+
+/* Edit panel (expanded) */
+.sess-edit{display:none;padding:16px 20px 20px;border-top:1px solid var(--border);background:var(--bg)}
+.sess-edit.open{display:block}
+.edit-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px 20px;margin-bottom:16px}
+@media(max-width:600px){.edit-grid{grid-template-columns:1fr}}
+.field label{display:block;font-size:11px;font-weight:500;letter-spacing:.04em;text-transform:uppercase;color:var(--text3);margin-bottom:4px}
+.field input{width:100%;border:1px solid var(--border);border-radius:4px;padding:7px 9px;font-size:13px;background:var(--surface);color:var(--text)}
+.field input:focus{outline:none;border-color:var(--accent)}
+.gps-row{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.edit-footer{display:flex;align-items:center;gap:10px}
+.btn-save{background:var(--accent);color:#fff;border:none;border-radius:4px;padding:7px 18px;font-size:13px;font-weight:600;cursor:pointer}
+.btn-save:hover{opacity:.9}
+.btn-cancel{background:none;border:1px solid var(--border);border-radius:4px;padding:7px 14px;font-size:13px;cursor:pointer;color:var(--text2);font-family:var(--font)}
+.btn-cancel:hover{background:var(--surface)}
+
+/* Delete confirmation overlay */
+.del-confirm{display:none;padding:14px 20px;background:rgba(192,57,43,.06);border-top:1px solid rgba(192,57,43,.2)}
+.del-confirm.open{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.del-msg{font-size:13px;color:var(--err);flex:1}
+.btn-del-confirm{background:var(--err);color:#fff;border:none;border-radius:4px;padding:7px 16px;font-size:13px;font-weight:600;cursor:pointer}
+.btn-del-confirm:hover{opacity:.9}
+
+.empty{padding:40px;text-align:center;color:var(--text3);font-size:13px}
+</style>
+</head>
+<body>
+<nav class="site-nav">
+  <span class="nav-brand">NOR140 Noise Monitor</span>
+  <span class="nav-pi">{{ pi_name }}</span>
+  <a href="/" class="nav-tab">Sessions</a>
+  <a href="/manage" class="nav-tab active">Manage</a>
+  <a href="/upload" class="nav-tab nav-tab-primary">+ Add</a>
+</nav>
+
+<div class="page">
+  <h1>Manage sessions</h1>
+  <p class="sub">Click a row to edit its metadata, or delete it. Changes sync to the other Pi automatically.</p>
+
+  {% for msg, cat in get_flashed_messages(with_categories=true) %}
+  <div class="flash {{ cat }}">{{ msg }}</div>
+  {% endfor %}
+
+  {% if sessions %}
+  <div class="sess-list">
+    {% for s in sessions %}
+    <div class="sess-row" id="row-{{ s.date }}">
+
+      <div class="sess-summary" onclick="toggleRow('{{ s.date }}')">
+        <span class="sess-toggle" id="tog-{{ s.date }}">▶</span>
+        <span class="sess-date">{{ s.date }}</span>
+        <span class="sess-stats">
+          <span class="sess-stat">Runs&nbsp;<span>{{ s.run_count }}</span></span>
+          <span class="sess-stat">LAeq&nbsp;<span>{{ '%.1f'|format(s.avg_laeq) }}&nbsp;dB</span></span>
+          <span class="sess-stat">Max&nbsp;<span>{{ '%.1f'|format(s.max_laeq) }}&nbsp;dB</span></span>
+        </span>
+        <span class="sess-loc-preview">{{ [s.recorder_name, s.location_label, s.postcode] | select | join(' · ') or '— no metadata —' }}</span>
+        <span class="sess-actions" onclick="event.stopPropagation()">
+          <button class="btn-icon" onclick="toggleRow('{{ s.date }}')">Edit</button>
+          <button class="btn-icon btn-del" onclick="confirmDel('{{ s.date }}')">Delete</button>
+        </span>
+      </div>
+
+      <div class="del-confirm" id="del-{{ s.date }}">
+        <span class="del-msg">Delete {{ s.date }} and all its runs? This cannot be undone.</span>
+        <form method="POST" action="/session/{{ s.date }}/delete" style="display:inline">
+          <button type="submit" class="btn-del-confirm">Yes, delete</button>
+        </form>
+        <button class="btn-cancel" onclick="closeDel('{{ s.date }}')">Cancel</button>
+      </div>
+
+      <div class="sess-edit" id="edit-{{ s.date }}">
+        <form method="POST" action="/session/{{ s.date }}/edit">
+          <div class="edit-grid">
+            <div class="field">
+              <label>Recorded by</label>
+              <input type="text" name="recorder_name" value="{{ s.recorder_name or '' }}" placeholder="e.g. Jane Smith">
+            </div>
+            <div class="field">
+              <label>Postcode</label>
+              <input type="text" name="postcode" value="{{ s.postcode or '' }}" placeholder="e.g. LS1 3AA">
+            </div>
+            <div class="field" style="grid-column:span 2" id="loc-span-{{ s.date }}">
+              <label>Location description</label>
+              <input type="text" name="location_label" value="{{ s.location_label or '' }}" placeholder="e.g. Front of 42 High Street, outside pub entrance">
+            </div>
+            <div class="field" style="grid-column:span 2">
+              <label>GPS coordinates <span style="font-weight:400;text-transform:none;letter-spacing:0">(decimal degrees)</span></label>
+              <div class="gps-row">
+                <input type="number" name="lat" value="{{ s.lat or '' }}" placeholder="Latitude e.g. 53.7978" step="any" min="-90" max="90">
+                <input type="number" name="lng" value="{{ s.lng or '' }}" placeholder="Longitude e.g. -1.5413" step="any" min="-180" max="180">
+              </div>
+            </div>
+          </div>
+          <div class="edit-footer">
+            <button type="submit" class="btn-save">Save</button>
+            <button type="button" class="btn-cancel" onclick="closeRow('{{ s.date }}')">Cancel</button>
+          </div>
+        </form>
+      </div>
+
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div class="sess-list"><div class="empty">No sessions in database yet.</div></div>
+  {% endif %}
+</div>
+
+<script>
+function toggleRow(date) {
+  const edit = document.getElementById('edit-' + date);
+  const tog  = document.getElementById('tog-' + date);
+  const isOpen = edit.classList.contains('open');
+  closeAll();
+  if (!isOpen) {
+    edit.classList.add('open');
+    tog.classList.add('open');
+    edit.querySelector('input').focus();
+  }
+}
+function closeRow(date) {
+  document.getElementById('edit-' + date).classList.remove('open');
+  document.getElementById('tog-' + date).classList.remove('open');
+}
+function confirmDel(date) {
+  closeAll();
+  document.getElementById('del-' + date).classList.add('open');
+}
+function closeDel(date) {
+  document.getElementById('del-' + date).classList.remove('open');
+}
+function closeAll() {
+  document.querySelectorAll('.sess-edit.open').forEach(el => {
+    el.classList.remove('open');
+    document.getElementById('tog-' + el.id.replace('edit-', '')).classList.remove('open');
+  });
+  document.querySelectorAll('.del-confirm.open').forEach(el => el.classList.remove('open'));
+}
+
+// Open row if flash message refers to a date
+{% if open_date %}
+toggleRow('{{ open_date }}');
+{% endif %}
+
+// Responsive: collapse loc-span on narrow screens
+function adjustGrid() {
+  document.querySelectorAll('[id^="loc-span-"]').forEach(el => {
+    el.style.gridColumn = window.innerWidth < 600 ? 'span 1' : 'span 2';
+  });
+}
+adjustGrid();
+window.addEventListener('resize', adjustGrid);
+</script>
+</body>
+</html>

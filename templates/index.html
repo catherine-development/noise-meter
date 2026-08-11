@@ -141,19 +141,22 @@ body{background:var(--bg);color:var(--text);font-family:var(--font-ui);font-size
 @media(max-width:720px){.modal-bottom{grid-template-columns:1fr 1fr}.modal-stats{grid-column:span 2}}
 @media(max-width:480px){.modal-bottom{grid-template-columns:1fr}.modal-stats{grid-column:span 1}}
 
-.site-nav{display:flex;align-items:center;gap:16px;padding:8px 20px;background:var(--surface);border-bottom:1px solid var(--border);font-size:13px}
-.nav-brand{font-weight:600;letter-spacing:-.01em;flex:1}
-.nav-pi{color:var(--text3);font-size:11px}
-.nav-link{color:var(--laeq);text-decoration:none;border:1px solid var(--border);border-radius:4px;padding:4px 10px;white-space:nowrap}
-.nav-link:hover{background:var(--panel)}
-.nav-link-primary{background:var(--laeq);color:#fff!important;border-color:var(--laeq)}
-.nav-link-primary:hover{opacity:.9;background:var(--laeq)}
+.site-nav{display:flex;align-items:center;gap:0;padding:0 20px;background:var(--surface);border-bottom:1px solid var(--border);font-size:13px}
+.nav-brand{font-weight:600;letter-spacing:-.01em;margin-right:24px}
+.nav-pi{color:var(--text3);font-size:11px;margin-right:auto;padding-right:16px}
+.nav-tab{color:var(--text2);text-decoration:none;padding:12px 14px;border-bottom:2px solid transparent;white-space:nowrap;font-size:13px;font-weight:500;transition:color .15s}
+.nav-tab:hover{color:var(--text)}
+.nav-tab.active{color:var(--laeq);border-bottom-color:var(--laeq)}
+.nav-tab-primary{background:var(--laeq);color:#fff!important;border-radius:4px;padding:5px 12px;margin-left:8px;border-bottom:none!important}
+.nav-tab-primary:hover{opacity:.9}
 </style>
 
 <nav class="site-nav">
   <span class="nav-brand">NOR140 Noise Monitor</span>
   <span class="nav-pi">{{ pi_name }}</span>
-  <a href="/import" class="nav-link nav-link-primary">+ Add measurements</a>
+  <a href="/" class="nav-tab active">Sessions</a>
+  <a href="/manage" class="nav-tab">Manage</a>
+  <a href="/upload" class="nav-tab nav-tab-primary">+ Add</a>
 </nav>
 <div class="page">
   <header class="header">

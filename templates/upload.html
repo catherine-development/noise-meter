@@ -9,11 +9,14 @@
 @media(prefers-color-scheme:dark){:root{--bg:#090F1C;--surface:#111C30;--border:#1E2E48;--text:#E8EEF8;--text2:#8BA4C4;--text3:#4A6080;--accent:#4A90E8;--ok:#2ea043;--err:#e05c5c}}
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:var(--font);background:var(--bg);color:var(--text);min-height:100vh}
-.site-nav{display:flex;align-items:center;gap:16px;padding:8px 20px;background:var(--surface);border-bottom:1px solid var(--border);font-size:13px}
-.nav-brand{font-weight:600;flex:1}
-.nav-pi{color:var(--text3);font-size:11px}
-.nav-link{color:var(--accent);text-decoration:none;border:1px solid var(--border);border-radius:4px;padding:4px 10px}
-.nav-link:hover{opacity:.8}
+.site-nav{display:flex;align-items:center;gap:0;padding:0 20px;background:var(--surface);border-bottom:1px solid var(--border);font-size:13px}
+.nav-brand{font-weight:600;letter-spacing:-.01em;margin-right:24px}
+.nav-pi{color:var(--text3);font-size:11px;margin-right:auto;padding-right:16px}
+.nav-tab{color:var(--text2);text-decoration:none;padding:12px 14px;border-bottom:2px solid transparent;white-space:nowrap;font-size:13px;font-weight:500;transition:color .15s}
+.nav-tab:hover{color:var(--text)}
+.nav-tab.active{color:var(--accent);border-bottom-color:var(--accent)}
+.nav-tab-primary{background:var(--accent);color:#fff!important;border-radius:4px;padding:5px 12px;margin-left:8px;border-bottom:none!important}
+.nav-tab-primary:hover{opacity:.9}
 .page{max-width:680px;margin:40px auto;padding:0 20px 60px}
 h1{font-size:22px;font-weight:700;margin-bottom:6px}
 .sub{color:var(--text3);font-size:13px;margin-bottom:32px;line-height:1.6}
@@ -55,7 +58,9 @@ h2{font-size:14px;font-weight:600;color:var(--text2);margin-bottom:14px}
 <nav class="site-nav">
   <span class="nav-brand">NOR140 Noise Monitor</span>
   <span class="nav-pi">{{ pi_name }}</span>
-  <a href="/" class="nav-link">← View data</a>
+  <a href="/" class="nav-tab">Sessions</a>
+  <a href="/manage" class="nav-tab">Manage</a>
+  <a href="/upload" class="nav-tab active nav-tab-primary">+ Add</a>
 </nav>
 <div class="page">
   <h1>Add measurements</h1>

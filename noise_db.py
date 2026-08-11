@@ -213,6 +213,37 @@ def get_sessions_since(since):
     return result
 
 
+def get_all_sessions_list():
+    """Return all sessions as dicts for the manage page (no run data)."""
+    conn = get_db()
+    rows = conn.execute(
+        'SELECT date, run_count, avg_laeq, max_laeq, '
+        '       recorder_name, location_label, postcode, lat, lng '
+        'FROM sessions ORDER BY date DESC'
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def update_session_metadata(date, recorder_name, location_label, postcode, lat, lng):
+    conn = get_db()
+    conn.execute(
+        'UPDATE sessions SET recorder_name=?, location_label=?, postcode=?, lat=?, lng=? '
+        'WHERE date=?',
+        (recorder_name or None, location_label or None,
+         postcode or None, lat, lng, date)
+    )
+    conn.commit()
+    conn.close()
+
+
+def delete_session(date):
+    conn = get_db()
+    conn.execute('DELETE FROM sessions WHERE date=?', (date,))
+    conn.commit()
+    conn.close()
+
+
 def get_import_log(limit=20):
     conn = get_db()
     rows = conn.execute(

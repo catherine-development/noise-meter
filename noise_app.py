@@ -23,7 +23,8 @@ if os.path.exists(_env_path):
 from flask import Flask, render_template, request, jsonify, redirect, url_for, abort, flash
 
 from noise_db import (init_db, import_sessions, get_all_sessions_json,
-                      get_import_log, get_sessions_since, get_existing_dates)
+                      get_import_log, get_sessions_since, get_existing_dates,
+                      get_all_sessions_list, update_session_metadata, delete_session)
 from noise_parser import parse_zip
 
 app = Flask(__name__)
@@ -180,6 +181,41 @@ def do_upload():
     msg += '.'
     flash(msg, 'success')
     return redirect(url_for('index'))
+
+
+# ── Manage page ───────────────────────────────────────────────────────────────
+
+@app.route('/manage')
+def manage_page():
+    sessions = get_all_sessions_list()
+    open_date = request.args.get('open')
+    return render_template('manage.html', pi_name=PI_NAME,
+                           sessions=sessions, open_date=open_date)
+
+
+@app.route('/session/<date>/edit', methods=['POST'])
+def edit_session(date):
+    def _float(key):
+        try: return float(request.form.get(key, '').strip()) or None
+        except (ValueError, TypeError): return None
+
+    update_session_metadata(
+        date,
+        recorder_name  = request.form.get('recorder_name', '').strip(),
+        location_label = request.form.get('location_label', '').strip(),
+        postcode       = request.form.get('postcode', '').strip().upper(),
+        lat            = _float('lat'),
+        lng            = _float('lng'),
+    )
+    flash(f'Session {date} updated.', 'success')
+    return redirect(url_for('manage_page', open=date))
+
+
+@app.route('/session/<date>/delete', methods=['POST'])
+def delete_session_route(date):
+    delete_session(date)
+    flash(f'Session {date} deleted.', 'success')
+    return redirect(url_for('manage_page'))
 
 
 # ── Machine-to-machine import (import_sdcard.py / peer sync) ──────────────────
