@@ -19,7 +19,7 @@ if os.path.exists(_env_path):
 
 from flask import Flask, render_template, request, jsonify, redirect, url_for, abort, flash
 
-from noise_db import init_db, import_sessions, get_all_sessions_json, get_import_log
+from noise_db import init_db, import_sessions, get_all_sessions_json, get_import_log, get_sessions_since
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', os.urandom(24))
@@ -84,6 +84,19 @@ def do_import():
         return jsonify({'imported': n, 'status': 'ok'})
     flash(f'Imported {n} session(s) successfully.', 'success')
     return redirect(url_for('index'))
+
+
+@app.route('/api/sync')
+def api_sync():
+    since = request.args.get('since', '1970-01-01T00:00:00')
+    sessions = get_sessions_since(since)
+    return jsonify({'sessions': sessions, 'count': len(sessions),
+                    'pi_name': PI_NAME, 'since': since})
+
+
+@app.route('/health')
+def health():
+    return jsonify({'status': 'ok', 'pi': PI_NAME})
 
 
 if __name__ == '__main__':

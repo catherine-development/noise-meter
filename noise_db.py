@@ -37,6 +37,10 @@ def init_db():
             lcpeak_json TEXT,
             UNIQUE(session_id, run_number)
         );
+        CREATE TABLE IF NOT EXISTS sync_state (
+            key   TEXT PRIMARY KEY,
+            value TEXT
+        );
         CREATE INDEX IF NOT EXISTS idx_sessions_date ON sessions(date);
         CREATE INDEX IF NOT EXISTS idx_runs_session  ON runs(session_id);
     ''')
@@ -107,6 +111,54 @@ def get_all_sessions_json():
         })
     conn.close()
     return {'sessions': result}
+
+
+def get_last_sync_time():
+    conn = get_db()
+    row = conn.execute("SELECT value FROM sync_state WHERE key='last_sync'").fetchone()
+    conn.close()
+    return row['value'] if row else '1970-01-01T00:00:00'
+
+
+def update_last_sync_time(ts):
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO sync_state (key, value) VALUES ('last_sync', ?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (ts,)
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_sessions_since(since):
+    """Return sessions imported/updated after `since` (ISO timestamp), in sync format."""
+    conn = get_db()
+    sessions = conn.execute(
+        'SELECT * FROM sessions WHERE imported_at > ? ORDER BY date', (since,)
+    ).fetchall()
+    result = []
+    for sess in sessions:
+        runs = conn.execute(
+            'SELECT * FROM runs WHERE session_id=? ORDER BY run_number', (sess['id'],)
+        ).fetchall()
+        result.append({
+            'd': sess['date'],
+            'avg': sess['avg_laeq'],
+            'mx': sess['max_laeq'],
+            'projects': [{
+                'start':   r['start_time'],
+                'n':       r['n_samples'],
+                'step':    r['step'],
+                'avg':     r['avg_laeq'],
+                'mn':      r['min_laeq'],
+                'mx':      r['max_laeq'],
+                'pmx':     r['max_lcpeak'],
+                'laeq':    json.loads(r['laeq_json']),
+                'lcpeak':  json.loads(r['lcpeak_json']),
+            } for r in runs],
+        })
+    conn.close()
+    return result
 
 
 def get_import_log(limit=20):

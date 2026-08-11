@@ -85,6 +85,36 @@ sudo systemctl daemon-reload
 sudo systemctl enable noise-app
 sudo systemctl restart noise-app
 
+# Peer sync timer (runs every 15 minutes)
+sudo tee /etc/systemd/system/noise-sync.service > /dev/null << EOF
+[Unit]
+Description=NOR140 Noise Peer Sync
+After=network.target
+
+[Service]
+Type=oneshot
+User=flightdata
+WorkingDirectory=$APP_DIR
+EnvironmentFile=$APP_DIR/.env
+ExecStart=$PYTHON $APP_DIR/sync_peer.py
+EOF
+
+sudo tee /etc/systemd/system/noise-sync.timer > /dev/null << EOF
+[Unit]
+Description=NOR140 Noise Peer Sync Timer
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=15min
+
+[Install]
+WantedBy=timers.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable noise-sync.timer
+sudo systemctl start noise-sync.timer
+
 echo ""
 sleep 2
 sudo systemctl status noise-app --no-pager | head -12
