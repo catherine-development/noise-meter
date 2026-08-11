@@ -135,6 +135,17 @@ def parse_all(since=None):
     return sessions
 
 
+def latest_date_on_pi(url):
+    """Ask the Pi what its most recent session date is."""
+    try:
+        with urllib.request.urlopen(f"{url.rstrip('/')}/api/data.json", timeout=10) as resp:
+            data = json.loads(resp.read())
+        sessions = data.get('sessions', [])
+        return sessions[-1]['d'] if sessions else None
+    except Exception:
+        return None
+
+
 def push_to_pi(sessions, url, key):
     payload = json.dumps({'sessions': sessions}, separators=(',', ':')).encode()
     req = urllib.request.Request(
@@ -157,7 +168,7 @@ def push_to_pi(sessions, url, key):
 def main():
     parser = argparse.ArgumentParser(description='Import NOR140 SD card data')
     parser.add_argument('--output',  help='Save JSON to this file')
-    parser.add_argument('--push',    help='POST data to this Pi URL')
+    parser.add_argument('--push',    help='POST data to this Pi URL (repeat for multiple)', action='append', default=[])
     parser.add_argument('--key',     help='Import API key (or set IMPORT_API_KEY env var)')
     parser.add_argument('--since',   help='Only import sessions on/after YYYY-MM-DD')
     parser.add_argument('--sd-root', help='SD card root (default: /Volumes/NO LABEL/MEAS118)')
@@ -189,9 +200,16 @@ def main():
         if not key:
             print("ERROR: provide --key or set IMPORT_API_KEY env var", file=sys.stderr)
             sys.exit(1)
-        print(f"\nPushing to {args.push} …")
-        result = push_to_pi(sessions, args.push, key)
-        print(f"Done: {result}")
+        for url in args.push:
+            # Auto-detect what's already on the Pi and skip those sessions
+            latest = latest_date_on_pi(url)
+            to_send = [s for s in sessions if latest is None or s['d'] > latest]
+            if not to_send:
+                print(f"\n{url}: already up to date (latest: {latest})")
+                continue
+            print(f"\nPushing {len(to_send)} new session(s) to {url} (Pi has up to {latest or 'nothing'}) …")
+            result = push_to_pi(to_send, url, key)
+            print(f"Done: {result}")
 
 
 if __name__ == '__main__':

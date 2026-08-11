@@ -113,6 +113,14 @@ def get_all_sessions_json():
     return {'sessions': result}
 
 
+def get_existing_dates():
+    """Return a set of session dates already in the database."""
+    conn = get_db()
+    rows = conn.execute('SELECT date FROM sessions').fetchall()
+    conn.close()
+    return {r['date'] for r in rows}
+
+
 def get_last_sync_time():
     conn = get_db()
     row = conn.execute("SELECT value FROM sync_state WHERE key='last_sync'").fetchone()

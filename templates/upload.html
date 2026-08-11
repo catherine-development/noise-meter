@@ -3,10 +3,10 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Import SD Card · {{ pi_name }}</title>
+<title>Add Measurements · {{ pi_name }}</title>
 <style>
-:root{--bg:#EFF2F7;--surface:#fff;--border:#D0D8E8;--text:#0C1A2E;--text2:#3D5270;--text3:#7A92AE;--accent:#2660C4;--ok:#1a7f37;--err:#c0392b;--font:system-ui,-apple-system,'Helvetica Neue',sans-serif}
-@media(prefers-color-scheme:dark){:root{--bg:#090F1C;--surface:#111C30;--border:#1E2E48;--text:#E8EEF8;--text2:#8BA4C4;--text3:#4A6080;--accent:#4A90E8;--ok:#2ea043;--err:#e05c5c}}
+:root{--bg:#EFF2F7;--surface:#fff;--border:#D0D8E8;--text:#0C1A2E;--text2:#3D5270;--text3:#7A92AE;--accent:#2660C4;--ok:#1a7f37;--warn:#7a5000;--err:#c0392b;--font:system-ui,-apple-system,'Helvetica Neue',sans-serif}
+@media(prefers-color-scheme:dark){:root{--bg:#090F1C;--surface:#111C30;--border:#1E2E48;--text:#E8EEF8;--text2:#8BA4C4;--text3:#4A6080;--accent:#4A90E8;--ok:#2ea043;--warn:#c49a00;--err:#e05c5c}}
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:var(--font);background:var(--bg);color:var(--text);min-height:100vh}
 .site-nav{display:flex;align-items:center;gap:16px;padding:8px 20px;background:var(--surface);border-bottom:1px solid var(--border);font-size:13px}
@@ -14,25 +14,31 @@ body{font-family:var(--font);background:var(--bg);color:var(--text);min-height:1
 .nav-pi{color:var(--text3);font-size:11px}
 .nav-link{color:var(--accent);text-decoration:none;border:1px solid var(--border);border-radius:4px;padding:4px 10px}
 .nav-link:hover{opacity:.8}
-.page{max-width:760px;margin:40px auto;padding:0 20px}
-h1{font-size:20px;font-weight:600;margin-bottom:6px}
-.sub{color:var(--text3);font-size:13px;margin-bottom:32px}
-.card{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:24px;margin-bottom:24px}
-.card h2{font-size:14px;font-weight:600;margin-bottom:16px;color:var(--text2)}
-label{display:block;font-size:13px;color:var(--text2);margin-bottom:6px}
-input[type=file],input[type=password],input[type=text]{width:100%;border:1px solid var(--border);border-radius:4px;padding:8px 10px;font-size:13px;background:var(--bg);color:var(--text);margin-bottom:16px}
-input[type=file]{padding:6px}
-.btn{display:inline-block;background:var(--accent);color:#fff;border:none;border-radius:4px;padding:9px 20px;font-size:13px;font-weight:600;cursor:pointer}
+.page{max-width:680px;margin:40px auto;padding:0 20px 60px}
+h1{font-size:22px;font-weight:700;margin-bottom:6px}
+.sub{color:var(--text3);font-size:13px;margin-bottom:32px;line-height:1.6}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:28px;margin-bottom:20px}
+.steps{counter-reset:step;list-style:none;margin-bottom:24px}
+.steps li{counter-increment:step;display:flex;gap:14px;margin-bottom:16px;font-size:13px;color:var(--text2);line-height:1.5}
+.steps li::before{content:counter(step);background:var(--accent);color:#fff;border-radius:50%;width:22px;height:22px;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;flex-shrink:0;margin-top:1px}
+.mono{font-family:'SF Mono','Cascadia Code','Consolas',monospace;font-size:11px;background:var(--bg);padding:1px 5px;border-radius:3px;border:1px solid var(--border)}
+label{display:block;font-size:13px;font-weight:500;color:var(--text2);margin-bottom:6px}
+input[type=file]{width:100%;border:2px dashed var(--border);border-radius:6px;padding:20px;font-size:13px;background:var(--bg);color:var(--text);margin-bottom:16px;cursor:pointer;text-align:center}
+input[type=file]:hover{border-color:var(--accent)}
+input[type=password]{width:100%;border:1px solid var(--border);border-radius:4px;padding:9px 10px;font-size:13px;background:var(--bg);color:var(--text);margin-bottom:16px}
+.btn{display:inline-block;background:var(--accent);color:#fff;border:none;border-radius:4px;padding:10px 24px;font-size:14px;font-weight:600;cursor:pointer;width:100%}
 .btn:hover{opacity:.9}
-.flash{padding:10px 14px;border-radius:4px;font-size:13px;margin-bottom:20px}
-.flash.success{background:rgba(26,127,55,.12);color:var(--ok);border:1px solid rgba(26,127,55,.3)}
-.flash.error{background:rgba(192,57,43,.1);color:var(--err);border:1px solid rgba(192,57,43,.25)}
+.flash{padding:12px 16px;border-radius:6px;font-size:13px;margin-bottom:20px;line-height:1.5}
+.flash.success{background:rgba(26,127,55,.1);color:var(--ok);border:1px solid rgba(26,127,55,.25)}
+.flash.info{background:rgba(38,96,196,.08);color:var(--accent);border:1px solid rgba(38,96,196,.2)}
+.flash.error{background:rgba(192,57,43,.08);color:var(--err);border:1px solid rgba(192,57,43,.2)}
+.divider{border:none;border-top:1px solid var(--border);margin:24px 0}
+h2{font-size:14px;font-weight:600;color:var(--text2);margin-bottom:14px}
 .log-table{width:100%;border-collapse:collapse;font-size:12px}
 .log-table th{text-align:left;padding:6px 8px;color:var(--text3);border-bottom:1px solid var(--border);font-weight:500}
 .log-table td{padding:6px 8px;border-bottom:1px solid var(--border)}
 .log-table tr:last-child td{border-bottom:none}
-.mono{font-family:'SF Mono','Cascadia Code',monospace;font-size:11px}
-.hint{font-size:11px;color:var(--text3);margin-top:-10px;margin-bottom:16px;line-height:1.5}
+.mf{font-family:'SF Mono','Cascadia Code','Consolas',monospace;font-size:11px}
 </style>
 </head>
 <body>
@@ -42,48 +48,45 @@ input[type=file]{padding:6px}
   <a href="/" class="nav-link">← View data</a>
 </nav>
 <div class="page">
-  <h1>Import SD card data</h1>
-  <p class="sub">Upload a JSON export from the NOR140 SD card using the import script on your Mac, or upload a JSON file directly.</p>
+  <h1>Add measurements</h1>
+  <p class="sub">Upload a ZIP of your NOR140 SD card. The system will import only new sessions and automatically update the other Pi.</p>
 
   {% for msg, cat in get_flashed_messages(with_categories=true) %}
   <div class="flash {{ cat }}">{{ msg }}</div>
   {% endfor %}
 
   <div class="card">
-    <h2>Upload JSON file</h2>
-    <form method="POST" action="/import" enctype="multipart/form-data">
-      <label>Import key</label>
-      <input type="password" name="api_key" placeholder="IMPORT_API_KEY from .env" required>
-      <label>JSON file</label>
-      <input type="file" name="file" accept=".json" required>
-      <p class="hint">Generate this file on your Mac by running:<br>
-        <span class="mono">python3 import_sdcard.py --output noise_data.json</span>
-      </p>
+    <ol class="steps">
+      <li>Remove the SD card from the NOR140 and insert it into your computer.</li>
+      <li>Open the SD card and find the <span class="mono">MEAS118</span> folder. Select it and compress it to a ZIP file.</li>
+      <li>Upload the ZIP file below.</li>
+    </ol>
+
+    <form method="POST" action="/upload" enctype="multipart/form-data">
+      {% if needs_password %}
+      <label>Upload password</label>
+      <input type="password" name="upload_password" placeholder="Enter the upload password" required autocomplete="off">
+      {% endif %}
+
+      <label>SD card ZIP file</label>
+      <input type="file" name="file" accept=".zip,.json" required>
+
       <button type="submit" class="btn">Upload and import</button>
     </form>
   </div>
 
-  <div class="card">
-    <h2>Command-line import (from Mac)</h2>
-    <p class="hint" style="margin:0 0 12px">
-      With the SD card inserted on your Mac, run:<br>
-      <span class="mono">python3 import_sdcard.py --push https://noise.ives.org.uk</span><br><br>
-      This reads the SD card, parses all sessions, and posts directly to this Pi.
-    </p>
-  </div>
-
   {% if log %}
   <div class="card">
-    <h2>Recently imported sessions</h2>
+    <h2>Previously imported sessions</h2>
     <table class="log-table">
       <tr><th>Date</th><th>Runs</th><th>LAeq avg</th><th>LA max</th><th>Imported</th></tr>
       {% for row in log %}
       <tr>
         <td>{{ row.date }}</td>
         <td>{{ row.run_count }}</td>
-        <td class="mono">{{ '%.1f'|format(row.avg_laeq) }} dB</td>
-        <td class="mono">{{ '%.1f'|format(row.max_laeq) }} dB</td>
-        <td class="mono">{{ row.imported_at[:16] }}</td>
+        <td class="mf">{{ '%.1f'|format(row.avg_laeq) }} dB</td>
+        <td class="mf">{{ '%.1f'|format(row.max_laeq) }} dB</td>
+        <td class="mf">{{ row.imported_at[:10] }}</td>
       </tr>
       {% endfor %}
     </table>

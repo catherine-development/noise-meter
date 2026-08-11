@@ -144,12 +144,14 @@ body{background:var(--bg);color:var(--text);font-family:var(--font-ui);font-size
 .nav-pi{color:var(--text3);font-size:11px}
 .nav-link{color:var(--laeq);text-decoration:none;border:1px solid var(--border);border-radius:4px;padding:4px 10px;white-space:nowrap}
 .nav-link:hover{background:var(--panel)}
+.nav-link-primary{background:var(--laeq);color:#fff!important;border-color:var(--laeq)}
+.nav-link-primary:hover{opacity:.9;background:var(--laeq)}
 </style>
 
 <nav class="site-nav">
   <span class="nav-brand">NOR140 Noise Monitor</span>
   <span class="nav-pi">{{ pi_name }}</span>
-  <a href="/import" class="nav-link">Import SD card data</a>
+  <a href="/import" class="nav-link nav-link-primary">+ Add measurements</a>
 </nav>
 <div class="page">
   <header class="header">
