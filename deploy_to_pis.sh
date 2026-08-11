@@ -8,7 +8,7 @@
 set -e
 
 GLADYS="flightdata@192.168.1.116"
-CATHERINE="flightdata@192.168.1.138"
+CATHERINE="flightdata@ssh-catherine.ives.org.uk"
 REMOTE_DIR="/home/flightdata/noise-meter"
 LOCAL_DIR="$(cd "$(dirname "$0")" && pwd)"
 SETUP=false

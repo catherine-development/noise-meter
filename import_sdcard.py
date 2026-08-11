@@ -160,11 +160,11 @@ def main():
     parser.add_argument('--push',    help='POST data to this Pi URL')
     parser.add_argument('--key',     help='Import API key (or set IMPORT_API_KEY env var)')
     parser.add_argument('--since',   help='Only import sessions on/after YYYY-MM-DD')
-    parser.add_argument('--sd-root', help=f'SD card root (default: {SD_ROOT})')
+    parser.add_argument('--sd-root', help='SD card root (default: /Volumes/NO LABEL/MEAS118)')
     args = parser.parse_args()
 
-    global SD_ROOT
     if args.sd_root:
+        global SD_ROOT
         SD_ROOT = args.sd_root
 
     since = args.since
