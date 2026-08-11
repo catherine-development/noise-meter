@@ -2,7 +2,7 @@ import os
 import json
 import sqlite3
 
-DB_PATH = os.environ.get('NOISE_DB_PATH', '/home/noisedata/noisedata/noise.db')
+DB_PATH = os.environ.get('NOISE_DB_PATH', '/home/flightdata/noise-meter/noise.db')
 
 
 def get_db():

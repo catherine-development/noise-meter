@@ -1,65 +1,94 @@
 #!/bin/bash
-# First-boot setup for NOR140 Noise Monitor Pi
-# Usage: sudo ./setup.sh
+# Deploy noise-meter app on a Pi running the LBA flight tracker.
+# Run as flightdata user (not root) — uses existing infrastructure.
 #
-# Before running:
-#   1. Copy .env.example to .env
-#   2. Edit .env with your PI_NAME, SECRET_KEY, IMPORT_API_KEY
+# Usage:
+#   bash setup.sh           # auto-detects Pi (Catherine or Gladys)
+#   bash setup.sh --pi Catherine
+#   bash setup.sh --pi Gladys
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ENV_FILE="$SCRIPT_DIR/.env"
+APP_DIR="/home/flightdata/noise-meter"
+PI_NAME="${PI_NAME:-}"
 
-if [ "$(id -u)" -ne 0 ]; then
-    echo "ERROR: Run with sudo"
-    exit 1
+# Parse args
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --pi) PI_NAME="$2"; shift 2 ;;
+        *) echo "Unknown arg: $1"; exit 1 ;;
+    esac
+done
+
+# Auto-detect Pi from hostname if not set
+if [ -z "$PI_NAME" ]; then
+    HOST=$(hostname)
+    if echo "$HOST" | grep -qi "catherine"; then
+        PI_NAME="Catherine"
+    elif echo "$HOST" | grep -qi "gladys"; then
+        PI_NAME="Gladys"
+    else
+        echo "Cannot auto-detect Pi name from hostname '$HOST'."
+        echo "Run with: bash setup.sh --pi Catherine   or   --pi Gladys"
+        exit 1
+    fi
 fi
+
+echo "==========================================="
+echo "Noise Monitor — deploying on $PI_NAME"
+echo "==========================================="
 
 if [ ! -f "$ENV_FILE" ]; then
-    echo "ERROR: .env file not found — copy .env.example to .env and fill it in first"
+    echo "ERROR: .env not found — copy .env.example to .env and fill it in"
     exit 1
 fi
 
-export $(grep -v '^#' "$ENV_FILE" | grep -v '^$' | xargs)
-PI_NAME="${PI_NAME:-Pi}"
+# Pick correct python for this Pi
+if [ "$PI_NAME" = "Gladys" ]; then
+    PYTHON="/home/flightdata/flightdata/venv/bin/python3"
+    PIP="/home/flightdata/flightdata/venv/bin/pip"
+else
+    PYTHON="/usr/bin/python3"
+    PIP="pip3"
+fi
 
-echo "==========================================="
-echo "NOR140 Noise Monitor - Pi Setup"
-echo "==========================================="
-echo "Pi name: $PI_NAME"
-echo ""
+echo "Python: $PYTHON"
 
-# Create system user and data directory
-echo "Creating noisedata user and directory..."
-id -u noisedata &>/dev/null || useradd -r -m -d /home/noisedata -s /bin/bash noisedata
-mkdir -p /home/noisedata/noisedata
-chown -R noisedata:noisedata /home/noisedata
-
-# Copy app files
-echo "Installing app files..."
-APP_DIR=/home/noisedata/noisedata
-cp "$SCRIPT_DIR/noise_app.py"    "$APP_DIR/"
-cp "$SCRIPT_DIR/noise_db.py"     "$APP_DIR/"
-cp "$SCRIPT_DIR/.env"            "$APP_DIR/"
-cp -r "$SCRIPT_DIR/templates"    "$APP_DIR/"
-cp -r "$SCRIPT_DIR/static"       "$APP_DIR/" 2>/dev/null || true
-chown -R noisedata:noisedata "$APP_DIR"
-
-# Install Python dependencies
-echo "Installing Python packages..."
-pip3 install flask flask-limiter --quiet
+# Install Flask (likely already present)
+echo "Checking dependencies..."
+$PIP install flask --quiet 2>/dev/null || $PIP install --break-system-packages flask --quiet
 
 # Install systemd service
+SERVICE_FILE="/etc/systemd/system/noise-app.service"
 echo "Installing systemd service..."
-cp "$SCRIPT_DIR/deploy/systemd/noise-app.service" /etc/systemd/system/
-systemctl daemon-reload
-systemctl enable noise-app.service
-systemctl restart noise-app.service
+sudo tee "$SERVICE_FILE" > /dev/null << EOF
+[Unit]
+Description=NOR140 Noise Monitor Web App
+After=network.target
+
+[Service]
+Type=simple
+User=flightdata
+WorkingDirectory=$APP_DIR
+EnvironmentFile=$APP_DIR/.env
+ExecStart=$PYTHON $APP_DIR/noise_app.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable noise-app
+sudo systemctl restart noise-app
 
 echo ""
+sleep 2
+sudo systemctl status noise-app --no-pager | head -12
+echo ""
 echo "==========================================="
-echo "Setup complete!"
-echo "  Web app: http://$(hostname).local:5001"
-echo "  Import:  http://$(hostname).local:5001/import"
+echo "Done! Visit http://$(hostname).local:5001"
 echo "==========================================="
