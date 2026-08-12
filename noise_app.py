@@ -3,12 +3,17 @@
 NOR140 Sound Level Meter — Web Viewer
 Runs on Raspberry Pi; data uploaded via web interface or import_sdcard.py
 """
+import csv
+import io
+import math
 import os
+import sys
 import json
 import functools
 import urllib.request
 import urllib.error
 import threading
+from datetime import timedelta, datetime
 
 _env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env')
 if os.path.exists(_env_path):
@@ -20,20 +25,94 @@ if os.path.exists(_env_path):
                 if _k.strip() not in os.environ:
                     os.environ[_k.strip()] = _v.strip().strip("'\"")
 
-from flask import Flask, render_template, request, jsonify, redirect, url_for, abort, flash
+from flask import (Flask, render_template, request, jsonify, redirect,
+                   url_for, abort, flash, session as flask_session)
 
 from noise_db import (init_db, import_sessions, get_all_sessions_json,
-                      get_import_log, get_sessions_since, get_existing_dates,
-                      get_all_sessions_list, update_session_metadata, delete_session)
-from noise_parser import parse_zip
+                      get_import_log, get_sessions_since, get_existing_dates, get_existing_run_starts,
+                      get_all_sessions_list, update_session_metadata, delete_session,
+                      save_weather, get_weather,
+                      get_report_templates, get_report_template, save_report_template,
+                      update_report_template, delete_report_template,
+                      save_generated_report, get_generated_reports,
+                      get_generated_report, delete_generated_report)
+from noise_parser import parse_zip, parse_files
+
+# Shared auth module from flight tracker
+sys.path.insert(0, '/home/flightdata/flightdata')
+try:
+    from auth import (is_authorised_user, generate_otp, verify_otp,
+                      send_otp_email, send_otp_sms, get_user_phone,
+                      activate_user, login_required)
+    AUTH_AVAILABLE = True
+except ImportError:
+    AUTH_AVAILABLE = False
+    def login_required(f):
+        return f
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', os.urandom(24))
+app.permanent_session_lifetime = timedelta(days=7)
 
 IMPORT_KEY = os.environ.get('IMPORT_API_KEY', '')
 UPLOAD_PASS = os.environ.get('UPLOAD_PASSWORD', '')
 PI_NAME    = os.environ.get('PI_NAME', 'Pi')
 PEER_URL   = os.environ.get('PEER_URL', '')
+
+
+def _fetch_weather_for_session(date, lat, lng):
+    """Call Open-Meteo archive API and return summary dict. Raises on failure."""
+    import math
+    import urllib.parse
+    params = urllib.parse.urlencode({
+        'latitude': lat, 'longitude': lng,
+        'start_date': date, 'end_date': date,
+        'hourly': 'temperature_2m,precipitation,wind_speed_10m,wind_direction_10m',
+        'wind_speed_unit': 'mph',
+        'timezone': 'Europe/London',
+    })
+    url = f'https://archive-api.open-meteo.com/v1/archive?{params}'
+    req = urllib.request.Request(url, headers={'User-Agent': 'NOR140-noise-meter/1.0'})
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        data = json.loads(resp.read())
+    h = data.get('hourly', {})
+    temps  = [v for v in h.get('temperature_2m', [])       if v is not None]
+    winds  = [v for v in h.get('wind_speed_10m', [])       if v is not None]
+    dirs   = [v for v in h.get('wind_direction_10m', [])   if v is not None]
+    precip = [v for v in h.get('precipitation', [])        if v is not None]
+    # Circular mean for wind direction
+    wd = None
+    if dirs:
+        s = sum(math.sin(math.radians(d)) for d in dirs)
+        c = sum(math.cos(math.radians(d)) for d in dirs)
+        wd = round((math.degrees(math.atan2(s, c)) + 360) % 360, 1)
+    return {
+        'wind_speed': round(sum(winds) / len(winds), 1) if winds else None,
+        'wind_dir':   wd,
+        'temp_min':   round(min(temps), 1) if temps else None,
+        'temp_max':   round(max(temps), 1) if temps else None,
+        'precip':     round(sum(precip), 1) if precip else None,
+        'hourly_json': json.dumps(h),
+    }
+
+
+def _auto_fetch_weather(sessions):
+    """Background thread: fetch weather for any new sessions that have coordinates."""
+    all_data = get_all_sessions_json()['sessions']
+    sess_map = {s['d']: s for s in all_data}
+    for sess in sessions:
+        date = sess['d']
+        s = sess_map.get(date, sess)
+        if s.get('lat') is None or s.get('lng') is None:
+            continue
+        if get_weather(date):
+            continue  # already have it
+        try:
+            w = _fetch_weather_for_session(date, s['lat'], s['lng'])
+            save_weather(date, w)
+            print(f"Weather fetched for {date}")
+        except Exception as e:
+            print(f"Weather fetch failed for {date}: {e}")
 
 
 def _push_to_peer(sessions):
@@ -79,7 +158,74 @@ def check_upload_auth():
     return provided == UPLOAD_PASS
 
 
+# ── Auth routes ───────────────────────────────────────────────────────────────
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if flask_session.get('authenticated'):
+        return redirect(url_for('index'))
+
+    def rt(step, **kw):
+        return render_template('login.html', pi_name=PI_NAME, step=step, **kw)
+
+    if request.method == 'GET':
+        return rt('email', error=None)
+
+    step = request.form.get('step')
+    email = request.form.get('email', '').lower().strip()
+
+    if step == 'email':
+        if not AUTH_AVAILABLE:
+            return rt('email', error='Auth system unavailable — check server logs.')
+        if not is_authorised_user(email):
+            return rt('email', error='That email is not registered. Contact the administrator.')
+        phone = get_user_phone(email)
+        if phone:
+            return rt('method', email=email, phone=phone, error=None)
+        else:
+            code = generate_otp(email)
+            send_otp_email(email, code)
+            return rt('otp', email=email, method='email', destination=email, error=None)
+
+    elif step == 'send':
+        method = request.form.get('method', 'email')
+        code = generate_otp(email)
+        if method == 'sms':
+            phone = get_user_phone(email)
+            if phone and send_otp_sms(phone, code):
+                masked = phone[:4] + '****' + phone[-3:]
+                return rt('otp', email=email, method='SMS', destination=masked, error=None)
+            else:
+                return rt('method', email=email, phone=get_user_phone(email),
+                          error='Failed to send SMS. Try email instead.')
+        else:
+            send_otp_email(email, code)
+            return rt('otp', email=email, method='email', destination=email, error=None)
+
+    elif step == 'otp':
+        code = request.form.get('code', '').strip()
+        if verify_otp(email, code):
+            activate_user(email)
+            flask_session.permanent = True
+            flask_session['authenticated'] = True
+            flask_session['user_email'] = email
+            return redirect(url_for('index'))
+        return rt('otp', email=email, method='', destination='',
+                  error='Invalid or expired code. Please try again.')
+
+    return rt('email', error=None)
+
+
+@app.route('/logout')
+def logout():
+    flask_session.clear()
+    return redirect(url_for('login'))
+
+
+# ── Main routes ───────────────────────────────────────────────────────────────
+
 @app.route('/')
+@login_required
 def index():
     data = get_all_sessions_json()
     data_json = json.dumps(data, separators=(',', ':'))
@@ -87,6 +233,7 @@ def index():
 
 
 @app.route('/api/data.json')
+@login_required
 def api_data():
     return jsonify(get_all_sessions_json())
 
@@ -107,6 +254,7 @@ def health():
 # ── Upload page ────────────────────────────────────────────────────────────────
 
 @app.route('/upload', methods=['GET'])
+@login_required
 def upload_page():
     log = get_import_log()
     needs_password = bool(UPLOAD_PASS)
@@ -115,35 +263,56 @@ def upload_page():
 
 
 @app.route('/upload', methods=['POST'])
+@login_required
 def do_upload():
     if not check_upload_auth():
         flash('Incorrect password.', 'error')
         return redirect(url_for('upload_page'))
 
-    f = request.files.get('file')
-    if not f or not f.filename:
-        flash('No file selected.', 'error')
-        return redirect(url_for('upload_page'))
+    # Folder upload: browser sends individual files with relative paths
+    folder_files = request.files.getlist('files')
+    single_file  = request.files.get('file')
 
-    raw = f.read()
-    fname = f.filename.lower()
+    is_folder_upload = bool(folder_files)
 
-    # Parse uploaded file
+    def _json_error(msg):
+        return jsonify({'status': 'error', 'message': msg}), 400
+
+    def _json_ok(msg):
+        return jsonify({'status': 'ok', 'message': msg})
+
+    def _json_info(msg):
+        return jsonify({'status': 'info', 'message': msg})
+
     try:
-        if fname.endswith('.zip'):
-            parsed = parse_zip(raw)
-        elif fname.endswith('.json'):
-            data = json.loads(raw)
-            parsed = data.get('sessions', [data] if 'd' in data else [])
+        if is_folder_upload:
+            pairs = [(f.filename, f.read()) for f in folder_files]
+            parsed = parse_files(pairs)
+        elif single_file and single_file.filename:
+            raw   = single_file.read()
+            fname = single_file.filename.lower()
+            if fname.endswith('.zip'):
+                parsed = parse_zip(raw)
+            elif fname.endswith('.json'):
+                data = json.loads(raw)
+                parsed = data.get('sessions', [data] if 'd' in data else [])
+            else:
+                flash('Please upload a .zip of the SD card or a .json export.', 'error')
+                return redirect(url_for('upload_page'))
         else:
-            flash('Please upload a .zip of the SD card or a .json export.', 'error')
+            flash('No file selected.', 'error')
             return redirect(url_for('upload_page'))
     except Exception as e:
+        if is_folder_upload:
+            return _json_error(f'Could not read files: {e}')
         flash(f'Could not read file: {e}', 'error')
         return redirect(url_for('upload_page'))
 
     if not parsed:
-        flash('No valid measurement sessions found in the file.', 'error')
+        msg = 'No valid measurement sessions found.'
+        if is_folder_upload:
+            return _json_error(msg)
+        flash(msg, 'error')
         return redirect(url_for('upload_page'))
 
     # Collect optional metadata
@@ -159,33 +328,113 @@ def do_upload():
         'lng':            _float('lng'),
     }
 
-    # Duplicate check
-    existing = get_existing_dates()
-    new_sessions = [s for s in parsed if s['d'] not in existing]
-    skipped = [s['d'] for s in parsed if s['d'] in existing]
+    # Duplicate check at the run level (start_time per date) so new runs on an
+    # existing date are not skipped.
+    existing_starts = get_existing_run_starts()
+
+    def _has_new_runs(s):
+        known = existing_starts.get(s['d'], set())
+        return any(p['start'] not in known for p in s.get('projects', []))
+
+    new_sessions = [s for s in parsed if _has_new_runs(s)]
+    skipped = [s['d'] for s in parsed if not _has_new_runs(s)]
 
     if not new_sessions:
         msg = f'All {len(skipped)} session(s) already in database: {", ".join(skipped)}.'
+        if is_folder_upload:
+            return _json_info(msg)
         flash(msg, 'info')
         return redirect(url_for('upload_page'))
 
-    # Import new sessions
+    # Import sessions — ON CONFLICT upserts handle existing runs safely
     import_sessions(new_sessions, metadata=metadata)
 
-    # Push to peer Pi in background
+    # Push to peer Pi and fetch weather in background
     _push_to_peer(new_sessions)
+    threading.Thread(target=_auto_fetch_weather, args=(new_sessions,), daemon=True).start()
 
     msg = f'Added {len(new_sessions)} new session(s)'
     if skipped:
         msg += f' ({len(skipped)} already existed: {", ".join(skipped)})'
     msg += '.'
+    if is_folder_upload:
+        return _json_ok(msg)
     flash(msg, 'success')
     return redirect(url_for('index'))
+
+
+# ── CSV export ────────────────────────────────────────────────────────────────
+
+@app.route('/export/sessions.csv')
+@login_required
+def export_sessions_csv():
+    from flask import Response
+    data = get_all_sessions_json()
+    sessions = data['sessions']
+
+    # Apply the same filters as the client-side filter bar
+    text     = request.args.get('q', '').strip().lower()
+    date_from = request.args.get('from', '')
+    date_to   = request.args.get('to', '')
+    avg_min   = request.args.get('avg_min', '')
+    max_min   = request.args.get('max_min', '')
+
+    def _matches(s):
+        if text:
+            hay = ' '.join(filter(None, [s.get('name'), s.get('loc'), s.get('post'), s.get('notes')])).lower()
+            if text not in hay:
+                return False
+        if date_from and s['d'] < date_from:
+            return False
+        if date_to and s['d'] > date_to:
+            return False
+        if avg_min:
+            try:
+                if s['avg'] < float(avg_min): return False
+            except (ValueError, TypeError):
+                pass
+        if max_min:
+            try:
+                if s['mx'] < float(max_min): return False
+            except (ValueError, TypeError):
+                pass
+        return True
+
+    sessions = [s for s in sessions if _matches(s)]
+
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(['date', 'location', 'recorder', 'postcode', 'lat', 'lng',
+                'laeq_avg_db', 'laeq_max_db', 'lcpeak_max_db', 'run_count', 'notes'])
+    for s in sessions:
+        projects = s.get('projects', [])
+        lcpeak_max = round(max((p['pmx'] for p in projects), default=0), 1) if projects else ''
+        w.writerow([
+            s['d'],
+            s.get('loc') or '',
+            s.get('name') or '',
+            s.get('post') or '',
+            s.get('lat') or '',
+            s.get('lng') or '',
+            s['avg'],
+            s['mx'],
+            lcpeak_max,
+            len(projects),
+            s.get('notes') or '',
+        ])
+
+    output = buf.getvalue()
+    return Response(
+        output,
+        mimetype='text/csv',
+        headers={'Content-Disposition': 'attachment; filename="noise-sessions.csv"'}
+    )
 
 
 # ── Manage page ───────────────────────────────────────────────────────────────
 
 @app.route('/manage')
+@login_required
 def manage_page():
     sessions = get_all_sessions_list()
     open_date = request.args.get('open')
@@ -194,6 +443,7 @@ def manage_page():
 
 
 @app.route('/session/<date>/edit', methods=['POST'])
+@login_required
 def edit_session(date):
     def _float(key):
         try: return float(request.form.get(key, '').strip()) or None
@@ -206,6 +456,7 @@ def edit_session(date):
         postcode       = request.form.get('postcode', '').strip().upper(),
         lat            = _float('lat'),
         lng            = _float('lng'),
+        notes          = request.form.get('notes', '').strip(),
     )
     if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
         return jsonify({'status': 'ok', 'date': date})
@@ -214,6 +465,7 @@ def edit_session(date):
 
 
 @app.route('/session/<date>/delete', methods=['POST'])
+@login_required
 def delete_session_route(date):
     delete_session(date)
     flash(f'Session {date} deleted.', 'success')
@@ -244,7 +496,718 @@ def do_import():
     return jsonify({'imported': n, 'status': 'ok'})
 
 
+@app.route('/session/<date>/fetch-weather', methods=['POST'])
+@login_required
+def fetch_weather_route(date):
+    all_data = get_all_sessions_json()['sessions']
+    sess = next((s for s in all_data if s['d'] == date), None)
+    if not sess or sess.get('lat') is None or sess.get('lng') is None:
+        return jsonify({'status': 'error', 'message': 'No GPS coordinates for this session — add them via Edit metadata first.'})
+    try:
+        w = _fetch_weather_for_session(date, sess['lat'], sess['lng'])
+        save_weather(date, w)
+        return jsonify({'status': 'ok', 'wx': {
+            'ws': w['wind_speed'], 'wd': w['wind_dir'],
+            'tn': w['temp_min'],   'tx': w['temp_max'], 'pr': w['precip'],
+        }})
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)})
+
+
+@app.route('/api/existing-dates')
+@login_required
+def api_existing_dates():
+    return jsonify(sorted(get_existing_dates()))
+
+
+# ── Noise assessment report ────────────────────────────────────────────────────
+
+def _percentile(sorted_vals, p):
+    n = len(sorted_vals)
+    if not n:
+        return None
+    idx = (p / 100) * (n - 1)
+    lo = int(idx)
+    hi = min(lo + 1, n - 1)
+    return round(sorted_vals[lo] + (idx - lo) * (sorted_vals[hi] - sorted_vals[lo]), 1)
+
+
+def _energy_avg_db(values):
+    if not values:
+        return None
+    return round(10 * math.log10(sum(10 ** (v / 10) for v in values) / len(values)), 1)
+
+
+def _expand_run(proj):
+    """Expand downsampled laeq/lcpeak arrays back to approximate per-second values."""
+    step = proj.get('step', 1)
+    laeq = []
+    for v in proj.get('laeq', []):
+        laeq.extend([v] * step)
+    return laeq[:proj.get('n', len(laeq))]
+
+
+def _run_stats(proj):
+    """Compute full statistical suite for one run."""
+    laeq_full = _expand_run(proj)
+    if not laeq_full:
+        return {}
+    s = sorted(laeq_full)
+    return {
+        'leq':  _energy_avg_db(laeq_full),
+        'la10': _percentile(s, 90),  # LA10 = exceeded 10% of time = 90th percentile
+        'la50': _percentile(s, 50),
+        'la90': _percentile(s, 10),  # LA90 = exceeded 90% of time = 10th percentile
+        'lmax': max(s),
+        'lmin': min(s),
+        'pmx':  proj.get('pmx'),
+        'n':    proj.get('n'),
+        'pct85': round(100 * sum(1 for v in laeq_full if v >= 85) / len(laeq_full), 1),
+    }
+
+
+@app.route('/session/<date>/report')
+@login_required
+def generate_report(date):
+    from flask import Response
+
+    ANTHROPIC_KEY = os.environ.get('ANTHROPIC_API_KEY', '')
+    if not ANTHROPIC_KEY:
+        return Response(
+            '<html><body style="font-family:sans-serif;padding:40px;max-width:600px;margin:auto">'
+            '<h2>API key not configured</h2>'
+            '<p>Add <code>ANTHROPIC_API_KEY=sk-ant-…</code> to the Pi\'s <code>.env</code> file '
+            'and restart the server, then try again.</p></body></html>',
+            mimetype='text/html'
+        )
+
+    # Pull session + runs from DB
+    all_sessions = get_all_sessions_json()['sessions']
+    sess = next((s for s in all_sessions if s['d'] == date), None)
+    if not sess:
+        abort(404)
+
+    projects = sess.get('projects', [])
+    run_rows = []
+    all_laeq = []
+    for i, proj in enumerate(projects, 1):
+        st = _run_stats(proj)
+        run_rows.append({'run': i, 'start': proj['start'], **st})
+        laeq_full = _expand_run(proj)
+        all_laeq.extend(laeq_full)
+
+    # Session-level stats across all runs
+    session_leq  = _energy_avg_db(all_laeq)
+    session_la90 = _percentile(sorted(all_laeq), 10)
+    session_la10 = _percentile(sorted(all_laeq), 90)
+    session_lmax = max(all_laeq) if all_laeq else None
+    session_pmx  = max((p.get('pmx', 0) for p in projects), default=None)
+    total_duration_s = sum(p.get('n', 0) for p in projects)
+
+    wx = sess.get('wx') or {}
+
+    def wind_dir(deg):
+        if deg is None:
+            return ''
+        dirs = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW']
+        return dirs[round(deg / 45) % 8]
+
+    # Build concise data summary for the prompt
+    loc_parts = [sess.get('loc'), sess.get('post')]
+    location_str = ', '.join(p for p in loc_parts if p) or 'Not recorded'
+    recorder_str = sess.get('name') or 'Not recorded'
+    notes_str    = sess.get('notes') or ''
+
+    wx_str = ''
+    if wx:
+        parts = []
+        if wx.get('ws') is not None:
+            parts.append(f"{wx['ws']} mph {wind_dir(wx.get('wd'))}")
+        if wx.get('tn') is not None and wx.get('tx') is not None:
+            parts.append(f"temp {wx['tn']}–{wx['tx']} °C")
+        if wx.get('pr'):
+            parts.append(f"precip {wx['pr']} mm")
+        wx_str = ', '.join(parts)
+
+    run_summary_lines = []
+    for r in run_rows:
+        run_summary_lines.append(
+            f"  Run {r['run']} ({r['start']}, {r['n']} s): "
+            f"LAeq {r.get('leq')} dB | LA10 {r.get('la10')} | LA50 {r.get('la50')} | LA90 {r.get('la90')} | "
+            f"LAmax {r.get('lmax')} | LCpeak {r.get('pmx')} | Time≥85dB {r.get('pct85')}%"
+        )
+
+    prompt = f"""You are a qualified UK noise consultant producing a professional noise assessment report.
+Instrument: Norsonic NOR140 Class 1 precision sound level meter (IEC 61672-1:2013).
+Measurement date: {date}
+Location: {location_str}
+Recorder: {recorder_str}
+GPS: {f"{sess['lat']}, {sess['lng']}" if sess.get('lat') and sess.get('lng') else 'Not recorded'}
+Notes: {notes_str or 'None'}
+Weather: {wx_str or 'Not available'}
+
+SESSION STATISTICS:
+  Total duration: {total_duration_s} seconds across {len(projects)} run(s)
+  Session LAeq: {session_leq} dB(A)
+  Session LA10: {session_la10} dB(A)
+  Session LA90: {session_la90} dB(A)
+  Session LAmax: {session_lmax} dB(A)
+  Session LCpeak max: {session_pmx} dB(C)
+
+PER-RUN BREAKDOWN:
+{chr(10).join(run_summary_lines)}
+
+Produce a professional noise assessment report as a JSON object with exactly these keys:
+- "executive_summary": 2–3 sentence plain-English overview (HTML allowed)
+- "methodology": brief description of measurement approach, instrument, and parameters (HTML)
+- "results_narrative": narrative interpretation of the per-run and session data — note any significant variability, peaks, and background noise level (LA90) (HTML)
+- "compliance": assessment against: (a) HSE Noise at Work Regulations 2005 — lower/upper/limit action values (80/85/87 dB LAeq, 135/137/140 dB LCpeak); (b) BS 4142:2014+A1:2019 significance criteria relative to LA90 background; (c) WHO Environmental Noise Guidelines 2018 if applicable. Use HTML tables where helpful.
+- "conclusions": clear professional conclusions about the noise environment (HTML)
+- "recommendations": practical next steps if any action is warranted (HTML, may use <ul> list)
+
+Respond with valid JSON only. No markdown fencing. No preamble."""
+
+    usage_info = None
+    try:
+        import anthropic as _anthropic
+        client = _anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+        message = client.messages.create(
+            model='claude-sonnet-5',
+            max_tokens=16000,
+            messages=[{'role': 'user', 'content': prompt}],
+        )
+        raw = next(b.text for b in message.content if hasattr(b, 'text')).strip()
+        if raw.startswith('```'):
+            raw = raw.split('\n', 1)[1].rsplit('```', 1)[0].strip()
+        sections = json.loads(raw)
+        u = message.usage
+        tok_in  = getattr(u, 'input_tokens', 0)
+        tok_out = getattr(u, 'output_tokens', 0)
+        # claude-sonnet-5 pricing: $3/MTok input, $15/MTok output (approximate)
+        cost_usd = (tok_in * 3 + tok_out * 15) / 1_000_000
+        usage_info = {
+            'input_tokens':  tok_in,
+            'output_tokens': tok_out,
+            'cost_usd':      round(cost_usd, 4),
+        }
+        print(f"Report [{date}]: {tok_in} in / {tok_out} out tokens ≈ ${cost_usd:.4f}")
+    except Exception as e:
+        sections = {
+            'executive_summary': f'<em>Report generation failed: {e}</em>',
+            'methodology': '', 'results_narrative': '',
+            'compliance': '', 'conclusions': '', 'recommendations': '',
+        }
+
+    return render_template(
+        'report.html',
+        date=date,
+        pi_name=PI_NAME,
+        sess=sess,
+        run_rows=run_rows,
+        session_leq=session_leq,
+        session_la10=session_la10,
+        session_la90=session_la90,
+        session_lmax=session_lmax,
+        session_pmx=session_pmx,
+        total_duration_s=total_duration_s,
+        wx=wx,
+        wx_str=wx_str,
+        sections=sections,
+        usage_info=usage_info,
+        generated_at=datetime.now().strftime('%d %B %Y at %H:%M'),
+    )
+
+
+@app.route('/session/<date>/run/<int:run_number>/report')
+@login_required
+def generate_run_report(date, run_number):
+    from flask import Response
+
+    ANTHROPIC_KEY = os.environ.get('ANTHROPIC_API_KEY', '')
+    if not ANTHROPIC_KEY:
+        return Response(
+            '<html><body style="font-family:sans-serif;padding:40px;max-width:600px;margin:auto">'
+            '<h2>API key not configured</h2>'
+            '<p>Add <code>ANTHROPIC_API_KEY=sk-ant-…</code> to the Pi\'s <code>.env</code> and restart.</p>'
+            '</body></html>',
+            mimetype='text/html'
+        )
+
+    all_sessions = get_all_sessions_json()['sessions']
+    sess = next((s for s in all_sessions if s['d'] == date), None)
+    if not sess:
+        abort(404)
+
+    projects = sess.get('projects', [])
+    if run_number < 1 or run_number > len(projects):
+        abort(404)
+
+    proj = projects[run_number - 1]
+    st = _run_stats(proj)
+
+    wx = sess.get('wx') or {}
+
+    def wind_dir(deg):
+        if deg is None:
+            return ''
+        dirs = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW']
+        return dirs[round(deg / 45) % 8]
+
+    wx_str = ''
+    if wx:
+        parts = []
+        if wx.get('ws') is not None:
+            parts.append(f"{wx['ws']} mph {wind_dir(wx.get('wd'))}")
+        if wx.get('tn') is not None and wx.get('tx') is not None:
+            parts.append(f"temp {wx['tn']}–{wx['tx']} °C")
+        if wx.get('pr'):
+            parts.append(f"precip {wx['pr']} mm")
+        wx_str = ', '.join(parts)
+
+    loc_parts = [sess.get('loc'), sess.get('post')]
+    location_str = ', '.join(p for p in loc_parts if p) or 'Not recorded'
+
+    # Find the peak moment (index of max LAeq) for temporal context
+    laeq_expanded = _expand_run(proj)
+    peak_idx = laeq_expanded.index(max(laeq_expanded)) if laeq_expanded else 0
+    peak_elapsed = peak_idx  # seconds into the recording
+
+    prompt = f"""You are a qualified UK noise consultant producing a professional noise assessment report for a single measurement run.
+Instrument: Norsonic NOR140 Class 1 precision sound level meter (IEC 61672-1:2013).
+Measurement date: {date}
+Location: {location_str}
+Recorder: {sess.get('name') or 'Not recorded'}
+Notes: {sess.get('notes') or 'None'}
+Weather: {wx_str or 'Not available'}
+
+THIS RUN (Run {run_number} of {len(projects)} in the session):
+  Start time: {proj['start']}
+  Duration: {proj['n']} seconds ({proj['n'] // 60}m {proj['n'] % 60}s)
+  Downsampling: 1 sample per {proj.get('step', 1)} second(s) stored
+
+STATISTICS FOR THIS RUN:
+  LAeq (energy average): {st.get('leq')} dB(A)
+  LA10 (exceeded 10% of time): {st.get('la10')} dB(A)
+  LA50 (median): {st.get('la50')} dB(A)
+  LA90 (background, exceeded 90%): {st.get('la90')} dB(A)
+  LAmax: {st.get('lmax')} dB(A)
+  LAmin: {st.get('lmin')} dB(A)
+  LCpeak max: {st.get('pmx')} dB(C)
+  Time at or above 85 dB(A): {st.get('pct85')}%
+  Peak LAeq occurred at approx. {peak_elapsed}s into the recording ({peak_elapsed // 60}m {peak_elapsed % 60}s)
+
+Produce a professional noise assessment report focused on this single measurement run as a JSON object with exactly these keys:
+- "executive_summary": 2–3 sentence plain-English overview of this specific recording (HTML)
+- "methodology": brief description of measurement approach and instrument (HTML)
+- "results_narrative": detailed narrative of the noise environment during this run — note the background level (LA90), variability (difference between LA10 and LA90 indicates fluctuation), any peak events, and how levels evolved; comment on when the peak occurred relative to the recording duration (HTML)
+- "compliance": assessment against: (a) HSE Noise at Work Regulations 2005 — lower/upper/limit action values (80/85/87 dB LAeq, 135/137/140 dB LCpeak); (b) BS 4142:2014+A1:2019 significance criteria (rating level vs LA90 background); (c) WHO Environmental Noise Guidelines 2018 if applicable. Use HTML tables where helpful.
+- "conclusions": clear professional conclusions about the noise environment in this run (HTML)
+- "recommendations": practical next steps if action is warranted (HTML, may use <ul>)
+
+Respond with valid JSON only. No markdown fencing. No preamble."""
+
+    usage_info = None
+    try:
+        import anthropic as _anthropic
+        client = _anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+        message = client.messages.create(
+            model='claude-sonnet-5',
+            max_tokens=16000,
+            messages=[{'role': 'user', 'content': prompt}],
+        )
+        raw = next(b.text for b in message.content if hasattr(b, 'text')).strip()
+        if raw.startswith('```'):
+            raw = raw.split('\n', 1)[1].rsplit('```', 1)[0].strip()
+        sections = json.loads(raw)
+        u = message.usage
+        tok_in  = getattr(u, 'input_tokens', 0)
+        tok_out = getattr(u, 'output_tokens', 0)
+        cost_usd = (tok_in * 3 + tok_out * 15) / 1_000_000
+        usage_info = {
+            'input_tokens':  tok_in,
+            'output_tokens': tok_out,
+            'cost_usd':      round(cost_usd, 4),
+        }
+        print(f"Run report [{date} run {run_number}]: {tok_in} in / {tok_out} out tokens ≈ ${cost_usd:.4f}")
+    except Exception as e:
+        sections = {
+            'executive_summary': f'<em>Report generation failed: {e}</em>',
+            'methodology': '', 'results_narrative': '',
+            'compliance': '', 'conclusions': '', 'recommendations': '',
+        }
+
+    run_rows = [{'run': run_number, 'start': proj['start'], **st}]
+
+    return render_template(
+        'report.html',
+        date=date,
+        pi_name=PI_NAME,
+        sess=sess,
+        run_rows=run_rows,
+        session_leq=st.get('leq'),
+        session_la10=st.get('la10'),
+        session_la90=st.get('la90'),
+        session_lmax=st.get('lmax'),
+        session_pmx=st.get('pmx'),
+        total_duration_s=proj.get('n', 0),
+        wx=wx,
+        wx_str=wx_str,
+        sections=sections,
+        usage_info=usage_info,
+        generated_at=datetime.now().strftime('%d %B %Y at %H:%M'),
+    )
+
+
+# ── Reports ───────────────────────────────────────────────────────────────────
+
+_MODEL_PRICING = {
+    'claude-haiku-4-5-20251001': (0.80, 4.00),
+    'claude-sonnet-5':           (3.00, 15.00),
+    'claude-opus-5':             (15.00, 75.00),
+}
+
+
+def _build_session_data_block(sess, run_rows, all_laeq, total_duration_s):
+    """Return the formatted session data text injected into report prompts."""
+    loc_parts = [sess.get('loc'), sess.get('post')]
+    location_str = ', '.join(p for p in loc_parts if p) or 'Not recorded'
+    wx = sess.get('wx') or {}
+
+    def wind_dir(deg):
+        if deg is None:
+            return ''
+        dirs = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW']
+        return dirs[round(deg / 45) % 8]
+
+    wx_parts = []
+    if wx.get('ws') is not None:
+        wx_parts.append(f"{wx['ws']} mph {wind_dir(wx.get('wd'))}")
+    if wx.get('tn') is not None and wx.get('tx') is not None:
+        wx_parts.append(f"temp {wx['tn']}–{wx['tx']} °C")
+    if wx.get('pr'):
+        wx_parts.append(f"precip {wx['pr']} mm")
+    wx_str = ', '.join(wx_parts) or 'Not available'
+
+    session_leq  = _energy_avg_db(all_laeq) if all_laeq else None
+    session_la90 = _percentile(sorted(all_laeq), 10) if all_laeq else None
+    session_la10 = _percentile(sorted(all_laeq), 90) if all_laeq else None
+    session_lmax = max(all_laeq) if all_laeq else None
+    session_pmx  = max((r.get('pmx', 0) or 0 for r in run_rows), default=None)
+
+    run_lines = [
+        f"  Run {r['run']} ({r['start']}, {r['n']} s): "
+        f"LAeq {r.get('leq')} dB | LA10 {r.get('la10')} | LA50 {r.get('la50')} | "
+        f"LA90 {r.get('la90')} | LAmax {r.get('lmax')} | LCpeak {r.get('pmx')} | "
+        f"Time≥85dB {r.get('pct85')}%"
+        for r in run_rows
+    ]
+
+    gps_str = f"{sess['lat']}, {sess['lng']}" if sess.get('lat') and sess.get('lng') else 'Not recorded'
+    scope = f"Run {run_rows[0]['run']} only" if len(run_rows) == 1 else f"Full session ({len(run_rows)} runs)"
+    stat_label = f"RUN {run_rows[0]['run']} STATISTICS" if len(run_rows) == 1 else "SESSION STATISTICS"
+    return (
+        f"Instrument: Norsonic NOR140 Class 1 precision sound level meter (IEC 61672-1:2013).\n"
+        f"Measurement date: {sess['d']}\n"
+        f"Report scope: {scope}\n"
+        f"Location: {location_str}\n"
+        f"Recorder: {sess.get('name') or 'Not recorded'}\n"
+        f"GPS: {gps_str}\n"
+        f"Notes: {sess.get('notes') or 'None'}\n"
+        f"Weather: {wx_str}\n\n"
+        f"{stat_label}:\n"
+        f"  Total duration: {total_duration_s} seconds\n"
+        f"  LAeq: {session_leq} dB(A)\n"
+        f"  LA10: {session_la10} dB(A)\n"
+        f"  LA90: {session_la90} dB(A)\n"
+        f"  LAmax: {session_lmax} dB(A)\n"
+        f"  LCpeak max: {session_pmx} dB(C)\n\n"
+        f"PER-RUN BREAKDOWN:\n" + '\n'.join(run_lines)
+    ), {
+        'session_leq': session_leq, 'session_la10': session_la10,
+        'session_la90': session_la90, 'session_lmax': session_lmax,
+        'session_pmx': session_pmx, 'wx': wx, 'wx_str': wx_str,
+    }
+
+
+_REPORT_TOOL = {
+    'name': 'submit_report',
+    'description': 'Submit the completed noise assessment report sections as HTML',
+    'input_schema': {
+        'type': 'object',
+        'properties': {
+            'executive_summary': {'type': 'string', 'description': 'HTML content'},
+            'methodology':       {'type': 'string', 'description': 'HTML content'},
+            'results_narrative': {'type': 'string', 'description': 'HTML content'},
+            'compliance':        {'type': 'string', 'description': 'HTML content'},
+            'conclusions':       {'type': 'string', 'description': 'HTML content'},
+            'recommendations':   {'type': 'string', 'description': 'HTML content'},
+        },
+        'required': ['executive_summary', 'methodology', 'results_narrative',
+                     'compliance', 'conclusions', 'recommendations'],
+    },
+}
+
+
+def _call_claude(prompt, model, thinking_level):
+    """Call Claude and return (sections_dict, input_tokens, output_tokens, cost_usd)."""
+    ANTHROPIC_KEY = os.environ.get('ANTHROPIC_API_KEY', '')
+    if not ANTHROPIC_KEY:
+        raise RuntimeError('ANTHROPIC_API_KEY not set')
+
+    import anthropic as _anthropic
+    client = _anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+
+    # Strip any old JSON-output instruction from the template prompt — tool_use handles that now
+    for phrase in (
+        'Respond with valid JSON only. No markdown fencing. No preamble.',
+        'No markdown fencing. No preamble.',
+    ):
+        prompt = prompt.replace(phrase, '').strip()
+
+    kwargs = dict(
+        model=model,
+        max_tokens=16000,
+        tools=[_REPORT_TOOL],
+        tool_choice={'type': 'tool', 'name': 'submit_report'},
+        messages=[{'role': 'user', 'content': prompt}],
+    )
+    if thinking_level == 'standard':
+        kwargs['thinking']      = {'type': 'adaptive'}
+        kwargs['output_config'] = {'effort': 'medium'}
+    elif thinking_level == 'extended':
+        kwargs['thinking']      = {'type': 'adaptive'}
+        kwargs['output_config'] = {'effort': 'high'}
+
+    message = client.messages.create(**kwargs)
+
+    # tool_use block follows any thinking blocks; SDK already parsed the JSON for us
+    tool_use = next(
+        (b for b in message.content if getattr(b, 'type', '') == 'tool_use'),
+        None,
+    )
+    if tool_use is None:
+        raise RuntimeError('No tool_use block in Claude response')
+    sections = tool_use.input  # dict — no JSON parsing needed, no escaping issues
+
+    u = message.usage
+    tok_in  = getattr(u, 'input_tokens', 0)
+    tok_out = getattr(u, 'output_tokens', 0)
+    price_in, price_out = _MODEL_PRICING.get(model, (3.0, 15.0))
+    cost_usd = (tok_in * price_in + tok_out * price_out) / 1_000_000
+    return sections, tok_in, tok_out, round(cost_usd, 4)
+
+
+def _prepare_session_for_report(date, run_number=None):
+    """Fetch session + compute stats. run_number=None means all runs.
+    Returns (sess, run_rows, all_laeq, total_s) or None."""
+    all_sessions = get_all_sessions_json()['sessions']
+    sess = next((s for s in all_sessions if s['d'] == date), None)
+    if not sess:
+        return None
+    all_projects = sess.get('projects', [])
+    if run_number is not None:
+        if run_number < 1 or run_number > len(all_projects):
+            return None
+        projects = [all_projects[run_number - 1]]
+        base_num = run_number
+    else:
+        projects = all_projects
+        base_num = None
+    run_rows, all_laeq = [], []
+    for i, proj in enumerate(projects, 1):
+        rn = base_num if base_num is not None else i
+        st = _run_stats(proj)
+        run_rows.append({'run': rn, 'start': proj['start'], **st})
+        all_laeq.extend(_expand_run(proj))
+    total_s = sum(p.get('n', 0) for p in projects)
+    return sess, run_rows, all_laeq, total_s
+
+
+@app.route('/reports')
+@login_required
+def reports_page():
+    all_sessions = get_all_sessions_json()['sessions']
+    sessions_with_runs = [
+        {
+            'd': s['d'],
+            'runs': [{'n': i + 1, 'start': p['start'], 'dur': p.get('n', 0)}
+                     for i, p in enumerate(s.get('projects', []))],
+        }
+        for s in reversed(all_sessions)
+    ]
+    templates = get_report_templates()
+    history = get_generated_reports()
+    return render_template(
+        'reports.html',
+        pi_name=PI_NAME,
+        sessions_with_runs=sessions_with_runs,
+        templates=templates,
+        history=history,
+    )
+
+
+@app.route('/api/report-templates', methods=['GET'])
+@login_required
+def api_list_templates():
+    return jsonify(get_report_templates())
+
+
+@app.route('/api/report-templates', methods=['POST'])
+@login_required
+def api_create_template():
+    data = request.get_json(force=True) or {}
+    name = (data.get('name') or '').strip()
+    if not name:
+        return jsonify({'error': 'name required'}), 400
+    tid = save_report_template(
+        name=name,
+        description=(data.get('description') or '').strip(),
+        prompt=(data.get('prompt') or '').strip(),
+        is_default=bool(data.get('is_default')),
+    )
+    return jsonify({'id': tid})
+
+
+@app.route('/api/report-templates/<int:tid>', methods=['PUT'])
+@login_required
+def api_update_template(tid):
+    data = request.get_json(force=True) or {}
+    name = (data.get('name') or '').strip()
+    if not name:
+        return jsonify({'error': 'name required'}), 400
+    update_report_template(
+        tid=tid,
+        name=name,
+        description=(data.get('description') or '').strip(),
+        prompt=(data.get('prompt') or '').strip(),
+        is_default=data.get('is_default'),
+    )
+    return jsonify({'ok': True})
+
+
+@app.route('/api/report-templates/<int:tid>', methods=['DELETE'])
+@login_required
+def api_delete_template(tid):
+    delete_report_template(tid)
+    return jsonify({'ok': True})
+
+
+@app.route('/api/generate-report', methods=['POST'])
+@login_required
+def api_generate_report():
+    data = request.get_json(force=True) or {}
+    date           = data.get('session_date', '').strip()
+    template_id    = data.get('template_id')
+    model          = data.get('model', 'claude-sonnet-5')
+    thinking_level = data.get('thinking_level', 'none')
+    run_number     = data.get('run_number')  # int or None = all runs
+    if run_number is not None:
+        run_number = int(run_number)
+
+    if not date:
+        return jsonify({'error': 'session_date required'}), 400
+
+    result = _prepare_session_for_report(date, run_number)
+    if not result:
+        return jsonify({'error': f'Session {date} not found'}), 404
+    sess, run_rows, all_laeq, total_s = result
+
+    tmpl = get_report_template(template_id) if template_id else None
+    if not tmpl:
+        templates = get_report_templates()
+        tmpl = next((t for t in templates if t['is_default']), templates[0] if templates else None)
+    if not tmpl:
+        return jsonify({'error': 'No report templates configured'}), 400
+
+    session_data_block, _ = _build_session_data_block(sess, run_rows, all_laeq, total_s)
+    prompt = tmpl['prompt'].replace('{{session_data}}', session_data_block)
+
+    try:
+        sections, tok_in, tok_out, cost_usd = _call_claude(prompt, model, thinking_level)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+    run_label = f"Run {run_number}" if run_number else "All runs"
+    rid = save_generated_report(
+        session_date=date,
+        template_id=tmpl['id'],
+        template_name=tmpl['name'],
+        model=model,
+        thinking_level=thinking_level,
+        sections_json=json.dumps(sections),
+        input_tokens=tok_in,
+        output_tokens=tok_out,
+        cost_usd=cost_usd,
+        run_number=run_number,
+        run_label=run_label,
+    )
+    print(f"Report generated [{date}] template={tmpl['name']} model={model} "
+          f"thinking={thinking_level}: {tok_in}/{tok_out} tokens ≈ ${cost_usd:.4f}")
+    return jsonify({'report_id': rid, 'cost_usd': cost_usd,
+                    'input_tokens': tok_in, 'output_tokens': tok_out})
+
+
+@app.route('/reports/<int:rid>')
+@login_required
+def view_report(rid):
+    stored = get_generated_report(rid)
+    if not stored:
+        abort(404)
+
+    sections = json.loads(stored['sections_json'])
+    date = stored['session_date']
+
+    result = _prepare_session_for_report(date, stored.get('run_number'))
+    if result:
+        sess, run_rows, all_laeq, total_s = result
+        _, stats = _build_session_data_block(sess, run_rows, all_laeq, total_s)
+    else:
+        sess, run_rows, stats = {'d': date}, [], {}
+        total_s = 0
+
+    usage_info = {
+        'input_tokens':  stored.get('input_tokens'),
+        'output_tokens': stored.get('output_tokens'),
+        'cost_usd':      stored.get('cost_usd'),
+        'model':         stored.get('model'),
+        'thinking_level': stored.get('thinking_level'),
+        'template_name': stored.get('template_name'),
+    }
+
+    return render_template(
+        'report.html',
+        date=date,
+        pi_name=PI_NAME,
+        sess=sess,
+        run_rows=run_rows,
+        session_leq=stats.get('session_leq'),
+        session_la10=stats.get('session_la10'),
+        session_la90=stats.get('session_la90'),
+        session_lmax=stats.get('session_lmax'),
+        session_pmx=stats.get('session_pmx'),
+        total_duration_s=total_s,
+        wx=stats.get('wx', {}),
+        wx_str=stats.get('wx_str', ''),
+        sections=sections,
+        usage_info=usage_info,
+        generated_at=stored.get('created_at', ''),
+    )
+
+
+@app.route('/api/generated-reports', methods=['GET'])
+@login_required
+def api_list_reports():
+    return jsonify(get_generated_reports())
+
+
+@app.route('/api/generated-reports/<int:rid>', methods=['DELETE'])
+@login_required
+def api_delete_report(rid):
+    delete_generated_report(rid)
+    return jsonify({'ok': True})
+
+
 if __name__ == '__main__':
     init_db()
     port = int(os.environ.get('PORT', 5001))
-    app.run(host='0.0.0.0', port=port, debug=False)
+    app.run(host='0.0.0.0', port=port, debug=False, threaded=True)

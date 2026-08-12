@@ -1,16 +1,26 @@
 """
-Parse NOR140 binary files from a ZIP upload or filesystem path.
-Used server-side on the Pi.
+Parse NOR140 binary data from a ZIP upload.
+Handles ZIPs from any folder level of the SD card:
+  - Full SD card root (contains MEAS118/)
+  - MEAS118/ folder
+  - Date folder (YYMMDD/)
+  - PART0000/ folder
+  - PROJ folder (PROJnnnn/ with two DAT files inside)
+  - Flat ZIP of just the two DAT files from one session
 """
 import struct
 import math
 import zipfile
 import io
-import os
+import re
 
-CAP_LAEQ  = 130
-CAP_PEAK  = 160
-EXCLUDE   = {'000101'}
+CAP_LAEQ = 130
+CAP_PEAK = 145
+_DB_OFFSET = 40.0  # NOR140 PROF stores (actual_dB + 40) * 100 as uint16
+EXCLUDE  = {'000101'}  # factory test date
+
+_DATE_RE = re.compile(r'^\d{6}$')
+_PROJ_RE = re.compile(r'^PROJ', re.IGNORECASE)
 
 
 def bcd(b):
@@ -18,16 +28,19 @@ def bcd(b):
 
 
 def _read_glob(data):
+    """Extract ISO date and HH:MM:SS start time from a GLOB file."""
     o = 0x19
     yy, mo, dd, hh, mm, ss = (bcd(data[o + i]) for i in range(6))
     return f"20{yy:02d}-{mo:02d}-{dd:02d}", f"{hh:02d}:{mm:02d}:{ss:02d}"
 
 
 def _read_prof(data):
+    """Return list of [LAeq, f1, f2, f3, LCpeak] per second.
+    NOR140 stores (actual_dB + 40) * 100 as uint16 LE; we subtract the offset here."""
     if len(data) < 13:
         return []
     return [
-        [struct.unpack_from('<H', data, off + i * 2)[0] / 100 for i in range(5)]
+        [struct.unpack_from('<H', data, off + i * 2)[0] / 100 - _DB_OFFSET for i in range(5)]
         for off in range(3, len(data) - 9, 10)
     ]
 
@@ -45,7 +58,7 @@ def _energy_avg(values):
 
 
 def _parse_session_files(glob_data, prof_data):
-    """Parse one GLOB+PROF pair into a run dict, or None if invalid."""
+    """Parse one GLOB+PROF pair. Returns (date_str, run_dict) or (None, None)."""
     try:
         date, start = _read_glob(glob_data)
     except Exception:
@@ -55,10 +68,10 @@ def _parse_session_files(glob_data, prof_data):
     if not recs:
         return date, None
 
-    laeq_raw   = [_clamp(r[0], 30, CAP_LAEQ) for r in recs]
-    lcpeak_raw = [_clamp(r[4], 30, CAP_PEAK)  for r in recs]
+    laeq_raw   = [_clamp(r[0], 10, CAP_LAEQ) for r in recs]
+    lcpeak_raw = [_clamp(r[4], 10, CAP_PEAK)  for r in recs]
 
-    if max(laeq_raw) > 200:  # corrupted
+    if max(laeq_raw) > 140:  # corrupted record
         return date, None
 
     n    = len(recs)
@@ -78,62 +91,104 @@ def _parse_session_files(glob_data, prof_data):
     }
 
 
+def _classify_filename(fname):
+    """
+    Return 'glob' or 'prof' if the filename is a GLOB/PROF data file, else None.
+    Accepts GLOB0001.DAT, GLOB0001.DATA, glob0001.dat, etc.
+    """
+    up = fname.upper()
+    stem = up.split('.')[0]  # strip extension — accept any .DAT / .DATA / etc.
+    if stem.startswith('GLOB'):
+        return 'glob'
+    if stem.startswith('PROF'):
+        return 'prof'
+    return None
+
+
+def _proj_key_from_filename(fname):
+    """
+    Derive a PROJ sort key from a GLOB/PROF filename when no PROJ folder is
+    present in the path. E.g. 'GLOB0001.DAT' → 'PROJ0001'.
+    Falls back to 'PROJ0000'.
+    """
+    up = fname.upper()
+    stem = up.split('.')[0]
+    digits = stem[4:]  # strip 'GLOB' or 'PROF'
+    return f"PROJ{digits}" if digits.isdigit() else 'PROJ0000'
+
+
+def parse_files(file_pairs):
+    """
+    Parse NOR140 data from a list of (relative_path, bytes) tuples.
+    Used for folder uploads where the browser sends files individually.
+    Assembles an in-memory ZIP so the same parse_zip logic applies.
+    """
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w') as zf:
+        for path, data in file_pairs:
+            zf.writestr(path, data)
+    return parse_zip(buf.getvalue())
+
+
 def parse_zip(zip_bytes):
     """
-    Parse a ZIP of an SD card MEAS118 folder (or a single date folder).
-    Returns list of session dicts: [{d, avg, mx, projects:[...]}, ...]
+    Parse a ZIP of NOR140 SD card data from any folder level.
+
+    The SD card structure is:
+      MEAS118/ → YYMMDD/ → PART0000/ → PROJnnnn/ → GLOBnnnn.DAT + PROFnnnn.DAT
+
+    The ZIP may start at any level: SD root, MEAS118, a date folder, PART folder,
+    a single PROJ folder, or even a flat ZIP of just the two DAT files.
+
+    Returns a list of session dicts: [{d, avg, mx, projects:[...]}, ...]
     """
     zf = zipfile.ZipFile(io.BytesIO(zip_bytes))
-    names = zf.namelist()
+    files = {n: zf.read(n) for n in zf.namelist() if not n.endswith('/')}
 
-    # Build a lookup: path → bytes
-    files = {n: zf.read(n) for n in names if not n.endswith('/')}
-
-    # Group GLOB/PROF pairs by (date_folder, part, proj)
-    # Paths may be: MEAS118/260810/PART0000/PROJ0001/GLOB0001.DAT
-    #           or: 260810/PART0000/PROJ0001/GLOB0001.DAT
-    #           or: PART0000/PROJ0001/GLOB0001.DAT  (single session)
-    sessions = {}  # date_str -> {proj_key -> {glob, prof}}
+    # Collect GLOB/PROF pairs keyed by (date_folder_or_sentinel, proj_key).
+    # date_folder: a 6-digit string from the path, or '__from_glob__' if absent.
+    # proj_key:    a 'PROJnnnn' string from the path, or synthesised from filename.
+    pairs = {}  # (date_folder, proj_key) -> {'glob': bytes, 'prof': bytes}
 
     for path, data in files.items():
         parts = [p for p in path.replace('\\', '/').split('/') if p]
-        fname = parts[-1].upper()
-        if not (fname.startswith('GLOB') or fname.startswith('PROF')):
+        fname = parts[-1]
+        kind = _classify_filename(fname)
+        if kind is None:
             continue
 
-        # Find the date folder (6 digits) and proj folder
+        # Walk path parts to find date folder and PROJ folder.
         date_folder = None
         proj_folder = None
-        for p in parts:
-            if p.isdigit() and len(p) == 6 and p not in EXCLUDE:
-                date_folder = p
-            if p.upper().startswith('PROJ'):
-                proj_folder = p.upper()
+        for part in parts[:-1]:  # exclude the filename itself
+            up = part.upper()
+            if _DATE_RE.match(part) and part not in EXCLUDE:
+                date_folder = part
+            elif _PROJ_RE.match(up):
+                proj_folder = up
 
-        if not proj_folder:
-            continue
+        # If no PROJ folder in path, synthesise one from the filename number.
+        if proj_folder is None:
+            proj_folder = _proj_key_from_filename(fname)
 
-        # If no date folder found, treat it as a single-session upload
-        if not date_folder:
-            date_folder = '__upload__'
+        date_key = date_folder if date_folder else '__from_glob__'
+        key = (date_key, proj_folder)
+        pairs.setdefault(key, {})
+        pairs[key][kind] = data
 
-        key = (date_folder, proj_folder)
-        sessions.setdefault(key, {})
-        if fname.startswith('GLOB'):
-            sessions[key]['glob'] = data
-        elif fname.startswith('PROF'):
-            sessions[key]['prof'] = data
-
-    # Build session list grouped by date
+    # Parse each complete GLOB+PROF pair and group by resolved date.
     by_date = {}
-    for (date_folder, proj_folder), pair in sorted(sessions.items()):
+    for (date_key, proj_folder), pair in sorted(pairs.items()):
         if 'glob' not in pair or 'prof' not in pair:
             continue
         date, run = _parse_session_files(pair['glob'], pair['prof'])
         if not date or not run:
             continue
+        if date in ('2001-01-01', '2000-01-01'):  # factory/unset dates
+            continue
         by_date.setdefault(date, []).append((proj_folder, run))
 
+    # Assemble into per-day session dicts.
     result = []
     for date in sorted(by_date):
         projects = [run for _, run in sorted(by_date[date])]

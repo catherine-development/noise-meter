@@ -1,0 +1,414 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Reports · {{ pi_name }}</title>
+<style>
+:root{--bg:#EFF2F7;--surface:#fff;--border:#D0D8E8;--text:#0C1A2E;--text2:#3D5270;--text3:#7A92AE;--accent:#2660C4;--ok:#1a7f37;--err:#c0392b;--warn:#7a5000;--font:system-ui,-apple-system,'Helvetica Neue',sans-serif;--font-data:'SF Mono','Cascadia Code','Consolas',monospace}
+@media(prefers-color-scheme:dark){:root{--bg:#090F1C;--surface:#111C30;--border:#1E2E48;--text:#E8EEF8;--text2:#8BA4C4;--text3:#4A6080;--accent:#4A90E8;--ok:#2ea043;--err:#e05c5c;--warn:#c49a00}}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:var(--font);background:var(--bg);color:var(--text);min-height:100vh}
+
+.site-nav{display:flex;align-items:center;gap:0;padding:0 20px;background:var(--surface);border-bottom:1px solid var(--border);font-size:13px}
+.nav-brand{font-weight:600;letter-spacing:-.01em;margin-right:24px}
+.nav-pi{color:var(--text3);font-size:11px;margin-right:auto;padding-right:16px}
+.nav-tab{color:var(--text2);text-decoration:none;padding:12px 14px;border-bottom:2px solid transparent;white-space:nowrap;font-size:13px;font-weight:500;transition:color .15s}
+.nav-tab:hover{color:var(--text)}
+.nav-tab.active{color:var(--accent);border-bottom-color:var(--accent)}
+.nav-tab-primary{background:var(--accent);color:#fff!important;border-radius:4px;padding:5px 12px;margin-left:8px;border-bottom:none!important}
+.nav-tab-primary:hover{opacity:.9}
+
+.page{max-width:1000px;margin:32px auto;padding:0 20px 80px}
+h1{font-size:20px;font-weight:700;margin-bottom:4px}
+.sub{color:var(--text3);font-size:13px;margin-bottom:28px}
+
+.section-card{background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:24px;overflow:hidden}
+.section-head{padding:14px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
+.section-head h2{font-size:14px;font-weight:600}
+.section-body{padding:18px}
+
+label{display:block;font-size:12px;font-weight:600;color:var(--text2);margin-bottom:5px;letter-spacing:.03em;text-transform:uppercase}
+select,input[type=text],textarea{width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:5px;background:var(--bg);color:var(--text);font-family:var(--font);font-size:13px;outline:none;transition:border-color .15s}
+select:focus,input[type=text]:focus,textarea:focus{border-color:var(--accent)}
+textarea{resize:vertical;font-family:var(--font-data);font-size:12px;line-height:1.5}
+
+.form-row{display:grid;gap:14px;margin-bottom:14px}
+.form-row.cols-2{grid-template-columns:1fr 1fr}
+.form-row.cols-3{grid-template-columns:1fr 1fr 1fr}
+
+.btn{display:inline-flex;align-items:center;gap:6px;padding:8px 16px;border-radius:5px;font-size:13px;font-weight:500;cursor:pointer;border:none;transition:opacity .15s}
+.btn:hover{opacity:.85}
+.btn-primary{background:var(--accent);color:#fff}
+.btn-sm{padding:5px 11px;font-size:12px}
+.btn-ghost{background:transparent;color:var(--text2);border:1px solid var(--border)}
+.btn-danger{background:var(--err);color:#fff}
+.btn-success{background:var(--ok);color:#fff}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+
+.spinner{display:inline-block;width:14px;height:14px;border:2px solid rgba(255,255,255,.3);border-top-color:#fff;border-radius:50%;animation:spin .7s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+.notice{padding:10px 14px;border-radius:5px;font-size:13px;margin-top:14px;display:none}
+.notice.ok{background:rgba(26,127,55,.1);color:var(--ok);border:1px solid rgba(26,127,55,.25)}
+.notice.err{background:rgba(192,57,43,.08);color:var(--err);border:1px solid rgba(192,57,43,.2)}
+.notice.info{background:rgba(38,96,196,.07);color:var(--accent);border:1px solid rgba(38,96,196,.2)}
+
+/* History table */
+.hist-table{width:100%;border-collapse:collapse;font-size:12px}
+.hist-table th{padding:8px 12px;text-align:left;font-size:10px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--text3);border-bottom:1px solid var(--border);white-space:nowrap}
+.hist-table td{padding:9px 12px;border-bottom:1px solid var(--border);vertical-align:middle;white-space:nowrap}
+.hist-table tr:last-child td{border-bottom:none}
+.hist-table .td-mono{font-family:var(--font-data);font-variant-numeric:tabular-nums}
+.badge{display:inline-block;padding:2px 7px;border-radius:10px;font-size:10px;font-weight:600;letter-spacing:.03em}
+.badge-thinking{background:rgba(38,96,196,.12);color:var(--accent)}
+.badge-none{background:var(--bg);color:var(--text3);border:1px solid var(--border)}
+.hist-empty{padding:32px;text-align:center;color:var(--text3);font-size:13px}
+
+/* Templates list */
+.tmpl-list{display:flex;flex-direction:column;gap:0}
+.tmpl-row{padding:12px 16px;border-bottom:1px solid var(--border);display:flex;align-items:flex-start;gap:12px}
+.tmpl-row:last-child{border-bottom:none}
+.tmpl-info{flex:1;min-width:0}
+.tmpl-name{font-size:13px;font-weight:600}
+.tmpl-desc{font-size:12px;color:var(--text3);margin-top:2px}
+.tmpl-default{display:inline-block;background:rgba(26,127,55,.12);color:var(--ok);font-size:10px;font-weight:600;padding:1px 6px;border-radius:8px;margin-left:6px;letter-spacing:.03em}
+.tmpl-actions{display:flex;gap:6px;flex-shrink:0}
+
+/* Modal */
+.modal-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:100;display:none;align-items:center;justify-content:center}
+.modal-backdrop.open{display:flex}
+.modal{background:var(--surface);border:1px solid var(--border);border-radius:10px;width:90%;max-width:680px;max-height:90vh;overflow-y:auto;box-shadow:0 20px 60px rgba(0,0,0,.25)}
+.modal-head{padding:16px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
+.modal-head h3{font-size:15px;font-weight:600}
+.modal-close{background:none;border:none;font-size:20px;color:var(--text3);cursor:pointer;line-height:1;padding:2px 6px;border-radius:4px}
+.modal-close:hover{background:var(--bg)}
+.modal-body{padding:20px}
+.modal-foot{padding:14px 20px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:10px}
+
+.placeholder-hint{font-size:11px;color:var(--text3);margin-top:6px;line-height:1.6}
+.placeholder-hint code{background:var(--bg);padding:1px 4px;border-radius:3px;font-family:var(--font-data)}
+</style>
+</head>
+<body>
+
+<nav class="site-nav">
+  <span class="nav-brand">NOR140 Noise Monitor</span>
+  <span class="nav-pi">{{ pi_name }}</span>
+  <a href="/" class="nav-tab">Sessions</a>
+  <a href="/manage" class="nav-tab">Manage</a>
+  <a href="/reports" class="nav-tab active">Reports</a>
+  <a href="/upload" class="nav-tab nav-tab-primary">+ Add</a>
+  <a href="/logout" class="nav-tab" style="margin-left:8px;font-size:12px;color:var(--text3)">Sign out</a>
+</nav>
+
+<div class="page">
+  <h1>Reports</h1>
+  <p class="sub">Generate professional noise assessment reports using Claude AI. Reports are saved to history.</p>
+
+  <!-- Generate -->
+  <div class="section-card">
+    <div class="section-head"><h2>Generate Report</h2></div>
+    <div class="section-body">
+      <div class="form-row cols-3">
+        <div>
+          <label for="selDate">Session</label>
+          <select id="selDate" onchange="onSessionChange()">
+            <option value="">— select a session —</option>
+            {% for s in sessions_with_runs %}
+            <option value="{{ s.d }}">{{ s.d }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div>
+          <label for="selRun">Run</label>
+          <select id="selRun" disabled>
+            <option value="">— select session first —</option>
+          </select>
+        </div>
+        <div>
+          <label for="selTemplate">Template</label>
+          <select id="selTemplate">
+            {% for t in templates %}
+            <option value="{{ t.id }}" {% if t.is_default %}selected{% endif %}>{{ t.name }}{% if t.is_default %} ★{% endif %}</option>
+            {% endfor %}
+          </select>
+        </div>
+      </div>
+      <div class="form-row cols-2">
+        <div>
+          <label for="selModel">Model</label>
+          <select id="selModel" onchange="onModelChange()">
+            <option value="claude-sonnet-5">Sonnet 5 (recommended)</option>
+            <option value="claude-opus-5">Opus 5 (most thorough)</option>
+            <option value="claude-haiku-4-5-20251001">Haiku 4.5 (fast, economical)</option>
+          </select>
+        </div>
+        <div>
+          <label for="selThinking">Thinking</label>
+          <select id="selThinking">
+            <option value="none">None</option>
+            <option value="standard">Standard</option>
+            <option value="extended">Extended</option>
+          </select>
+        </div>
+      </div>
+      <div style="display:flex;align-items:center;gap:12px">
+        <button class="btn btn-primary" id="btnGenerate" onclick="generateReport()">
+          Generate Report
+        </button>
+        <div class="notice" id="genNotice"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- History -->
+  <div class="section-card">
+    <div class="section-head"><h2>Report History</h2></div>
+    {% if history %}
+    <div style="overflow-x:auto">
+      <table class="hist-table" id="histTable">
+        <thead>
+          <tr>
+            <th>Date</th>
+            <th>Run</th>
+            <th>Template</th>
+            <th>Model</th>
+            <th>Thinking</th>
+            <th style="text-align:right">Cost</th>
+            <th>Generated</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="histBody">
+          {% for r in history %}
+          <tr id="rrow-{{ r.id }}">
+            <td class="td-mono">{{ r.session_date }}</td>
+            <td>{{ r.run_label or 'All runs' }}</td>
+            <td>{{ r.template_name or '—' }}</td>
+            <td style="font-size:11px;color:var(--text2)">{{ r.model.replace('claude-','').replace('-20251001','') }}</td>
+            <td>
+              {% if r.thinking_level != 'none' %}
+              <span class="badge badge-thinking">{{ r.thinking_level }}</span>
+              {% else %}
+              <span class="badge badge-none">off</span>
+              {% endif %}
+            </td>
+            <td class="td-mono" style="text-align:right">{% if r.cost_usd %}${{ '%.4f'|format(r.cost_usd) }}{% else %}—{% endif %}</td>
+            <td style="font-size:11px;color:var(--text3)">{{ r.created_at[:16] }}</td>
+            <td style="display:flex;gap:6px">
+              <a href="/reports/{{ r.id }}" target="_blank" class="btn btn-ghost btn-sm">View</a>
+              <button class="btn btn-danger btn-sm" onclick="deleteReport({{ r.id }})">Delete</button>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <div class="hist-empty" id="histEmpty">No reports generated yet.</div>
+    {% endif %}
+  </div>
+
+  <!-- Templates -->
+  <div class="section-card">
+    <div class="section-head">
+      <h2>Report Templates</h2>
+      <button class="btn btn-ghost btn-sm" onclick="openTemplateModal()">+ New template</button>
+    </div>
+    <div class="tmpl-list" id="tmplList">
+      {% for t in templates %}
+      <div class="tmpl-row" id="tmpl-{{ t.id }}">
+        <div class="tmpl-info">
+          <div class="tmpl-name">{{ t.name }}{% if t.is_default %}<span class="tmpl-default">default</span>{% endif %}</div>
+          {% if t.description %}<div class="tmpl-desc">{{ t.description }}</div>{% endif %}
+        </div>
+        <div class="tmpl-actions">
+          <button class="btn btn-ghost btn-sm" onclick="editTemplate({{ t.id }}, {{ t.name|tojson }}, {{ t.description|tojson }}, {{ t.prompt|tojson }}, {{ t.is_default }})">Edit</button>
+          <button class="btn btn-danger btn-sm" onclick="deleteTemplate({{ t.id }})">Delete</button>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+</div>
+
+<!-- Template editor modal -->
+<div class="modal-backdrop" id="tmplModal">
+  <div class="modal">
+    <div class="modal-head">
+      <h3 id="modalTitle">New Template</h3>
+      <button class="modal-close" onclick="closeTemplateModal()">×</button>
+    </div>
+    <div class="modal-body">
+      <input type="hidden" id="tmplId" value="">
+      <div class="form-row" style="margin-bottom:14px">
+        <div>
+          <label for="tmplName">Template name</label>
+          <input type="text" id="tmplName" placeholder="e.g. Local Government Enforcement">
+        </div>
+      </div>
+      <div class="form-row" style="margin-bottom:14px">
+        <div>
+          <label for="tmplDesc">Description (optional)</label>
+          <input type="text" id="tmplDesc" placeholder="Short description of when to use this template">
+        </div>
+      </div>
+      <div class="form-row" style="margin-bottom:6px">
+        <div>
+          <label for="tmplPrompt">Prompt</label>
+          <textarea id="tmplPrompt" rows="14" placeholder="Write your prompt here. Use {{session_data}} where the measurement data should be inserted."></textarea>
+          <p class="placeholder-hint">
+            Use <code>{{session_data}}</code> to insert the full session measurements block (date, location, LAeq, LA10, LA90, LCpeak, per-run breakdown, weather).<br>
+            The prompt must instruct Claude to respond with valid JSON only, with keys: <code>executive_summary</code>, <code>methodology</code>, <code>results_narrative</code>, <code>compliance</code>, <code>conclusions</code>, <code>recommendations</code>.
+          </p>
+        </div>
+      </div>
+      <div style="margin-top:12px">
+        <label style="display:flex;align-items:center;gap:8px;text-transform:none;letter-spacing:0;font-weight:500;cursor:pointer">
+          <input type="checkbox" id="tmplDefault"> Set as default template
+        </label>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-ghost" onclick="closeTemplateModal()">Cancel</button>
+      <button class="btn btn-primary" id="btnSaveTmpl" onclick="saveTemplate()">Save template</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const SESSION_RUNS = {{ sessions_with_runs | tojson }};
+
+function onSessionChange() {
+  const date = document.getElementById('selDate').value;
+  const runSel = document.getElementById('selRun');
+  runSel.innerHTML = '';
+  if (!date) {
+    runSel.disabled = true;
+    runSel.innerHTML = '<option value="">— select session first —</option>';
+    return;
+  }
+  const sess = SESSION_RUNS.find(s => s.d === date);
+  runSel.disabled = false;
+  if (sess && sess.runs.length > 1) {
+    runSel.innerHTML = '<option value="">All runs (session)</option>' +
+      sess.runs.map(r => {
+        const mins = Math.floor(r.dur / 60), secs = r.dur % 60;
+        const dur = mins ? `${mins}m ${secs}s` : `${secs}s`;
+        return `<option value="${r.n}">Run ${r.n} — ${r.start} (${dur})</option>`;
+      }).join('');
+  } else if (sess && sess.runs.length === 1) {
+    const r = sess.runs[0];
+    runSel.innerHTML = `<option value="${r.n}">Run ${r.n} — ${r.start}</option>`;
+  } else {
+    runSel.innerHTML = '<option value="">No runs</option>';
+  }
+}
+
+function onModelChange() {
+  const model = document.getElementById('selModel').value;
+  const thinkSel = document.getElementById('selThinking');
+  const isHaiku = model.includes('haiku');
+  thinkSel.disabled = isHaiku;
+  if (isHaiku) thinkSel.value = 'none';
+}
+
+function showNotice(id, msg, type) {
+  const el = document.getElementById(id);
+  el.textContent = msg;
+  el.className = 'notice ' + type;
+  el.style.display = msg ? 'block' : 'none';
+}
+
+async function generateReport() {
+  const date = document.getElementById('selDate').value;
+  const runVal = document.getElementById('selRun').value;
+  const templateId = document.getElementById('selTemplate').value;
+  const model = document.getElementById('selModel').value;
+  const thinking = document.getElementById('selThinking').value;
+
+  if (!date) { showNotice('genNotice', 'Please select a session.', 'err'); return; }
+
+  const btn = document.getElementById('btnGenerate');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Generating…';
+  showNotice('genNotice', '', 'info');
+
+  const body = {session_date: date, template_id: parseInt(templateId), model, thinking_level: thinking};
+  if (runVal) body.run_number = parseInt(runVal);
+
+  try {
+    const res = await fetch('/api/generate-report', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Generation failed');
+    window.location.href = '/reports/' + data.report_id;
+  } catch (e) {
+    showNotice('genNotice', 'Error: ' + e.message, 'err');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Generate Report';
+  }
+}
+
+async function deleteReport(rid) {
+  if (!confirm('Delete this report from history?')) return;
+  const res = await fetch('/api/generated-reports/' + rid, {method: 'DELETE'});
+  if (res.ok) {
+    const row = document.getElementById('rrow-' + rid);
+    if (row) row.remove();
+  }
+}
+
+function openTemplateModal(id, name, desc, prompt, isDefault) {
+  document.getElementById('tmplId').value = id || '';
+  document.getElementById('tmplName').value = name || '';
+  document.getElementById('tmplDesc').value = desc || '';
+  document.getElementById('tmplPrompt').value = prompt || '';
+  document.getElementById('tmplDefault').checked = !!isDefault;
+  document.getElementById('modalTitle').textContent = id ? 'Edit Template' : 'New Template';
+  document.getElementById('tmplModal').classList.add('open');
+}
+
+function editTemplate(id, name, desc, prompt, isDefault) {
+  openTemplateModal(id, name, desc, prompt, isDefault);
+}
+
+function closeTemplateModal() {
+  document.getElementById('tmplModal').classList.remove('open');
+}
+
+async function saveTemplate() {
+  const id = document.getElementById('tmplId').value;
+  const body = {
+    name: document.getElementById('tmplName').value.trim(),
+    description: document.getElementById('tmplDesc').value.trim(),
+    prompt: document.getElementById('tmplPrompt').value.trim(),
+    is_default: document.getElementById('tmplDefault').checked,
+  };
+  if (!body.name) { alert('Template name is required.'); return; }
+
+  const url = id ? '/api/report-templates/' + id : '/api/report-templates';
+  const method = id ? 'PUT' : 'POST';
+  const res = await fetch(url, {method, headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+  if (res.ok) { closeTemplateModal(); location.reload(); }
+  else { const d = await res.json(); alert('Error: ' + (d.error || 'Save failed')); }
+}
+
+async function deleteTemplate(id) {
+  if (!confirm('Delete this template?')) return;
+  const res = await fetch('/api/report-templates/' + id, {method: 'DELETE'});
+  if (res.ok) { const row = document.getElementById('tmpl-' + id); if (row) row.remove(); }
+}
+
+// Close modal on backdrop click
+document.getElementById('tmplModal').addEventListener('click', function(e) {
+  if (e.target === this) closeTemplateModal();
+});
+</script>
+</body>
+</html>
