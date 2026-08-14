@@ -587,6 +587,86 @@ What remains is only needed for complete robustness across all SD-card variants:
 4. Handling of partial trailing `PROF` records.
 5. Any additional metadata/setup fields needed for a fully faithful Nortfr-style workbook export.
 
+## Historical corpus variation check
+
+Confidence: High for observed corpus.
+
+Historical archive inspected:
+
+```text
+/Users/colinives/noise-meter/original.zip
+```
+
+Contents:
+
+```text
+files: 1103
+GLOB files: 516
+PROF files: 516
+```
+
+Observed `GLOB` sizes:
+
+```text
+1069 bytes:  54 files
+2653 bytes: 459 files
+2668 bytes:   3 files
+```
+
+Validation method:
+
+```text
+1. Decode direct scalar block around 0x03c1..0x0426 as raw/128 - 20.
+2. Decode Lfeq spectrum at 0x0428 where file is long enough.
+3. Check scalar LAeq/LCeq against A/C-weighted Lfeq spectrum.
+4. Decode paired PROF records as raw/128 - 20 and check profile plausibility.
+```
+
+Results by file size:
+
+```text
+1069-byte GLOB files:
+  count: 54
+  scalar block: present and plausible in all 54
+  spectrum block: not present; files are too short for 0x0428 + 36 bands
+  PROF pairs: present/plausible in all 54, with partial trailing bytes common
+  dates observed: 250823, 250824, 250830, 250831
+
+2653-byte GLOB files:
+  count: 459
+  scalar block: plausible in 456
+  spectrum block: present/plausible in 459
+  PROF pairs: plausible in 453
+  three apparent aborted/error measurements have only 3-byte PROF headers and LAeq/LCE scalar cells at -20
+
+2668-byte GLOB files:
+  count: 3
+  scalar block: present/plausible in all 3
+  spectrum block: present/plausible in all 3
+  PROF pairs: present/plausible in all 3
+  interpretation: same known layout plus 15 extra bytes
+```
+
+The three apparent aborted/error 2653-byte examples:
+
+```text
+MEAS118/230614/PART0000/PROJ0008
+MEAS118/230911/PART0000/PROJ0008
+MEAS118/240418/PART0000/PROJ0008
+```
+
+Each has `PROF0008.DAT` length 3 (`00 00 00`) and `LAeq = -20` / `LCE = -20`, indicating no usable equivalent-level measurement despite a normal-size `GLOB`.
+
+Important implementation conclusion:
+
+```text
+Use direct GLOB scalar cells for report/global values.
+Use GLOB spectra for spectral output and as a diagnostic cross-check.
+Do not require scalar LAeq/LCeq to equal spectrum-derived LAeq/LCeq exactly for every historical file.
+```
+
+In the historical corpus, scalar-vs-spectrum agreement is usually close for normal files, but not universal. This means the direct scalar block is the authoritative source for the meter's displayed/report global scalar values.
+
 ## Recommended next step
 
 Confidence: High.
