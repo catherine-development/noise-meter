@@ -14,9 +14,19 @@ import zipfile
 import io
 import re
 
+FLOOR_DB = 20     # NOR140 lower measurement limit — values below this are instrument noise floor
 CAP_LAEQ = 130
 CAP_PEAK = 145
 _DB_OFFSET = 40.0  # NOR140 PROF stores (actual_dB + 40) * 100 as uint16
+_SPECTRUM_OFFSET = 0x0428
+_SPECTRUM_SCALE = 128.0
+_SPECTRUM_DB_OFFSET = 20.0
+_THIRD_OCTAVE_FREQS = (
+    6.3, 8.0, 10.0, 12.5, 16.0, 20.0, 25.0, 31.5, 40.0, 50.0, 63.0, 80.0,
+    100.0, 125.0, 160.0, 200.0, 250.0, 315.0, 400.0, 500.0, 630.0, 800.0,
+    1000.0, 1250.0, 1600.0, 2000.0, 2500.0, 3150.0, 4000.0, 5000.0,
+    6300.0, 8000.0, 10000.0, 12500.0, 16000.0, 20000.0,
+)
 EXCLUDE  = {'000101'}  # factory test date
 
 _DATE_RE = re.compile(r'^\d{6}$')
@@ -27,11 +37,58 @@ def bcd(b):
     return (b >> 4) * 10 + (b & 0xF)
 
 
+def _freq_weight_a(freq_hz):
+    f2 = freq_hz * freq_hz
+    ra = (
+        (12200.0 ** 2) * f2 * f2
+        / (
+            (f2 + 20.6 ** 2)
+            * math.sqrt((f2 + 107.7 ** 2) * (f2 + 737.9 ** 2))
+            * (f2 + 12200.0 ** 2)
+        )
+    )
+    return 20.0 * math.log10(ra) + 2.0
+
+
+def _freq_weight_c(freq_hz):
+    f2 = freq_hz * freq_hz
+    rc = (12200.0 ** 2) * f2 / ((f2 + 20.6 ** 2) * (f2 + 12200.0 ** 2))
+    return 20.0 * math.log10(rc) + 0.06
+
+
+def _spectrum_total(levels, weight_fn):
+    return 10.0 * math.log10(
+        sum(10.0 ** ((level + weight_fn(freq)) / 10.0)
+            for freq, level in zip(_THIRD_OCTAVE_FREQS, levels))
+    )
+
+
+def _read_glob_spectrum(data, offset=_SPECTRUM_OFFSET):
+    end = offset + len(_THIRD_OCTAVE_FREQS) * 2
+    if len(data) < end:
+        return []
+    levels = [
+        struct.unpack_from('<H', data, offset + i * 2)[0] / _SPECTRUM_SCALE - _SPECTRUM_DB_OFFSET
+        for i in range(len(_THIRD_OCTAVE_FREQS))
+    ]
+    if not all(-20.0 <= v <= CAP_LAEQ for v in levels):
+        return []
+    return levels
+
+
 def _read_glob(data):
-    """Extract ISO date and HH:MM:SS start time from a GLOB file."""
+    """Extract ISO date, HH:MM:SS start time, and global spectrum-derived levels."""
     o = 0x19
     yy, mo, dd, hh, mm, ss = (bcd(data[o + i]) for i in range(6))
-    return f"20{yy:02d}-{mo:02d}-{dd:02d}", f"{hh:02d}:{mm:02d}:{ss:02d}"
+    date = f"20{yy:02d}-{mo:02d}-{dd:02d}"
+    start = f"{hh:02d}:{mm:02d}:{ss:02d}"
+    lfeq_spectrum = _read_glob_spectrum(data)
+    metrics = {}
+    if lfeq_spectrum:
+        metrics['lfeq_spectrum'] = lfeq_spectrum
+        metrics['laeq'] = _spectrum_total(lfeq_spectrum, _freq_weight_a)
+        metrics['lceq'] = _spectrum_total(lfeq_spectrum, _freq_weight_c)
+    return date, start, metrics
 
 
 def _read_prof(data):
@@ -60,7 +117,7 @@ def _energy_avg(values):
 def _parse_session_files(glob_data, prof_data):
     """Parse one GLOB+PROF pair. Returns (date_str, run_dict) or (None, None)."""
     try:
-        date, start = _read_glob(glob_data)
+        date, start, glob_metrics = _read_glob(glob_data)
     except Exception:
         return None, None
 
@@ -68,25 +125,38 @@ def _parse_session_files(glob_data, prof_data):
     if not recs:
         return date, None
 
-    laeq_raw   = [_clamp(r[0], 10, CAP_LAEQ) for r in recs]
-    lcpeak_raw = [_clamp(r[4], 10, CAP_PEAK)  for r in recs]
+    laeq_raw   = [_clamp(r[0], FLOOR_DB, CAP_LAEQ) for r in recs]
+    lafmax_raw = [_clamp(r[1], FLOOR_DB, CAP_LAEQ) for r in recs]
+    laimax_raw = [_clamp(r[2], FLOOR_DB, CAP_LAEQ) for r in recs]
+    lcpeak_raw = [_clamp(r[4], FLOOR_DB, CAP_PEAK)  for r in recs]
 
     if max(laeq_raw) > 140:  # corrupted record
         return date, None
 
-    n    = len(recs)
-    step = 1 if n <= 120 else 2 if n <= 300 else 5 if n <= 900 else 10
-    leq  = round(_energy_avg(laeq_raw), 2)
+    n      = len(recs)
+    step   = 1 if n <= 120 else 2 if n <= 300 else 5 if n <= 900 else 10
+
+    # NOR140 global LAeq is reconstructed from the GLOB Lfeq 1/3-octave spectrum.
+    # The older 0x0422 per-minute interpretation reads unrelated result-matrix cells.
+    if 'laeq' in glob_metrics:
+        leq = round(glob_metrics['laeq'], 2)
+    else:
+        leq = round(_energy_avg(laeq_raw), 2)
 
     return date, {
         'start':  start,
         'n':      n,
         'step':   step,
         'avg':    leq,
+        'lc_eq':  round(glob_metrics['lceq'], 2) if 'lceq' in glob_metrics else None,
         'mn':     round(min(laeq_raw), 1),
         'mx':     round(max(laeq_raw), 1),
         'pmx':    round(max(lcpeak_raw), 1),
+        'pmxf':   round(max(lafmax_raw), 1),
+        'pmxi':   round(max(laimax_raw), 1),
         'laeq':   [round(v, 1) for v in _downsample(laeq_raw,   step)],
+        'lafmax': [round(v, 1) for v in _downsample(lafmax_raw, step)],
+        'laimax': [round(v, 1) for v in _downsample(laimax_raw, step)],
         'lcpeak': [round(v, 1) for v in _downsample(lcpeak_raw, step)],
     }
 
@@ -191,7 +261,7 @@ def parse_zip(zip_bytes):
     # Assemble into per-day session dicts.
     result = []
     for date in sorted(by_date):
-        projects = [run for _, run in sorted(by_date[date])]
+        projects = [{**run, 'source_file': pf} for pf, run in sorted(by_date[date])]
         if not projects:
             continue
         avg = round(_energy_avg([p['avg'] for p in projects]), 2)

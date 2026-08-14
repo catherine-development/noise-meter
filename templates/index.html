@@ -11,6 +11,8 @@
   --accent: #C56A00;
   --laeq: #2660C4;
   --laeq-fill: rgba(38,96,196,0.13);
+  --lafmax: #3A9A6A;
+  --laimax: #8840B8;
   --peak: #C56A00;
   --grid: rgba(10,30,80,0.065);
   --grid-border: rgba(10,30,80,0.09);
@@ -31,6 +33,8 @@
     --accent: #F09828;
     --laeq: #4A90E8;
     --laeq-fill: rgba(74,144,232,0.18);
+    --lafmax: #50C880;
+    --laimax: #B060F0;
     --peak: #F09828;
     --grid: rgba(80,150,230,0.07);
     --grid-border: rgba(80,150,230,0.12);
@@ -38,8 +42,8 @@
     --sel-bar: #F09828;
   }
 }
-:root[data-theme="light"]{--bg:#EFF2F7;--surface:#FFFFFF;--panel:#F6F8FC;--border:#D0D8E8;--text:#0C1A2E;--text2:#3D5270;--text3:#7A92AE;--accent:#C56A00;--laeq:#2660C4;--laeq-fill:rgba(38,96,196,0.13);--peak:#C56A00;--grid:rgba(10,30,80,0.065);--grid-border:rgba(10,30,80,0.09);--warn-line:rgba(180,60,0,0.5);--sel-bar:#C56A00}
-:root[data-theme="dark"]{--bg:#090F1C;--surface:#111C30;--panel:#172540;--border:#1E3050;--text:#D0E4F8;--text2:#7A9ABE;--text3:#456082;--accent:#F09828;--laeq:#4A90E8;--laeq-fill:rgba(74,144,232,0.18);--peak:#F09828;--grid:rgba(80,150,230,0.07);--grid-border:rgba(80,150,230,0.12);--warn-line:rgba(240,80,30,0.55);--sel-bar:#F09828}
+:root[data-theme="light"]{--bg:#EFF2F7;--surface:#FFFFFF;--panel:#F6F8FC;--border:#D0D8E8;--text:#0C1A2E;--text2:#3D5270;--text3:#7A92AE;--accent:#C56A00;--laeq:#2660C4;--laeq-fill:rgba(38,96,196,0.13);--lafmax:#3A9A6A;--laimax:#8840B8;--peak:#C56A00;--grid:rgba(10,30,80,0.065);--grid-border:rgba(10,30,80,0.09);--warn-line:rgba(180,60,0,0.5);--sel-bar:#C56A00}
+:root[data-theme="dark"]{--bg:#090F1C;--surface:#111C30;--panel:#172540;--border:#1E3050;--text:#D0E4F8;--text2:#7A9ABE;--text3:#456082;--accent:#F09828;--laeq:#4A90E8;--laeq-fill:rgba(74,144,232,0.18);--lafmax:#50C880;--laimax:#B060F0;--peak:#F09828;--grid:rgba(80,150,230,0.07);--grid-border:rgba(80,150,230,0.12);--warn-line:rgba(240,80,30,0.55);--sel-bar:#F09828}
 
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 body{background:var(--bg);color:var(--text);font-family:var(--font-ui);font-size:13px;line-height:1.5;-webkit-font-smoothing:antialiased}
@@ -72,6 +76,11 @@ body{background:var(--bg);color:var(--text);font-family:var(--font-ui);font-size
 .run-row{display:flex;align-items:center;justify-content:space-between;margin-bottom:5px}
 .run-id{font-size:10px;font-weight:600;letter-spacing:.09em;text-transform:uppercase;color:var(--text3)}
 .run-time{font-family:var(--font-data);font-size:11px;color:var(--text2);font-variant-numeric:tabular-nums}
+.run-tag-wrap{display:flex;align-items:center;gap:5px}
+.run-tag{font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;background:var(--laeq);color:#fff;border-radius:3px;padding:1px 6px;cursor:pointer;white-space:nowrap;line-height:1.6}
+.run-tag.empty{background:var(--border);color:var(--text3);font-weight:400;letter-spacing:0}
+.run-tag-input{font-size:11px;font-weight:700;text-transform:uppercase;width:52px;border:1.5px solid var(--laeq);border-radius:3px;padding:1px 5px;background:var(--surface);color:var(--text);font-family:var(--font-ui);outline:none;display:none}
+.run-assess-badge{font-size:10px;font-weight:600;padding:1px 6px;border-radius:3px;background:color-mix(in srgb,var(--lafmax) 18%,transparent);color:var(--lafmax);letter-spacing:.02em;white-space:nowrap}
 .run-stats{display:flex;gap:10px}
 .rs{font-size:10px;color:var(--text3)}
 .rs span{font-family:var(--font-data);font-size:13px;font-weight:500;color:var(--text);display:block;font-variant-numeric:tabular-nums;line-height:1.3}
@@ -79,6 +88,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--font-ui);font-size
 .run-chart-wrap{height:110px;background:var(--panel)}
 .run-chart-wrap canvas{display:block;width:100%;height:100%}
 .run-foot{padding:4px 12px;font-size:10px;color:var(--text3);font-variant-numeric:tabular-nums;border-top:1px solid var(--grid-border)}
+.run-src{color:var(--text2);font-weight:600;letter-spacing:.02em}
 
 /* No-detail state */
 .no-detail{padding:32px 20px;text-align:center;color:var(--text3)}
@@ -106,6 +116,8 @@ body{background:var(--bg);color:var(--text);font-family:var(--font-ui);font-size
 .cl-item{display:flex;align-items:center;gap:4px;font-size:10px;color:var(--text3)}
 .cl-line{width:16px;height:2px;border-radius:1px;flex-shrink:0}
 .cl-line.laeq{background:var(--laeq)}
+.cl-line.lafmax{background:var(--lafmax);opacity:.75}
+.cl-line.laimax{background:var(--laimax)}
 .cl-line.peak{background:var(--peak);opacity:.6}
 .cl-line.ref{background:transparent;border-top:1px dashed var(--accent)}
 
@@ -178,6 +190,8 @@ body{background:var(--bg);color:var(--text);font-family:var(--font-ui);font-size
 .ff input{border:1px solid var(--border);border-radius:4px;padding:5px 8px;font-size:12px;background:var(--bg);color:var(--text);font-family:var(--font-ui)}
 .ff input:focus{outline:none;border-color:var(--laeq)}
 .filter-count{font-size:11px;color:var(--text3);align-self:center;white-space:nowrap}
+.filter-apply{background:var(--accent);color:#fff;border:none;border-radius:4px;padding:5px 12px;font-size:11px;cursor:pointer;font-family:var(--font-ui);white-space:nowrap;font-weight:600}
+.filter-apply:hover{opacity:.88}
 .filter-clear{background:none;border:1px solid var(--border);border-radius:4px;padding:5px 10px;font-size:11px;cursor:pointer;color:var(--text2);font-family:var(--font-ui);white-space:nowrap;display:none}
 .filter-clear:hover{background:var(--panel)}
 .filter-export{background:var(--laeq);color:#fff;border:none;border-radius:4px;padding:5px 12px;font-size:11px;cursor:pointer;font-family:var(--font-ui);white-space:nowrap;text-decoration:none;align-self:flex-end}
@@ -214,6 +228,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--font-ui);font-size
   <span class="nav-brand">NOR140 Noise Monitor</span>
   <span class="nav-pi">{{ pi_name }}</span>
   <a href="/" class="nav-tab active">Sessions</a>
+  <a href="/assessments" class="nav-tab">Assessments</a>
   <a href="/manage" class="nav-tab">Manage</a>
   <a href="/reports" class="nav-tab">Reports</a>
   <a href="/upload" class="nav-tab nav-tab-primary">+ Add</a>
@@ -253,10 +268,16 @@ body{background:var(--bg);color:var(--text);font-family:var(--font-ui);font-size
       <label>LAeq max ≥</label>
       <input type="number" id="fMax" placeholder="dB" min="0" max="160" step="1">
     </div>
+    <div class="ff" style="min-width:150px">
+      <label>Assessment (name or ref)</label>
+      <input type="text" id="fAssess" placeholder="e.g. Manor Road, ENF/26…">
+    </div>
     <span class="filter-count" id="filterCount"></span>
+    <button class="filter-apply" id="filterApply">Filter</button>
     <button class="filter-clear" id="filterClear" onclick="clearFilter()">Clear</button>
     <a class="filter-export" id="filterExport" href="/export/sessions.csv" download>Export CSV</a>
   </div>
+  <div id="assessBanner" style="display:none;padding:7px 16px;gap:8px;flex-wrap:wrap;align-items:center;background:color-mix(in srgb,var(--lafmax) 8%,transparent);border-bottom:1px solid var(--border)"></div>
   <div class="sess-table-wrap">
     <div class="sess-table-scroll">
       <table class="sess-table">
@@ -264,6 +285,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--font-ui);font-size
           <th>Date</th>
           <th>Location</th>
           <th>By</th>
+          <th id="th-assess">Assessment</th>
           <th style="text-align:right">LAeq avg</th>
           <th style="text-align:right">LAeq max</th>
           <th style="text-align:center">Runs</th>
@@ -306,7 +328,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--font-ui);font-size
 
   <footer class="page-footer">
     Data from MEAS118/YYMMDD/PART0000/PROJnnnn/PROFnnnn.DAT (Norsonic proprietary binary, 10 bytes/record: 5&times;uint16 LE &divide;100&nbsp;=&nbsp;dB).
-    Field&nbsp;0&nbsp;=&nbsp;LA<sub>eq,1s</sub>; Field&nbsp;4&nbsp;=&nbsp;LC<sub>peak</sub>.
+    Field&nbsp;0&nbsp;=&nbsp;LA<sub>eq,1s</sub>; Field&nbsp;1&nbsp;=&nbsp;LA<sub>Fmax</sub>; Field&nbsp;2&nbsp;=&nbsp;LA<sub>Imax</sub>; Field&nbsp;3&nbsp;=&nbsp;LA<sub>Fmax</sub> (duplicate); Field&nbsp;4&nbsp;=&nbsp;LC<sub>peak</sub>.
     85&nbsp;dB reference = HSE occupational exposure action level.
     Values &gt;130&nbsp;dB may indicate impulsive events at close range or measurement saturation.
     Chart resolution varies by run length (1&nbsp;s for short runs, up to 1/10&nbsp;s for long ones).
@@ -506,7 +528,14 @@ function renderSessionPanel(date) {
   const content = document.getElementById('sessContent');
 
   if (sess.projects) {
-    renderRunsGrid(content, sess.projects);
+    let displayProjects = sess.projects;
+    let displayNums = null;
+    if (assessFilter.runSet) {
+      const pairs = sess.projects.map((p, i) => [p, i + 1]).filter(([, n]) => assessFilter.runSet.has(sess.d + '|' + n));
+      displayProjects = pairs.map(([p]) => p);
+      displayNums = pairs.map(([, n]) => n);
+    }
+    renderRunsGrid(content, displayProjects, displayNums);
   } else {
     content.innerHTML = `
       <div class="sum-tiles">
@@ -667,19 +696,31 @@ function saveMetaEdit(date) {
 // ── Runs grid ──────────────────────────────────────────────
 const runCanvases = [];
 
-function renderRunsGrid(container, projects) {
+function renderRunsGrid(container, projects, runNums) {
   runCanvases.length = 0;
-  container.innerHTML = `
-    <div class="runs-grid" id="runsGrid"></div>`;
+  container.innerHTML = `<div class="runs-grid" id="runsGrid"></div>`;
   const grid = container.querySelector('.runs-grid');
 
   projects.forEach((proj, idx) => {
+    const runNum = runNums ? runNums[idx] : idx + 1;
     const card = document.createElement('div');
     card.className = 'run-card';
+    const tagVal = proj.loc_tag || '';
+    const assessBadge = proj.assess
+      ? `<span class="run-assess-badge" title="Assessment location">${proj.assess}</span>`
+      : '';
     card.innerHTML = `
       <div class="run-card-header">
         <div class="run-row">
-          <span class="run-id">Run ${idx+1}</span>
+          <span class="run-id">Run ${runNum}</span>
+          <div class="run-tag-wrap">
+            <span class="run-tag${tagVal ? '' : ' empty'}" title="Click to set location tag"
+                  onclick="startTagEdit(event,this)">${tagVal || 'tag'}</span>
+            <input class="run-tag-input" maxlength="8" placeholder="e.g. A"
+                   data-date="${selectedDate}" data-run="${runNum}"
+                   onblur="saveTag(this)" onkeydown="tagKeydown(event,this)">
+            ${assessBadge}
+          </div>
           <span class="run-time">${proj.start}</span>
         </div>
         <div class="run-stats">
@@ -690,12 +731,13 @@ function renderRunsGrid(container, projects) {
       </div>
       <div class="run-chart-wrap"><canvas data-idx="${idx}"></canvas></div>
       <div class="chart-leg">
-        <div class="cl-item"><div class="cl-line laeq"></div>LA<sub>eq,1s</sub></div>
+        <div class="cl-item"><div class="cl-line laeq"></div>LA<sub>eq</sub></div>
+        <div class="cl-item"><div class="cl-line laimax"></div>LA<sub>Imax</sub></div>
         <div class="cl-item"><div class="cl-line peak"></div>LC<sub>peak</sub></div>
         <div class="cl-item"><div class="cl-line ref"></div>85 dB</div>
       </div>
-      <div class="run-foot">${fmtDuration(proj.n)} · ${proj.n} samples${proj.step > 1 ? ' · chart 1/'+proj.step+'s' : ''}</div>`;
-    card.addEventListener('click', () => openRunModal(proj, idx, selectedDate));
+      <div class="run-foot">${fmtDuration(proj.n)} · ${proj.n} samples${proj.step > 1 ? ' · chart 1/'+proj.step+'s' : ''}${proj.source_file ? ` · <span class="run-src" title="NOR140 project folder">${proj.source_file}</span>` : ''}</div>`;
+    card.addEventListener('click', () => openRunModal(proj, runNum, selectedDate));
     grid.appendChild(card);
     runCanvases.push(card.querySelector('canvas'));
   });
@@ -703,8 +745,55 @@ function renderRunsGrid(container, projects) {
   drawAllRunCharts(projects);
 }
 
+// ── Location tag editing ───────────────────────────────────
+function startTagEdit(e, badge) {
+  e.stopPropagation();
+  const input = badge.nextElementSibling;
+  input.value = badge.classList.contains('empty') ? '' : badge.textContent;
+  badge.style.display = 'none';
+  input.style.display = '';
+  input.focus();
+  input.select();
+}
+
+function tagKeydown(e, input) {
+  if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
+  if (e.key === 'Escape') {
+    const badge = input.previousElementSibling;
+    input.style.display = 'none';
+    badge.style.display = '';
+  }
+}
+
+function saveTag(input) {
+  const tag = input.value.trim().toUpperCase().slice(0, 8);
+  const badge = input.previousElementSibling;
+  const date = input.dataset.date;
+  const runNum = parseInt(input.dataset.run);
+
+  badge.textContent = tag || 'tag';
+  badge.className = 'run-tag' + (tag ? '' : ' empty');
+  input.style.display = 'none';
+  badge.style.display = '';
+
+  // Update in-memory data so the modal picks it up
+  const sess = DATA.sessions.find(s => s.d === date);
+  if (sess && sess.projects && sess.projects[runNum - 1]) {
+    sess.projects[runNum - 1].loc_tag = tag || null;
+  }
+
+  fetch(`/session/${date}/run/${runNum}/tag`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({tag}),
+  }).catch(() => {}); // fire and forget — badge already updated optimistically
+}
+
 // ── Run chart drawing ──────────────────────────────────────
-const Y_MIN = 20;
+function dynYMin(laeq) {
+  const lo = Math.min(...laeq);
+  return Math.max(0, Math.floor(lo / 10) * 10 - 10);
+}
 
 function dynYMax(laeq, lcpeak) {
   const hi = Math.max(Math.max(...laeq), lcpeak ? Math.max(...lcpeak) : 0);
@@ -719,6 +808,7 @@ function drawRunChart(canvas, proj) {
   const cW = W-PAD.l-PAD.r, cH = H-PAD.t-PAD.b;
   const laeq = proj.laeq, lcpeak = proj.lcpeak, n = laeq.length;
   if (!n) return;
+  const Y_MIN = dynYMin(laeq);
   const Y_MAX = dynYMax(laeq, lcpeak);
 
   const yP = db => PAD.t + cH*(1-(clamp(db,Y_MIN,Y_MAX)-Y_MIN)/(Y_MAX-Y_MIN));
@@ -764,6 +854,22 @@ function drawRunChart(canvas, proj) {
   laeq.forEach((v,i)=>{ const x=xP(i),y=yP(v); i?ctx.lineTo(x,y):ctx.moveTo(x,y); });
   ctx.stroke();
 
+  // LAFmax (thin, subtle — floats above LAeq)
+  if (proj.lafmax) {
+    ctx.strokeStyle=css('--lafmax'); ctx.lineWidth=1; ctx.globalAlpha=.6;
+    ctx.beginPath();
+    proj.lafmax.forEach((v,i)=>{ const x=xP(i),y=yP(v); i?ctx.lineTo(x,y):ctx.moveTo(x,y); });
+    ctx.stroke(); ctx.globalAlpha=1;
+  }
+
+  // LAImax (impulse peak — shows transient events)
+  if (proj.laimax) {
+    ctx.strokeStyle=css('--laimax'); ctx.lineWidth=1.5; ctx.globalAlpha=.8;
+    ctx.beginPath();
+    proj.laimax.forEach((v,i)=>{ const x=xP(i),y=yP(v); i?ctx.lineTo(x,y):ctx.moveTo(x,y); });
+    ctx.stroke(); ctx.globalAlpha=1;
+  }
+
   // X labels
   ctx.fillStyle=css('--text3'); ctx.font='9px '+css('--font-ui');
   ctx.textAlign='left'; ctx.fillText('0s',PAD.l,H-3);
@@ -773,7 +879,7 @@ function drawRunChart(canvas, proj) {
   ctx.strokeStyle=css('--grid-border'); ctx.lineWidth=1; ctx.setLineDash([]);
   ctx.strokeRect(PAD.l+.5,PAD.t+.5,cW,cH);
   // small in-chart legend
-  const leg=[['--laeq',1,2,'LAeq'],['--peak',.5,1,'LCpk']];
+  const leg=[['--laeq',1,2,'LAeq'],['--laimax',.8,1.5,'LAImax'],['--peak',.5,1,'LCpk']];
   const lx=PAD.l+cW-4, ly=PAD.t+5;
   ctx.font='9px '+css('--font-ui');ctx.textAlign='right';
   leg.forEach(([col,alpha,lw,lbl],i)=>{
@@ -802,6 +908,72 @@ function barColor(avg) {
 }
 
 let filteredSessions = DATA.sessions;
+let allAssessments = [];
+let assessFilter = { runSet: null, matches: [] };
+let _assessDebounce = null;
+
+async function loadAssessmentFilter() {
+  const res = await fetch('/api/assessments');
+  allAssessments = await res.json();
+}
+
+function onAssessFilterChange() {
+  clearTimeout(_assessDebounce);
+  _assessDebounce = setTimeout(_doAssessFilter, 350);
+}
+
+async function _doAssessFilter() {
+  const text = document.getElementById('fAssess').value.trim().toLowerCase();
+  if (!text) {
+    assessFilter = { runSet: null, matches: [] };
+    applyFilter();
+    _updateAssessBanner();
+    return;
+  }
+  const matches = allAssessments.filter(a =>
+    (a.name || '').toLowerCase().includes(text) ||
+    (a.client_ref || '').toLowerCase().includes(text)
+  );
+  if (!matches.length) {
+    assessFilter = { runSet: new Set(), matches: [] };
+    applyFilter();
+    _updateAssessBanner();
+    return;
+  }
+  const details = await Promise.all(
+    matches.map(a => fetch(`/api/assessments/${a.id}`).then(r => r.json()))
+  );
+  const runSet = new Set();
+  const sessAssessments = new Map();
+  for (let i = 0; i < details.length; i++) {
+    const { runs } = details[i];
+    const assessName = matches[i].name;
+    for (const r of runs) {
+      if (r.ar_id === null) continue;  // skip unassigned runs
+      runSet.add(r.session_date + '|' + r.run_number);
+      if (!sessAssessments.has(r.session_date)) sessAssessments.set(r.session_date, new Set());
+      sessAssessments.get(r.session_date).add(assessName);
+    }
+  }
+  assessFilter = { runSet, matches, sessAssessments };
+  applyFilter();
+  _updateAssessBanner();
+}
+
+function _updateAssessBanner() {
+  const banner = document.getElementById('assessBanner');
+  const { matches } = assessFilter;
+  if (!matches || !matches.length) { banner.style.display = 'none'; return; }
+  banner.style.display = 'flex';
+  banner.innerHTML =
+    '<span style="font-size:11px;color:var(--text2);font-weight:500;white-space:nowrap">Assessment filter:</span>' +
+    matches.map(a =>
+      `<span style="display:inline-flex;align-items:center;gap:6px;background:var(--surface);border:1px solid var(--border);border-radius:4px;padding:2px 8px;font-size:12px">
+        <span style="color:var(--text)">${esc(a.name)}${a.client_ref ? ' <span style="color:var(--text3)">· ' + esc(a.client_ref) + '</span>' : ''}</span>
+        <a href="/assessments?open=${a.id}" style="color:var(--laeq);font-weight:600;text-decoration:none;font-size:11px" title="Open in Assessments">Open ↗</a>
+      </span>`
+    ).join('');
+}
 
 function buildTable(sessions) {
   const tbody = document.getElementById('sessTableBody');
@@ -815,10 +987,12 @@ function buildTable(sessions) {
   tbody.innerHTML = sessions.map(s => {
     const loc = [s.loc, s.post].filter(Boolean).join(', ');
     const sel = s.d === selectedDate ? ' sel' : '';
+    const assessNames = (s.assmnts || []).join(', ');
     return `<tr data-date="${s.d}" class="${sel}" onclick="selectSession('${s.d}')">
       <td class="td-date">${s.d}</td>
       <td class="td-loc">${esc(loc)}</td>
       <td class="td-by">${esc(s.name || '')}</td>
+      <td class="td-assess" style="font-size:12px;color:var(--text2);max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(assessNames)}</td>
       <td class="td-db">${s.avg.toFixed(1)}&thinsp;dB</td>
       <td class="td-db td-hi">${s.mx.toFixed(1)}&thinsp;dB</td>
       <td class="td-runs">${s.projects ? s.projects.length : '—'}</td>
@@ -851,10 +1025,14 @@ function applyFilter() {
     if (to   && s.d > to)   return false;
     if (!isNaN(avg) && s.avg < avg) return false;
     if (!isNaN(max) && s.mx  < max) return false;
+    if (assessFilter.runSet) {
+      const hasRun = (s.projects || []).some((_, i) => assessFilter.runSet.has(s.d + '|' + (i + 1)));
+      if (!hasRun) return false;
+    }
     return true;
   });
   const n = filteredSessions.length, total = DATA.sessions.length;
-  const anyActive = text || from || to || !isNaN(avg) || !isNaN(max);
+  const anyActive = text || from || to || !isNaN(avg) || !isNaN(max) || assessFilter.runSet;
   document.getElementById('filterCount').textContent = anyActive ? `${n} of ${total} sessions` : `${total} sessions`;
   document.getElementById('filterClear').style.display = anyActive ? '' : 'none';
   // Keep export link in sync with active filters
@@ -871,7 +1049,9 @@ function applyFilter() {
 }
 
 function clearFilter() {
-  ['fText','fFrom','fTo','fAvg','fMax'].forEach(id => document.getElementById(id).value = '');
+  ['fText','fFrom','fTo','fAvg','fMax','fAssess'].forEach(id => document.getElementById(id).value = '');
+  assessFilter = { runSet: null, matches: [] };
+  document.getElementById('assessBanner').style.display = 'none';
   applyFilter();
 }
 
@@ -901,9 +1081,19 @@ function exportSessionRuns(date) {
 }
 
 function exportRunCSV(proj, runIdx, date) {
-  const rows = [['elapsed_s', 'laeq_db', 'lcpeak_db']];
+  const hasFmax = proj.lafmax && proj.lafmax.length;
+  const hasImax = proj.laimax && proj.laimax.length;
+  const hdrs = ['elapsed_s', 'laeq_db'];
+  if (hasFmax) hdrs.push('lafmax_db');
+  if (hasImax) hdrs.push('laimax_db');
+  hdrs.push('lcpeak_db');
+  const rows = [hdrs];
   proj.laeq.forEach((v, i) => {
-    rows.push([i * proj.step, v, proj.lcpeak[i]]);
+    const row = [i * proj.step, v];
+    if (hasFmax) row.push(proj.lafmax[i]);
+    if (hasImax) row.push(proj.laimax[i]);
+    row.push(proj.lcpeak[i]);
+    rows.push(row);
   });
   downloadCsv('noise-' + date + '-run' + (runIdx + 1) + '.csv', rows);
 }
@@ -1039,7 +1229,7 @@ obs.observe(document.documentElement,{attributes:true,attributeFilter:['data-the
 window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change',renderAll);
 
 // ── Statistics ────────────────────────────────────────────
-function computeStats(laeq, lcpeak) {
+function computeStats(laeq, lcpeak, lafmax, laimax) {
   const n = laeq.length;
   const sorted = [...laeq].sort((a,b)=>b-a);
   const leq = 10*Math.log10(laeq.reduce((s,v)=>s+Math.pow(10,v/10),0)/n);
@@ -1048,7 +1238,9 @@ function computeStats(laeq, lcpeak) {
   return {
     leq: leq.toFixed(1), la10: at(10).toFixed(1), la50: at(50).toFixed(1),
     la90: at(90).toFixed(1), lmax: sorted[0].toFixed(1), lmin: sorted[n-1].toFixed(1),
-    pmx: Math.max(...lcpeak).toFixed(1),
+    pmx:  Math.max(...lcpeak).toFixed(1),
+    pmxf: lafmax ? Math.max(...lafmax).toFixed(1) : null,
+    pmxi: laimax ? Math.max(...laimax).toFixed(1) : null,
     pct85: (above85/n*100).toFixed(1),
   };
 }
@@ -1062,6 +1254,7 @@ function drawModalTimeSeries(canvas, proj) {
   const cW=W-PAD.l-PAD.r, cH=H-PAD.t-PAD.b;
   const laeq=proj.laeq, lcpeak=proj.lcpeak, n=laeq.length;
   if(!n)return;
+  const Y_MIN=dynYMin(laeq);
   const Y_MAX=dynYMax(laeq,lcpeak);
   const yP=db=>PAD.t+cH*(1-(clamp(db,Y_MIN,Y_MAX)-Y_MIN)/(Y_MAX-Y_MIN));
   const xP=i=>PAD.l+(n===1?cW/2:(i/(n-1))*cW);
@@ -1097,6 +1290,16 @@ function drawModalTimeSeries(canvas, proj) {
   // LAeq line
   ctx.strokeStyle=css('--laeq');ctx.lineWidth=2;
   ctx.beginPath();laeq.forEach((v,i)=>{const x=xP(i),y=yP(v);i?ctx.lineTo(x,y):ctx.moveTo(x,y);});ctx.stroke();
+  // LAFmax
+  if(proj.lafmax){
+    ctx.strokeStyle=css('--lafmax');ctx.lineWidth=1.5;ctx.globalAlpha=.65;
+    ctx.beginPath();proj.lafmax.forEach((v,i)=>{const x=xP(i),y=yP(v);i?ctx.lineTo(x,y):ctx.moveTo(x,y);});ctx.stroke();ctx.globalAlpha=1;
+  }
+  // LAImax
+  if(proj.laimax){
+    ctx.strokeStyle=css('--laimax');ctx.lineWidth=1.5;ctx.globalAlpha=.85;
+    ctx.beginPath();proj.laimax.forEach((v,i)=>{const x=xP(i),y=yP(v);i?ctx.lineTo(x,y):ctx.moveTo(x,y);});ctx.stroke();ctx.globalAlpha=1;
+  }
   // X axis
   const label_n=Math.min(8,Math.floor(cW/80));
   ctx.fillStyle=css('--text3');ctx.font='10px '+css('--font-ui');
@@ -1106,8 +1309,8 @@ function drawModalTimeSeries(canvas, proj) {
   }
   ctx.strokeStyle=css('--grid-border');ctx.lineWidth=1;ctx.setLineDash([]);ctx.strokeRect(PAD.l+.5,PAD.t+.5,cW,cH);
   // In-chart legend (top-right, modal)
-  const mleg=[['--laeq',1,2,'LAeq,1s'],['--peak',.5,1,'LCpeak']];
-  const mlx=PAD.l+cW-8, mly=PAD.t+10;
+  const mleg=[['--laeq',1,2,'LAeq,1s'],['--lafmax',.65,1.5,'LAFmax'],['--laimax',.85,1.5,'LAImax'],['--peak',.5,1,'LCpeak']];
+  const mlx=PAD.l+cW-8, mly=PAD.t+8;
   ctx.font='11px '+css('--font-ui');ctx.textAlign='right';
   mleg.forEach(([col,alpha,lw,lbl],i)=>{
     const y=mly+i*17;
@@ -1151,7 +1354,7 @@ function drawExceedance(canvas, laeq) {
   const ctx=setupCanvas(canvas,W,H);
   const PAD={t:8,r:14,b:26,l:36};
   const cW=W-PAD.l-PAD.r, cH=H-PAD.t-PAD.b;
-  const XLO=20, XHI=dynYMax(laeq,[]);
+  const XLO=dynYMin(laeq), XHI=dynYMax(laeq,[]);
   const xP=db=>PAD.l+(db-XLO)/(XHI-XLO)*cW;
   const yP=pct=>PAD.t+cH*(1-pct/100);
   const n=laeq.length;
@@ -1201,10 +1404,13 @@ function drawExceedance(canvas, laeq) {
 }
 
 // ── Open / close modal ────────────────────────────────────
-function openRunModal(proj, runIdx, date) {
-  const stats = computeStats(proj.laeq, proj.lcpeak);
+function openRunModal(proj, runNum, date) {
+  const runIdx = runNum - 1;
+  const stats = computeStats(proj.laeq, proj.lcpeak, proj.lafmax, proj.laimax);
+  if (proj.avg != null) stats.leq = proj.avg.toFixed(1);
   const sess = DATA.sessions.find(s => s.d === date);
-  document.getElementById('modalTitle').textContent = `Run ${runIdx+1}  ·  ${proj.start}`;
+  const tagLabel = proj.loc_tag ? `  ·  Location ${proj.loc_tag}` : '';
+  document.getElementById('modalTitle').textContent = `Run ${runIdx+1}${tagLabel}  ·  ${proj.start}`;
   document.getElementById('modalSub').textContent =
     `${fmtDate(date)}  ·  ${fmtDuration(proj.n)}  ·  ${proj.n.toLocaleString()} samples${proj.step>1?' (downsampled 1/'+proj.step+'s)':''}`;
 
@@ -1228,6 +1434,8 @@ function openRunModal(proj, runIdx, date) {
     ['LA90 (background)', stats.la90, 'dB', false],
     ['LA<sub>max</sub>', stats.lmax, 'dB', false],
     ['LA<sub>min</sub>', stats.lmin, 'dB', false],
+    ...(stats.pmxf ? [['LA<sub>Fmax</sub> peak', stats.pmxf, 'dB', false]] : []),
+    ...(stats.pmxi ? [['LA<sub>Imax</sub> peak', stats.pmxi, 'dB', false]] : []),
     ['LC<sub>peak</sub> max', stats.pmx, 'dB', true],
     ['Time ≥ 85 dB', stats.pct85, '%', parseFloat(stats.pct85)>5],
   ].map(([n,v,u,hi])=>`<div class="mstat"><span class="mstat-n">${n}</span><span class="mstat-v${hi?' hi':''}">${v}&thinsp;${u}</span></div>`).join('');
@@ -1307,7 +1515,11 @@ document.addEventListener('keydown',e=>{if(e.key==='Escape')closeModal();});
 ['fText','fFrom','fTo','fAvg','fMax'].forEach(id =>
   document.getElementById(id).addEventListener('input', applyFilter)
 );
+document.getElementById('fAssess').addEventListener('input', onAssessFilterChange);
+document.getElementById('fAssess').addEventListener('keydown', e => { if (e.key === 'Enter') _doAssessFilter(); });
+document.getElementById('filterApply').addEventListener('click', () => { _doAssessFilter(); applyFilter(); });
 applyFilter(); // initialise count
+loadAssessmentFilter();
 
 // Expose onclick-called functions to global scope (they're inside the IIFE)
 window.openMetaEdit       = openMetaEdit;
@@ -1319,6 +1531,9 @@ window.saveModalMetaEdit  = saveModalMetaEdit;
 window.clearFilter        = clearFilter;
 window.selectSession      = selectSession;
 window.fetchWeather       = fetchWeather;
+window.startTagEdit       = startTagEdit;
+window.tagKeydown         = tagKeydown;
+window.saveTag            = saveTag;
 
 function fetchWeather(date) {
   const btn = document.getElementById('wx-btn-' + date);

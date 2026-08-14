@@ -35,7 +35,17 @@ from noise_db import (init_db, import_sessions, get_all_sessions_json,
                       get_report_templates, get_report_template, save_report_template,
                       update_report_template, delete_report_template,
                       save_generated_report, get_generated_reports,
-                      get_generated_report, delete_generated_report)
+                      get_generated_report, delete_generated_report,
+                      update_run_location_tag,
+                      create_assessment, list_assessments, get_assessment, update_assessment,
+                      delete_assessment, add_assessment_location, update_assessment_location,
+                      delete_assessment_location, assign_runs, unassign_run, update_assessment_run,
+                      get_assessment_detail, get_all_runs_for_assessment,
+                      prepare_assessment_report_data, purge_sessions_before,
+                      get_full_sync_payload, apply_full_sync, apply_sync_event,
+                      get_assessment_location, get_assessment_run,
+                      get_assessment_runs_by_pairs,
+                      get_sessions_export_format)
 from noise_parser import parse_zip, parse_files
 
 # Shared auth module from flight tracker
@@ -125,7 +135,9 @@ def _push_to_peer(sessions):
         req = urllib.request.Request(
             PEER_URL.rstrip('/') + '/import',
             data=payload,
-            headers={'Content-Type': 'application/json', 'X-Import-Key': IMPORT_KEY},
+            headers={'Content-Type': 'application/json',
+                     'X-Import-Key': IMPORT_KEY,
+                     'User-Agent': _PEER_UA},
             method='POST',
         )
         try:
@@ -135,6 +147,52 @@ def _push_to_peer(sessions):
             print(f"Peer sync failed: {e}")
 
     threading.Thread(target=_do_push, daemon=True).start()
+
+
+_PEER_UA = 'noise-meter/1.0'
+
+def _sync_event_to_peer(entity, action, data):
+    """Push a single mutation to the peer Pi. Fire-and-forget."""
+    if not PEER_URL or not IMPORT_KEY:
+        return
+    def _do():
+        try:
+            payload = json.dumps({'entity': entity, 'action': action, 'data': data},
+                                 default=str).encode()
+            req = urllib.request.Request(
+                PEER_URL.rstrip('/') + '/api/peer-sync',
+                data=payload,
+                headers={'Content-Type': 'application/json',
+                         'X-Import-Key': IMPORT_KEY,
+                         'User-Agent': _PEER_UA},
+                method='POST',
+            )
+            urllib.request.urlopen(req, timeout=10)
+        except Exception as e:
+            print(f'Peer sync ({entity}/{action}) failed: {e}', flush=True)
+    threading.Thread(target=_do, daemon=True).start()
+
+
+def _startup_sync_from_peer():
+    """On startup, pull full state from peer and apply it (catches up on offline period)."""
+    if not PEER_URL or not IMPORT_KEY:
+        return
+    def _do():
+        import time
+        time.sleep(8)  # let both Pis finish starting before attempting peer connection
+        try:
+            req = urllib.request.Request(
+                PEER_URL.rstrip('/') + '/api/peer-sync-full',
+                headers={'X-Import-Key': IMPORT_KEY, 'User-Agent': _PEER_UA},
+                method='GET',
+            )
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = json.loads(resp.read())
+            apply_full_sync(data)
+            print('Startup peer sync: applied full payload from peer', flush=True)
+        except Exception as e:
+            print(f'Startup peer sync failed: {e}', flush=True)
+    threading.Thread(target=_do, daemon=True).start()
 
 
 def require_api_key(f):
@@ -449,8 +507,7 @@ def edit_session(date):
         try: return float(request.form.get(key, '').strip()) or None
         except (ValueError, TypeError): return None
 
-    update_session_metadata(
-        date,
+    meta = dict(
         recorder_name  = request.form.get('recorder_name', '').strip(),
         location_label = request.form.get('location_label', '').strip(),
         postcode       = request.form.get('postcode', '').strip().upper(),
@@ -458,10 +515,21 @@ def edit_session(date):
         lng            = _float('lng'),
         notes          = request.form.get('notes', '').strip(),
     )
+    update_session_metadata(date, **meta)
+    _sync_event_to_peer('session_meta', 'upsert', {'date': date, **meta})
     if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
         return jsonify({'status': 'ok', 'date': date})
     flash(f'Session {date} updated.', 'success')
     return redirect(url_for('manage_page', open=date))
+
+
+@app.route('/session/<date>/run/<int:run_number>/tag', methods=['POST'])
+@login_required
+def edit_run_tag(date, run_number):
+    tag = (request.json or {}).get('tag', '').strip().upper()
+    update_run_location_tag(date, run_number, tag)
+    _sync_event_to_peer('run_tag', 'upsert', {'session_date': date, 'run_number': run_number, 'location_tag': tag or None})
+    return jsonify({'status': 'ok', 'tag': tag or None})
 
 
 @app.route('/session/<date>/delete', methods=['POST'])
@@ -484,16 +552,64 @@ def import_redirect():
 def do_import():
     if request.files.get('file'):
         raw = request.files['file'].read()
-        data = json.loads(raw)
+        if raw[:2] == b'PK':  # ZIP magic bytes
+            sessions = parse_zip(raw)
+        else:
+            data = json.loads(raw)
+            sessions = data.get('sessions', [data] if 'd' in data else [])
     else:
         data = request.get_json(force=True, silent=True) or {}
+        sessions = data.get('sessions', [data] if 'd' in data else [])
 
-    sessions = data.get('sessions', [data] if 'd' in data else [])
     if not sessions:
         return jsonify({'error': 'no sessions found in payload'}), 400
 
     n = import_sessions(sessions)
     return jsonify({'imported': n, 'status': 'ok'})
+
+
+@app.route('/api/peer-sync', methods=['POST'])
+@require_api_key
+def api_peer_sync():
+    """Receive a single mutation event from the peer Pi."""
+    data = request.get_json(silent=True) or {}
+    entity = data.get('entity', '')
+    action = data.get('action', '')
+    payload = data.get('data', {})
+    if entity and action:
+        apply_sync_event(entity, action, payload)
+    return jsonify({'ok': True})
+
+
+@app.route('/api/peer-sync-full', methods=['GET'])
+@require_api_key
+def api_peer_sync_full():
+    """Return full syncable state so peer can catch up after being offline."""
+    return jsonify(get_full_sync_payload())
+
+
+@app.route('/admin/purge-before', methods=['POST'])
+@require_api_key
+def admin_purge_before():
+    """Temporary admin endpoint: delete all sessions before a given date."""
+    before = request.args.get('before') or (request.get_json(silent=True) or {}).get('before', '')
+    if not before or len(before) != 10:
+        return jsonify({'error': 'provide before=YYYY-MM-DD'}), 400
+    deleted = purge_sessions_before(before)
+    return jsonify({'deleted': len(deleted), 'dates': deleted})
+
+
+@app.route('/admin/push-to-peer', methods=['POST'])
+@require_api_key
+def admin_push_to_peer():
+    """Push specific sessions (by date) or all sessions to peer Pi."""
+    body = request.get_json(silent=True) or {}
+    dates = body.get('dates') or request.args.getlist('date') or None
+    sessions = get_sessions_export_format(dates=dates)
+    if not sessions:
+        return jsonify({'error': 'no matching sessions found'}), 404
+    _push_to_peer(sessions)
+    return jsonify({'pushed': len(sessions), 'dates': [s['d'] for s in sessions]})
 
 
 @app.route('/session/<date>/fetch-weather', methods=['POST'])
@@ -1207,7 +1323,177 @@ def api_delete_report(rid):
     return jsonify({'ok': True})
 
 
+@app.route('/assessments')
+@login_required
+def assessments_page():
+    return render_template('assessments.html', pi_name=PI_NAME)
+
+
+@app.route('/api/assessments', methods=['GET'])
+@login_required
+def api_get_assessments():
+    return jsonify(list_assessments())
+
+
+@app.route('/api/assessments', methods=['POST'])
+@login_required
+def api_create_assessment():
+    data = request.json or {}
+    aid = create_assessment(
+        name=data.get('name', 'Untitled'),
+        purpose=data.get('purpose', ''),
+        standard=data.get('standard', 'noise_act'),
+        address=data.get('address', ''),
+        postcode=data.get('postcode', ''),
+        lat=data.get('lat'),
+        lng=data.get('lng'),
+        client_ref=data.get('client_ref', ''),
+        notes=data.get('notes', ''),
+    )
+    _sync_event_to_peer('assessment', 'upsert', get_assessment(aid))
+    return jsonify({'id': aid})
+
+
+@app.route('/api/assessments/<int:aid>', methods=['GET'])
+@login_required
+def api_get_assessment(aid):
+    detail = get_assessment_detail(aid)
+    if not detail:
+        abort(404)
+    runs = get_all_runs_for_assessment(aid)
+    return jsonify({'assessment': detail, 'runs': runs})
+
+
+@app.route('/api/assessments/<int:aid>', methods=['PUT'])
+@login_required
+def api_update_assessment(aid):
+    data = request.json or {}
+    update_assessment(
+        aid,
+        name=data.get('name', ''),
+        purpose=data.get('purpose', ''),
+        standard=data.get('standard', 'noise_act'),
+        address=data.get('address', ''),
+        postcode=data.get('postcode', ''),
+        lat=data.get('lat'),
+        lng=data.get('lng'),
+        client_ref=data.get('client_ref', ''),
+        notes=data.get('notes', ''),
+    )
+    _sync_event_to_peer('assessment', 'upsert', get_assessment(aid))
+    return jsonify({'status': 'ok'})
+
+
+@app.route('/api/assessments/<int:aid>', methods=['DELETE'])
+@login_required
+def api_delete_assessment(aid):
+    delete_assessment(aid)
+    _sync_event_to_peer('assessment', 'delete', {'id': aid})
+    return jsonify({'status': 'ok'})
+
+
+@app.route('/api/assessments/<int:aid>/locations', methods=['POST'])
+@login_required
+def api_add_location(aid):
+    data = request.json or {}
+    loc_id = add_assessment_location(
+        assessment_id=aid,
+        label=data.get('label', ''),
+        description=data.get('description', ''),
+        lat=data.get('lat'),
+        lng=data.get('lng'),
+        notes=data.get('notes', ''),
+    )
+    _sync_event_to_peer('assessment_location', 'upsert', get_assessment_location(loc_id))
+    return jsonify({'id': loc_id})
+
+
+@app.route('/api/assessments/<int:aid>/locations/<int:loc_id>', methods=['PUT'])
+@login_required
+def api_update_location(aid, loc_id):
+    data = request.json or {}
+    update_assessment_location(
+        loc_id,
+        label=data.get('label', ''),
+        description=data.get('description', ''),
+        lat=data.get('lat'),
+        lng=data.get('lng'),
+        notes=data.get('notes', ''),
+    )
+    _sync_event_to_peer('assessment_location', 'upsert', get_assessment_location(loc_id))
+    return jsonify({'status': 'ok'})
+
+
+@app.route('/api/assessments/<int:aid>/locations/<int:loc_id>', methods=['DELETE'])
+@login_required
+def api_delete_location(aid, loc_id):
+    delete_assessment_location(loc_id)
+    _sync_event_to_peer('assessment_location', 'delete', {'id': loc_id})
+    return jsonify({'status': 'ok'})
+
+
+@app.route('/api/assessments/<int:aid>/assign', methods=['POST'])
+@login_required
+def api_assign_runs(aid):
+    data = request.json or {}
+    location_id = data.get('location_id')
+    runs = data.get('runs', [])
+    pairs = [(r['date'], r['run_number']) for r in runs]
+    assign_runs(aid, location_id, pairs)
+    for row in get_assessment_runs_by_pairs(aid, pairs):
+        _sync_event_to_peer('assessment_run', 'upsert', row)
+    return jsonify({'status': 'ok', 'assigned': len(pairs)})
+
+
+@app.route('/api/assessment-runs/<int:ar_id>', methods=['DELETE'])
+@login_required
+def api_unassign_run(ar_id):
+    unassign_run(ar_id)
+    _sync_event_to_peer('assessment_run', 'delete', {'id': ar_id})
+    return jsonify({'status': 'ok'})
+
+
+@app.route('/api/assessment-runs/<int:ar_id>', methods=['PUT'])
+@login_required
+def api_update_ar(ar_id):
+    data = request.json or {}
+    update_assessment_run(ar_id, data.get('conditions', ''), data.get('notes', ''))
+    _sync_event_to_peer('assessment_run', 'upsert', get_assessment_run(ar_id))
+    return jsonify({'status': 'ok'})
+
+
+@app.route('/export/assessment/<int:aid>.csv')
+@login_required
+def export_assessment_csv(aid):
+    data = prepare_assessment_report_data(aid)
+    if not data:
+        abort(404)
+    output = io.StringIO()
+    w = csv.writer(output)
+    w.writerow(['sub_location', 'description', 'date', 'start_time', 'duration_s',
+                'time_period', 'avg_laeq_db', 'min_laeq_db', 'max_laeq_db',
+                'la10_db', 'la90_db', 'max_lcpeak_db', 'max_laimax_db',
+                'conditions', 'notes'])
+    for loc in data['locations']:
+        for r in loc['runs']:
+            w.writerow([
+                loc['label'], loc['description'] or '', r['date'], r['start_time'],
+                r['duration_s'], r['time_period'],
+                r.get('avg_laeq', ''), r.get('min_laeq', ''), r.get('max_laeq', ''),
+                r.get('la10', ''), r.get('la90', ''),
+                r.get('max_lcpeak', ''), r.get('max_laimax', ''),
+                r.get('conditions', '') or '', r.get('notes', '') or '',
+            ])
+    aname = data['assessment']['name'].replace(' ', '_')[:40]
+    return app.response_class(
+        output.getvalue(),
+        mimetype='text/csv',
+        headers={'Content-Disposition': f'attachment; filename="assessment_{aname}.csv"'},
+    )
+
+
 if __name__ == '__main__':
     init_db()
+    _startup_sync_from_peer()
     port = int(os.environ.get('PORT', 5001))
     app.run(host='0.0.0.0', port=port, debug=False, threaded=True)
