@@ -658,7 +658,7 @@ def _expand_run(proj):
     """Expand downsampled laeq/lcpeak arrays back to approximate per-second values."""
     step = proj.get('step', 1)
     laeq = []
-    for v in proj.get('laeq', []):
+    for v in proj.get('laeq_profile', []):
         laeq.extend([v] * step)
     return laeq[:proj.get('n', len(laeq))]
 

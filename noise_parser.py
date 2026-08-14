@@ -18,7 +18,6 @@ FLOOR_DB = 20     # NOR140 lower measurement limit — values below this are ins
 CAP_LAEQ = 130
 CAP_PEAK = 145
 _DB_OFFSET = 40.0  # NOR140 PROF stores (actual_dB + 40) * 100 as uint16
-_SPECTRUM_OFFSET = 0x0428
 _SPECTRUM_SCALE = 128.0
 _SPECTRUM_DB_OFFSET = 20.0
 _THIRD_OCTAVE_FREQS = (
@@ -26,6 +25,29 @@ _THIRD_OCTAVE_FREQS = (
     100.0, 125.0, 160.0, 200.0, 250.0, 315.0, 400.0, 500.0, 630.0, 800.0,
     1000.0, 1250.0, 1600.0, 2000.0, 2500.0, 3150.0, 4000.0, 5000.0,
     6300.0, 8000.0, 10000.0, 12500.0, 16000.0, 20000.0,
+)
+# All 18 Nortfr-labelled spectral tables in 2653-byte GLOB files.
+# Each is 36 consecutive uint16 LE values decoded as raw/128 - 20.
+# (key, glob_offset, output_a_key, output_c_key)
+_GLOB_SPECTRA = (
+    ('lfeq',   0x0428, 'laeq',   'lceq'),
+    ('lffmax', 0x0470, 'lafmax', 'lcfmax'),
+    ('lffmin', 0x04b8, 'lafmin', 'lcfmin'),
+    ('lfe',    0x0500, 'lae',    'lce'),
+    ('lfsmax', 0x0548, 'lasmax', 'lcsmax'),
+    ('lfsmin', 0x0590, 'lasmin', 'lcsmin'),
+    ('lfieq',  0x05d8, 'laieq',  'lcieq'),
+    ('lfimax', 0x0620, 'laimax', 'lcimax'),
+    ('lfimin', 0x0668, 'laimin', 'lcimin'),
+    ('lfie',   0x06b0, 'laie',   'lcie'),
+    ('lf_l01', 0x06f8, 'la_l01', 'lc_l01'),
+    ('lf_l1',  0x0764, 'la_l1',  'lc_l1'),
+    ('lf_l5',  0x07d0, 'la_l5',  'lc_l5'),
+    ('lf_l10', 0x083c, 'la_l10', 'lc_l10'),
+    ('lf_l50', 0x08a8, 'la_l50', 'lc_l50'),
+    ('lf_l90', 0x0914, 'la_l90', 'lc_l90'),
+    ('lf_l95', 0x0980, 'la_l95', 'lc_l95'),
+    ('lf_l99', 0x09ec, 'la_l99', 'lc_l99'),
 )
 EXCLUDE  = {'000101'}  # factory test date
 
@@ -63,31 +85,33 @@ def _spectrum_total(levels, weight_fn):
     )
 
 
-def _read_glob_spectrum(data, offset=_SPECTRUM_OFFSET):
+def _read_glob_spectrum(data, offset):
     end = offset + len(_THIRD_OCTAVE_FREQS) * 2
     if len(data) < end:
-        return []
+        return None
     levels = [
         struct.unpack_from('<H', data, offset + i * 2)[0] / _SPECTRUM_SCALE - _SPECTRUM_DB_OFFSET
         for i in range(len(_THIRD_OCTAVE_FREQS))
     ]
     if not all(-20.0 <= v <= CAP_LAEQ for v in levels):
-        return []
+        return None
     return levels
 
 
 def _read_glob(data):
-    """Extract ISO date, HH:MM:SS start time, and global spectrum-derived levels."""
+    """Extract ISO date, HH:MM:SS start time, and all spectrum-derived metrics."""
     o = 0x19
     yy, mo, dd, hh, mm, ss = (bcd(data[o + i]) for i in range(6))
     date = f"20{yy:02d}-{mo:02d}-{dd:02d}"
     start = f"{hh:02d}:{mm:02d}:{ss:02d}"
-    lfeq_spectrum = _read_glob_spectrum(data)
     metrics = {}
-    if lfeq_spectrum:
-        metrics['lfeq_spectrum'] = lfeq_spectrum
-        metrics['laeq'] = _spectrum_total(lfeq_spectrum, _freq_weight_a)
-        metrics['lceq'] = _spectrum_total(lfeq_spectrum, _freq_weight_c)
+    for _key, offset, key_a, key_c in _GLOB_SPECTRA:
+        spec = _read_glob_spectrum(data, offset)
+        if spec is not None:
+            metrics[key_a] = _spectrum_total(spec, _freq_weight_a)
+            metrics[key_c] = _spectrum_total(spec, _freq_weight_c)
+            if key_a == 'laeq':
+                metrics['lfeq_spectrum'] = spec
     return date, start, metrics
 
 
@@ -143,21 +167,56 @@ def _parse_session_files(glob_data, prof_data):
     else:
         leq = round(_energy_avg(laeq_raw), 2)
 
+    def _gm(key):
+        v = glob_metrics.get(key)
+        return round(v, 2) if v is not None else None
+
     return date, {
         'start':  start,
         'n':      n,
         'step':   step,
         'avg':    leq,
-        'lc_eq':  round(glob_metrics['lceq'], 2) if 'lceq' in glob_metrics else None,
+        # GLOB-derived scalar broadband metrics
+        'lceq':   _gm('lceq'),
+        'lae':    _gm('lae'),
+        'lce':    _gm('lce'),
+        'lafmax': _gm('lafmax'),
+        'lcfmax': _gm('lcfmax'),
+        'lafmin': _gm('lafmin'),
+        'lcfmin': _gm('lcfmin'),
+        'lasmax': _gm('lasmax'),
+        'lcsmax': _gm('lcsmax'),
+        'lasmin': _gm('lasmin'),
+        'lcsmin': _gm('lcsmin'),
+        'laieq':  _gm('laieq'),
+        'lcieq':  _gm('lcieq'),
+        'laimax': _gm('laimax'),
+        'lcimax': _gm('lcimax'),
+        'laimin': _gm('laimin'),
+        'lcimin': _gm('lcimin'),
+        'laie':   _gm('laie'),
+        'lcie':   _gm('lcie'),
+        'la_l01': _gm('la_l01'),
+        'la_l1':  _gm('la_l1'),
+        'la_l5':  _gm('la_l5'),
+        'la_l10': _gm('la_l10'),
+        'la_l50': _gm('la_l50'),
+        'la_l90': _gm('la_l90'),
+        'la_l95': _gm('la_l95'),
+        'la_l99': _gm('la_l99'),
+        'lc_l10': _gm('lc_l10'),
+        'lc_l50': _gm('lc_l50'),
+        'lc_l90': _gm('lc_l90'),
+        # PROF-derived values (profile graphs and fallback mins/maxes)
         'mn':     round(min(laeq_raw), 1),
         'mx':     round(max(laeq_raw), 1),
         'pmx':    round(max(lcpeak_raw), 1),
         'pmxf':   round(max(lafmax_raw), 1),
         'pmxi':   round(max(laimax_raw), 1),
-        'laeq':   [round(v, 1) for v in _downsample(laeq_raw,   step)],
-        'lafmax': [round(v, 1) for v in _downsample(lafmax_raw, step)],
-        'laimax': [round(v, 1) for v in _downsample(laimax_raw, step)],
-        'lcpeak': [round(v, 1) for v in _downsample(lcpeak_raw, step)],
+        'laeq_profile':  [round(v, 1) for v in _downsample(laeq_raw,   step)],
+        'lafmax_profile': [round(v, 1) for v in _downsample(lafmax_raw, step)],
+        'laimax_profile': [round(v, 1) for v in _downsample(laimax_raw, step)],
+        'lcpeak_profile': [round(v, 1) for v in _downsample(lcpeak_raw, step)],
     }
 
 

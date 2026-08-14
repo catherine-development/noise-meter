@@ -124,8 +124,21 @@ def _migrate(conn):
         )
     ''')
     run_cols = {row[1] for row in conn.execute('PRAGMA table_info(runs)').fetchall()}
-    for col, typ in [('lafmax_json', 'TEXT'), ('laimax_json', 'TEXT'), ('max_laimax', 'REAL'),
-                     ('location_tag', 'TEXT'), ('source_file', 'TEXT')]:
+    _run_migrations = [
+        ('lafmax_json',  'TEXT'), ('laimax_json', 'TEXT'), ('max_laimax', 'REAL'),
+        ('location_tag', 'TEXT'), ('source_file', 'TEXT'),
+        # GLOB-derived scalar metrics (all 18 spectral tables → A/C broadband)
+        ('lceq',   'REAL'), ('lae',    'REAL'), ('lce',    'REAL'),
+        ('lafmax', 'REAL'), ('lcfmax', 'REAL'), ('lafmin', 'REAL'), ('lcfmin', 'REAL'),
+        ('lasmax', 'REAL'), ('lcsmax', 'REAL'), ('lasmin', 'REAL'), ('lcsmin', 'REAL'),
+        ('laieq',  'REAL'), ('lcieq',  'REAL'), ('laimax', 'REAL'), ('lcimax', 'REAL'),
+        ('laimin', 'REAL'), ('lcimin', 'REAL'), ('laie',   'REAL'), ('lcie',   'REAL'),
+        ('la_l01', 'REAL'), ('la_l1',  'REAL'), ('la_l5',  'REAL'),
+        ('la_l10', 'REAL'), ('la_l50', 'REAL'), ('la_l90', 'REAL'),
+        ('la_l95', 'REAL'), ('la_l99', 'REAL'),
+        ('lc_l10', 'REAL'), ('lc_l50', 'REAL'), ('lc_l90', 'REAL'),
+    ]
+    for col, typ in _run_migrations:
         if col not in run_cols:
             conn.execute(f'ALTER TABLE runs ADD COLUMN {col} {typ}')
     gr_cols = {row[1] for row in conn.execute('PRAGMA table_info(generated_reports)').fetchall()}
@@ -251,12 +264,18 @@ def import_sessions(sessions_data, metadata=None):
         )
         sess_id = conn.execute('SELECT id FROM sessions WHERE date=?', (date,)).fetchone()['id']
         for i, proj in enumerate(projects, 1):
+            _g = proj.get
             conn.execute(
                 'INSERT INTO runs '
                 '  (session_id, run_number, start_time, n_samples, step, '
                 '   avg_laeq, min_laeq, max_laeq, max_lcpeak, max_laimax, '
-                '   laeq_json, lafmax_json, laimax_json, lcpeak_json, source_file) '
-                'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) '
+                '   laeq_json, lafmax_json, laimax_json, lcpeak_json, source_file, '
+                '   lceq, lae, lce, lafmax, lcfmax, lafmin, lcfmin, '
+                '   lasmax, lcsmax, lasmin, lcsmin, laieq, lcieq, '
+                '   laimax, lcimax, laimin, lcimin, laie, lcie, '
+                '   la_l01, la_l1, la_l5, la_l10, la_l50, la_l90, la_l95, la_l99, '
+                '   lc_l10, lc_l50, lc_l90) '
+                'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) '
                 'ON CONFLICT(session_id, run_number) DO UPDATE SET '
                 '  start_time=excluded.start_time, n_samples=excluded.n_samples, '
                 '  step=excluded.step, avg_laeq=excluded.avg_laeq, '
@@ -264,15 +283,35 @@ def import_sessions(sessions_data, metadata=None):
                 '  max_lcpeak=excluded.max_lcpeak, max_laimax=excluded.max_laimax, '
                 '  laeq_json=excluded.laeq_json, lafmax_json=excluded.lafmax_json, '
                 '  laimax_json=excluded.laimax_json, lcpeak_json=excluded.lcpeak_json, '
-                '  source_file=excluded.source_file',
+                '  source_file=excluded.source_file, '
+                '  lceq=excluded.lceq, lae=excluded.lae, lce=excluded.lce, '
+                '  lafmax=excluded.lafmax, lcfmax=excluded.lcfmax, '
+                '  lafmin=excluded.lafmin, lcfmin=excluded.lcfmin, '
+                '  lasmax=excluded.lasmax, lcsmax=excluded.lcsmax, '
+                '  lasmin=excluded.lasmin, lcsmin=excluded.lcsmin, '
+                '  laieq=excluded.laieq, lcieq=excluded.lcieq, '
+                '  laimax=excluded.laimax, lcimax=excluded.lcimax, '
+                '  laimin=excluded.laimin, lcimin=excluded.lcimin, '
+                '  laie=excluded.laie, lcie=excluded.lcie, '
+                '  la_l01=excluded.la_l01, la_l1=excluded.la_l1, la_l5=excluded.la_l5, '
+                '  la_l10=excluded.la_l10, la_l50=excluded.la_l50, la_l90=excluded.la_l90, '
+                '  la_l95=excluded.la_l95, la_l99=excluded.la_l99, '
+                '  lc_l10=excluded.lc_l10, lc_l50=excluded.lc_l50, lc_l90=excluded.lc_l90',
                 (sess_id, i, proj['start'], proj['n'], proj.get('step', 1),
-                 proj['avg'], proj['mn'], proj['mx'], proj['pmx'],
-                 proj.get('pmxi'),
-                 json.dumps(proj['laeq']),
-                 json.dumps(proj['lafmax']) if proj.get('lafmax') else None,
-                 json.dumps(proj['laimax']) if proj.get('laimax') else None,
-                 json.dumps(proj['lcpeak']),
-                 proj.get('source_file'))
+                 proj['avg'], proj['mn'], proj['mx'], proj['pmx'], _g('pmxi'),
+                 json.dumps(_g('laeq_profile') or []),
+                 json.dumps(_g('lafmax_profile')) if _g('lafmax_profile') else None,
+                 json.dumps(_g('laimax_profile')) if _g('laimax_profile') else None,
+                 json.dumps(_g('lcpeak_profile') or []),
+                 _g('source_file'),
+                 _g('lceq'), _g('lae'), _g('lce'),
+                 _g('lafmax'), _g('lcfmax'), _g('lafmin'), _g('lcfmin'),
+                 _g('lasmax'), _g('lcsmax'), _g('lasmin'), _g('lcsmin'),
+                 _g('laieq'), _g('lcieq'), _g('laimax'), _g('lcimax'),
+                 _g('laimin'), _g('lcimin'), _g('laie'), _g('lcie'),
+                 _g('la_l01'), _g('la_l1'), _g('la_l5'),
+                 _g('la_l10'), _g('la_l50'), _g('la_l90'), _g('la_l95'), _g('la_l99'),
+                 _g('lc_l10'), _g('lc_l50'), _g('lc_l90'))
             )
         imported += 1
     conn.commit()
@@ -335,10 +374,20 @@ def get_all_sessions_json():
                 'mx':      r['max_laeq'],
                 'pmx':     r['max_lcpeak'],
                 'pmxi':    r['max_laimax'],
-                'laeq':    json.loads(r['laeq_json']),
-                'lafmax':  json.loads(r['lafmax_json']) if r['lafmax_json'] else None,
-                'laimax':  json.loads(r['laimax_json']) if r['laimax_json'] else None,
-                'lcpeak':  json.loads(r['lcpeak_json']),
+                'laeq_profile':   json.loads(r['laeq_json']),
+                'lafmax_profile': json.loads(r['lafmax_json']) if r['lafmax_json'] else None,
+                'laimax_profile': json.loads(r['laimax_json']) if r['laimax_json'] else None,
+                'lcpeak_profile': json.loads(r['lcpeak_json']),
+                'lceq':   r['lceq'],   'lae':    r['lae'],    'lce':    r['lce'],
+                'lafmax': r['lafmax'], 'lcfmax': r['lcfmax'], 'lafmin': r['lafmin'], 'lcfmin': r['lcfmin'],
+                'lasmax': r['lasmax'], 'lcsmax': r['lcsmax'], 'lasmin': r['lasmin'], 'lcsmin': r['lcsmin'],
+                'laieq':  r['laieq'],  'lcieq':  r['lcieq'],
+                'laimax': r['laimax'], 'lcimax': r['lcimax'], 'laimin': r['laimin'], 'lcimin': r['lcimin'],
+                'laie':   r['laie'],   'lcie':   r['lcie'],
+                'la_l01': r['la_l01'], 'la_l1':  r['la_l1'],  'la_l5':  r['la_l5'],
+                'la_l10': r['la_l10'], 'la_l50': r['la_l50'], 'la_l90': r['la_l90'],
+                'la_l95': r['la_l95'], 'la_l99': r['la_l99'],
+                'lc_l10': r['lc_l10'], 'lc_l50': r['lc_l50'], 'lc_l90': r['lc_l90'],
                 'loc_tag': r['location_tag'],
                 'assess':  r['assess_locs'],
             } for r in runs],
@@ -535,10 +584,20 @@ def get_sessions_since(since):
                 'mx':      r['max_laeq'],
                 'pmx':     r['max_lcpeak'],
                 'pmxi':    r['max_laimax'],
-                'laeq':    json.loads(r['laeq_json']),
-                'lafmax':  json.loads(r['lafmax_json']) if r['lafmax_json'] else None,
-                'laimax':  json.loads(r['laimax_json']) if r['laimax_json'] else None,
-                'lcpeak':  json.loads(r['lcpeak_json']),
+                'laeq_profile':   json.loads(r['laeq_json']),
+                'lafmax_profile': json.loads(r['lafmax_json']) if r['lafmax_json'] else None,
+                'laimax_profile': json.loads(r['laimax_json']) if r['laimax_json'] else None,
+                'lcpeak_profile': json.loads(r['lcpeak_json']),
+                'lceq':   r['lceq'],   'lae':    r['lae'],    'lce':    r['lce'],
+                'lafmax': r['lafmax'], 'lcfmax': r['lcfmax'], 'lafmin': r['lafmin'], 'lcfmin': r['lcfmin'],
+                'lasmax': r['lasmax'], 'lcsmax': r['lcsmax'], 'lasmin': r['lasmin'], 'lcsmin': r['lcsmin'],
+                'laieq':  r['laieq'],  'lcieq':  r['lcieq'],
+                'laimax': r['laimax'], 'lcimax': r['lcimax'], 'laimin': r['laimin'], 'lcimin': r['lcimin'],
+                'laie':   r['laie'],   'lcie':   r['lcie'],
+                'la_l01': r['la_l01'], 'la_l1':  r['la_l1'],  'la_l5':  r['la_l5'],
+                'la_l10': r['la_l10'], 'la_l50': r['la_l50'], 'la_l90': r['la_l90'],
+                'la_l95': r['la_l95'], 'la_l99': r['la_l99'],
+                'lc_l10': r['lc_l10'], 'lc_l50': r['lc_l50'], 'lc_l90': r['lc_l90'],
             } for r in runs],
         })
     conn.close()
@@ -616,10 +675,10 @@ def get_sessions_export_format(dates=None):
                 'mx': r['max_laeq'],
                 'pmx': r['max_lcpeak'],
                 'pmxi': r['max_laimax'],
-                'laeq': json.loads(r['laeq_json']) if r['laeq_json'] else [],
-                'lafmax': json.loads(r['lafmax_json']) if r['lafmax_json'] else [],
-                'laimax': json.loads(r['laimax_json']) if r['laimax_json'] else [],
-                'lcpeak': json.loads(r['lcpeak_json']) if r['lcpeak_json'] else [],
+                'laeq_profile':   json.loads(r['laeq_json'])   if r['laeq_json']   else [],
+                'lafmax_profile': json.loads(r['lafmax_json'])  if r['lafmax_json'] else [],
+                'laimax_profile': json.loads(r['laimax_json'])  if r['laimax_json'] else [],
+                'lcpeak_profile': json.loads(r['lcpeak_json'])  if r['lcpeak_json'] else [],
             })
         laeqs = [p['avg'] for p in projects if p['avg'] is not None]
         result.append({
