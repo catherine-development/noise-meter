@@ -330,10 +330,11 @@ body{background:var(--bg);color:var(--text);font-family:var(--font-ui);font-size
   </div>
 
   <footer class="page-footer">
-    Data from MEAS118/YYMMDD/PART0000/PROJnnnn/PROFnnnn.DAT (Norsonic proprietary binary, 10 bytes/record: 5&times;uint16 LE &divide;100&nbsp;=&nbsp;dB).
-    Field&nbsp;0&nbsp;=&nbsp;LA<sub>eq,1s</sub>; Field&nbsp;1&nbsp;=&nbsp;LA<sub>Fmax</sub>; Field&nbsp;2&nbsp;=&nbsp;LA<sub>Imax</sub>; Field&nbsp;3&nbsp;=&nbsp;LA<sub>Fmax</sub> (duplicate); Field&nbsp;4&nbsp;=&nbsp;LC<sub>peak</sub>.
-    85&nbsp;dB reference = HSE occupational exposure action level.
-    Values &gt;130&nbsp;dB may indicate impulsive events at close range or measurement saturation.
+    PROF file (10 bytes/record, 5&times;uint16 LE &divide;100&nbsp;&minus;&nbsp;40&nbsp;=&nbsp;dB):
+    Field&nbsp;0&nbsp;=&nbsp;LA<sub>S</sub> (slow-weighted SPL at each second — profile shape only; session LA<sub>eq</sub> is instrument-derived from the GLOB 1/3-octave spectrum);
+    Field&nbsp;1&nbsp;=&nbsp;LA<sub>Fmax</sub>; Field&nbsp;2&nbsp;=&nbsp;LA<sub>Imax</sub>; Field&nbsp;4&nbsp;=&nbsp;LC<sub>peak</sub>.
+    Scalar metrics (LA<sub>eq</sub>, LC<sub>eq</sub>, LA<sub>Fmax</sub>, LA10–LA99&nbsp;etc.) are decoded from the GLOB file 1/3-octave spectrum (36-band, 6.3&nbsp;Hz–20&nbsp;kHz, uint16&nbsp;LE&nbsp;&divide;&nbsp;128&nbsp;&minus;&nbsp;20&nbsp;dB), then A/C-weighted and energy-summed.
+    85&nbsp;dB reference = HSE lower exposure action value.
     Chart resolution varies by run length (1&nbsp;s for short runs, up to 1/10&nbsp;s for long ones).
   </footer>
 </div>
@@ -889,7 +890,7 @@ function drawRunChart(canvas, proj) {
   ctx.strokeStyle=css('--grid-border'); ctx.lineWidth=1; ctx.setLineDash([]);
   ctx.strokeRect(PAD.l+.5,PAD.t+.5,cW,cH);
   // small in-chart legend
-  const leg=[['--laeq',1,2,'LAeq'],['--laimax',.8,1.5,'LAImax'],['--peak',.5,1,'LCpk']];
+  const leg=[['--laeq',1,2,'LA(S)'],['--laimax',.8,1.5,'LAImax'],['--peak',.5,1,'LCpk']];
   const lx=PAD.l+cW-4, ly=PAD.t+5;
   ctx.font='9px '+css('--font-ui');ctx.textAlign='right';
   leg.forEach(([col,alpha,lw,lbl],i)=>{
@@ -1319,7 +1320,7 @@ function drawModalTimeSeries(canvas, proj) {
   }
   ctx.strokeStyle=css('--grid-border');ctx.lineWidth=1;ctx.setLineDash([]);ctx.strokeRect(PAD.l+.5,PAD.t+.5,cW,cH);
   // In-chart legend (top-right, modal)
-  const mleg=[['--laeq',1,2,'LAeq,1s'],['--lafmax',.65,1.5,'LAFmax'],['--laimax',.85,1.5,'LAImax'],['--peak',.5,1,'LCpeak']];
+  const mleg=[['--laeq',1,2,'LA(S),1s'],['--lafmax',.65,1.5,'LAFmax'],['--laimax',.85,1.5,'LAImax'],['--peak',.5,1,'LCpeak']];
   const mlx=PAD.l+cW-8, mly=PAD.t+8;
   ctx.font='11px '+css('--font-ui');ctx.textAlign='right';
   mleg.forEach(([col,alpha,lw,lbl],i)=>{

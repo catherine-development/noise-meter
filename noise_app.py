@@ -655,31 +655,46 @@ def _energy_avg_db(values):
 
 
 def _expand_run(proj):
-    """Expand downsampled laeq/lcpeak arrays back to approximate per-second values."""
+    """Expand the downsampled LAS(1s) profile back to approximate per-second values.
+    PROF field 0 is LAS (slow-weighted SPL), not true LAeq,1s — use GLOB-derived
+    scalar metrics for absolute accuracy; the profile is used for shape/pct85 only."""
     step = proj.get('step', 1)
-    laeq = []
+    las = []
     for v in proj.get('laeq_profile', []):
-        laeq.extend([v] * step)
-    return laeq[:proj.get('n', len(laeq))]
+        las.extend([v] * step)
+    return las[:proj.get('n', len(las))]
 
 
 def _run_stats(proj):
-    """Compute full statistical suite for one run."""
-    laeq_full = _expand_run(proj)
-    if not laeq_full:
-        return {}
-    s = sorted(laeq_full)
-    return {
-        'leq':  _energy_avg_db(laeq_full),
-        'la10': _percentile(s, 90),  # LA10 = exceeded 10% of time = 90th percentile
-        'la50': _percentile(s, 50),
-        'la90': _percentile(s, 10),  # LA90 = exceeded 90% of time = 10th percentile
-        'lmax': max(s),
-        'lmin': min(s),
-        'pmx':  proj.get('pmx'),
-        'n':    proj.get('n'),
-        'pct85': round(100 * sum(1 for v in laeq_full if v >= 85) / len(laeq_full), 1),
-    }
+    """Compute statistical suite for one run.
+
+    Prefers GLOB-derived scalar metrics (instrument-computed, accurate) over profile-
+    derived estimates.  Falls back to profile stats only when GLOB values are absent
+    (pre-update imports).  Note: profile values are LAS (slow-weighted SPL), so
+    profile-derived LAeq/percentile estimates are ~8–11 dB high for impulsive sessions.
+    """
+    las_full = _expand_run(proj)
+    stats = {'n': proj.get('n'), 'pmx': proj.get('pmx')}
+    if las_full:
+        s = sorted(las_full)
+        n = len(s)
+        stats.update({
+            'leq':   _energy_avg_db(las_full),        # fallback only — overridden below
+            'la10':  _percentile(s, 90),
+            'la50':  _percentile(s, 50),
+            'la90':  _percentile(s, 10),
+            'lmax':  max(s),
+            'lmin':  min(s),
+            'pct85': round(100 * sum(1 for v in las_full if v >= 85) / n, 1),
+        })
+    # Override with GLOB-derived scalars where available
+    if proj.get('avg')    is not None: stats['leq']  = round(proj['avg'], 1)
+    if proj.get('la_l10') is not None: stats['la10'] = round(proj['la_l10'], 1)
+    if proj.get('la_l50') is not None: stats['la50'] = round(proj['la_l50'], 1)
+    if proj.get('la_l90') is not None: stats['la90'] = round(proj['la_l90'], 1)
+    if proj.get('lafmax') is not None: stats['lmax'] = round(proj['lafmax'], 1)
+    if proj.get('mn')     is not None: stats['lmin'] = round(proj['mn'], 1)
+    return stats
 
 
 @app.route('/session/<date>/report')
@@ -1004,10 +1019,26 @@ def _build_session_data_block(sess, run_rows, all_laeq, total_duration_s):
         wx_parts.append(f"precip {wx['pr']} mm")
     wx_str = ', '.join(wx_parts) or 'Not available'
 
-    session_leq  = _energy_avg_db(all_laeq) if all_laeq else None
-    session_la90 = _percentile(sorted(all_laeq), 10) if all_laeq else None
-    session_la10 = _percentile(sorted(all_laeq), 90) if all_laeq else None
-    session_lmax = max(all_laeq) if all_laeq else None
+    # Prefer GLOB-derived per-run scalars (already in run_rows via _run_stats).
+    # Session LAeq = duration-weighted energy avg of per-run LAeq values.
+    run_leq_ns = [(r['leq'], r.get('n') or 1) for r in run_rows if r.get('leq') is not None]
+    if run_leq_ns:
+        total_n = sum(n for _, n in run_leq_ns)
+        session_leq = round(10 * math.log10(
+            sum(n * 10 ** (leq / 10) for leq, n in run_leq_ns) / total_n
+        ), 1)
+    else:
+        session_leq = _energy_avg_db(all_laeq) if all_laeq else None
+    # LA10/LA90: duration-weighted avg of per-run GLOB values where available,
+    # else fall back to PROF-expanded percentiles (imprecise but ordered correctly).
+    run_la90s = [r['la90'] for r in run_rows if r.get('la90') is not None]
+    run_la10s = [r['la10'] for r in run_rows if r.get('la10') is not None]
+    session_la90 = round(sum(run_la90s) / len(run_la90s), 1) if run_la90s else (
+        _percentile(sorted(all_laeq), 10) if all_laeq else None)
+    session_la10 = round(sum(run_la10s) / len(run_la10s), 1) if run_la10s else (
+        _percentile(sorted(all_laeq), 90) if all_laeq else None)
+    run_lmaxs = [r['lmax'] for r in run_rows if r.get('lmax') is not None]
+    session_lmax = max(run_lmaxs) if run_lmaxs else (max(all_laeq) if all_laeq else None)
     session_pmx  = max((r.get('pmx', 0) or 0 for r in run_rows), default=None)
 
     run_lines = [
