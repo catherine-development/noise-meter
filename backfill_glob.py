@@ -101,7 +101,7 @@ def _index_zip(zip_path):
                 continue
             date_folder = proj_folder = None
             for part in parts[:-1]:
-                if _DATE_RE.match(part) and part not in EXCLUDE:
+                if _DATE_RE.match(part) and part not in _EXCLUDE:
                     date_folder = part
                 elif _PROJ_RE.match(part):
                     proj_folder = part.upper()

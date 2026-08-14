@@ -655,9 +655,9 @@ def _energy_avg_db(values):
 
 
 def _expand_run(proj):
-    """Expand the downsampled LAS(1s) profile back to approximate per-second values.
-    PROF field 0 is LAS (slow-weighted SPL), not true LAeq,1s — use GLOB-derived
-    scalar metrics for absolute accuracy; the profile is used for shape/pct85 only."""
+    """Expand the downsampled LAeq,1s profile back to approximate per-second values.
+    Uses laeq_profile (PROF field 1 = LAeq,1s).  Use GLOB-derived scalar metrics for
+    absolute accuracy; the profile is used for chart shape and pct85 only."""
     step = proj.get('step', 1)
     las = []
     for v in proj.get('laeq_profile', []):
@@ -727,13 +727,26 @@ def generate_report(date):
         laeq_full = _expand_run(proj)
         all_laeq.extend(laeq_full)
 
-    # Session-level stats across all runs
-    session_leq  = _energy_avg_db(all_laeq)
-    session_la90 = _percentile(sorted(all_laeq), 10)
-    session_la10 = _percentile(sorted(all_laeq), 90)
-    session_lmax = max(all_laeq) if all_laeq else None
-    session_pmx  = max((p.get('pmx', 0) for p in projects), default=None)
+    # Session-level stats — prefer GLOB-derived per-run scalars from run_rows,
+    # fall back to PROF profile energy-averaging only when GLOB scalars absent.
     total_duration_s = sum(p.get('n', 0) for p in projects)
+    run_leq_ns = [(r['leq'], r.get('n') or 1) for r in run_rows if r.get('leq') is not None]
+    if run_leq_ns:
+        total_n = sum(n for _, n in run_leq_ns)
+        session_leq = round(10 * math.log10(
+            sum(n * 10 ** (leq / 10) for leq, n in run_leq_ns) / total_n
+        ), 1)
+    else:
+        session_leq = _energy_avg_db(all_laeq) if all_laeq else None
+    run_la90s = [r['la90'] for r in run_rows if r.get('la90') is not None]
+    run_la10s = [r['la10'] for r in run_rows if r.get('la10') is not None]
+    session_la90 = round(sum(run_la90s) / len(run_la90s), 1) if run_la90s else (
+        _percentile(sorted(all_laeq), 10) if all_laeq else None)
+    session_la10 = round(sum(run_la10s) / len(run_la10s), 1) if run_la10s else (
+        _percentile(sorted(all_laeq), 90) if all_laeq else None)
+    run_lmaxs = [r['lmax'] for r in run_rows if r.get('lmax') is not None]
+    session_lmax = max(run_lmaxs) if run_lmaxs else (max(all_laeq) if all_laeq else None)
+    session_pmx  = max((r.get('pmx', 0) or 0 for r in run_rows), default=None)
 
     wx = sess.get('wx') or {}
 

@@ -167,7 +167,7 @@ def _read_glob(data):
 
 
 def _read_prof(data):
-    """Return list of [LAeq, f1, f2, f3, LCpeak] per second.
+    """Return list of [LAFspl, LAeq,1s, LAFmax,1s, LAE,1s, LApeak,1s] per second.
     NOR140 profile levels decode as uint16_le / 128 - 20."""
     if len(data) < 13:
         return []
@@ -276,7 +276,7 @@ def _parse_session_files(glob_data, prof_data):
         'lae_profile': [_round_db(v, 1) for v in _downsample(lae_raw, step)],
         'laimax_profile': [_round_db(v, 1) for v in _downsample(lae_raw, step)],
         'lapeak_profile': [_round_db(v, 1) for v in _downsample(lapeak_raw, step)],
-        'lcpeak_profile': [_round_db(v, 1) for v in _downsample(lapeak_raw, step)],
+        'lcpeak_profile': [_round_db(v, 1) for v in _downsample(lapeak_raw, step)],  # LApeak alias; true LCpeak is GLOB 0x03ef
     }
 
 

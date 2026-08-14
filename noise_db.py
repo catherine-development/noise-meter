@@ -284,19 +284,38 @@ def import_sessions(sessions_data, metadata=None):
                 '  laeq_json=excluded.laeq_json, lafmax_json=excluded.lafmax_json, '
                 '  laimax_json=excluded.laimax_json, lcpeak_json=excluded.lcpeak_json, '
                 '  source_file=excluded.source_file, '
-                '  lceq=excluded.lceq, lae=excluded.lae, lce=excluded.lce, '
-                '  lafmax=excluded.lafmax, lcfmax=excluded.lcfmax, '
-                '  lafmin=excluded.lafmin, lcfmin=excluded.lcfmin, '
-                '  lasmax=excluded.lasmax, lcsmax=excluded.lcsmax, '
-                '  lasmin=excluded.lasmin, lcsmin=excluded.lcsmin, '
-                '  laieq=excluded.laieq, lcieq=excluded.lcieq, '
-                '  laimax=excluded.laimax, lcimax=excluded.lcimax, '
-                '  laimin=excluded.laimin, lcimin=excluded.lcimin, '
-                '  laie=excluded.laie, lcie=excluded.lcie, '
-                '  la_l01=excluded.la_l01, la_l1=excluded.la_l1, la_l5=excluded.la_l5, '
-                '  la_l10=excluded.la_l10, la_l50=excluded.la_l50, la_l90=excluded.la_l90, '
-                '  la_l95=excluded.la_l95, la_l99=excluded.la_l99, '
-                '  lc_l10=excluded.lc_l10, lc_l50=excluded.lc_l50, lc_l90=excluded.lc_l90',
+                # GLOB-derived scalar columns: COALESCE so that a push from older
+                # code (which sends NULL) never overwrites an already-backfilled value.
+                '  lceq=COALESCE(excluded.lceq,runs.lceq), '
+                '  lae=COALESCE(excluded.lae,runs.lae), '
+                '  lce=COALESCE(excluded.lce,runs.lce), '
+                '  lafmax=COALESCE(excluded.lafmax,runs.lafmax), '
+                '  lcfmax=COALESCE(excluded.lcfmax,runs.lcfmax), '
+                '  lafmin=COALESCE(excluded.lafmin,runs.lafmin), '
+                '  lcfmin=COALESCE(excluded.lcfmin,runs.lcfmin), '
+                '  lasmax=COALESCE(excluded.lasmax,runs.lasmax), '
+                '  lcsmax=COALESCE(excluded.lcsmax,runs.lcsmax), '
+                '  lasmin=COALESCE(excluded.lasmin,runs.lasmin), '
+                '  lcsmin=COALESCE(excluded.lcsmin,runs.lcsmin), '
+                '  laieq=COALESCE(excluded.laieq,runs.laieq), '
+                '  lcieq=COALESCE(excluded.lcieq,runs.lcieq), '
+                '  laimax=COALESCE(excluded.laimax,runs.laimax), '
+                '  lcimax=COALESCE(excluded.lcimax,runs.lcimax), '
+                '  laimin=COALESCE(excluded.laimin,runs.laimin), '
+                '  lcimin=COALESCE(excluded.lcimin,runs.lcimin), '
+                '  laie=COALESCE(excluded.laie,runs.laie), '
+                '  lcie=COALESCE(excluded.lcie,runs.lcie), '
+                '  la_l01=COALESCE(excluded.la_l01,runs.la_l01), '
+                '  la_l1=COALESCE(excluded.la_l1,runs.la_l1), '
+                '  la_l5=COALESCE(excluded.la_l5,runs.la_l5), '
+                '  la_l10=COALESCE(excluded.la_l10,runs.la_l10), '
+                '  la_l50=COALESCE(excluded.la_l50,runs.la_l50), '
+                '  la_l90=COALESCE(excluded.la_l90,runs.la_l90), '
+                '  la_l95=COALESCE(excluded.la_l95,runs.la_l95), '
+                '  la_l99=COALESCE(excluded.la_l99,runs.la_l99), '
+                '  lc_l10=COALESCE(excluded.lc_l10,runs.lc_l10), '
+                '  lc_l50=COALESCE(excluded.lc_l50,runs.lc_l50), '
+                '  lc_l90=COALESCE(excluded.lc_l90,runs.lc_l90)',
                 (sess_id, i, proj['start'], proj['n'], proj.get('step', 1),
                  proj['avg'], proj['mn'], proj['mx'], proj['pmx'], _g('pmxi'),
                  json.dumps(_g('laeq_profile') or []),
@@ -679,6 +698,16 @@ def get_sessions_export_format(dates=None):
                 'lafmax_profile': json.loads(r['lafmax_json'])  if r['lafmax_json'] else [],
                 'laimax_profile': json.loads(r['laimax_json'])  if r['laimax_json'] else [],
                 'lcpeak_profile': json.loads(r['lcpeak_json'])  if r['lcpeak_json'] else [],
+                'lceq':   r['lceq'],   'lae':    r['lae'],    'lce':    r['lce'],
+                'lafmax': r['lafmax'], 'lcfmax': r['lcfmax'], 'lafmin': r['lafmin'], 'lcfmin': r['lcfmin'],
+                'lasmax': r['lasmax'], 'lcsmax': r['lcsmax'], 'lasmin': r['lasmin'], 'lcsmin': r['lcsmin'],
+                'laieq':  r['laieq'],  'lcieq':  r['lcieq'],
+                'laimax': r['laimax'], 'lcimax': r['lcimax'], 'laimin': r['laimin'], 'lcimin': r['lcimin'],
+                'laie':   r['laie'],   'lcie':   r['lcie'],
+                'la_l01': r['la_l01'], 'la_l1':  r['la_l1'],  'la_l5':  r['la_l5'],
+                'la_l10': r['la_l10'], 'la_l50': r['la_l50'], 'la_l90': r['la_l90'],
+                'la_l95': r['la_l95'], 'la_l99': r['la_l99'],
+                'lc_l10': r['lc_l10'], 'lc_l50': r['lc_l50'], 'lc_l90': r['lc_l90'],
             })
         laeqs = [p['avg'] for p in projects if p['avg'] is not None]
         result.append({
@@ -1137,7 +1166,7 @@ def prepare_assessment_report_data(aid):
             SELECT ar.conditions, ar.notes as run_notes,
                    r.run_number, r.start_time, r.n_samples, r.step,
                    r.avg_laeq, r.min_laeq, r.max_laeq, r.max_lcpeak, r.max_laimax,
-                   r.laeq_json, ar.session_date
+                   r.la_l10, r.la_l50, r.la_l90, r.laeq_json, ar.session_date
             FROM assessment_runs ar
             JOIN sessions s ON s.date = ar.session_date
             JOIN runs r ON r.session_id = s.id AND r.run_number = ar.run_number
@@ -1147,16 +1176,24 @@ def prepare_assessment_report_data(aid):
 
         runs_data = []
         for r in assigned:
-            laeq_vals = json.loads(r['laeq_json']) if r['laeq_json'] else []
-            la_stats = {}
-            if laeq_vals:
-                sv = sorted(laeq_vals, reverse=True)
-                n = len(sv)
+            # Prefer GLOB-derived percentiles; fall back to profile computation
+            if r['la_l10'] is not None:
                 la_stats = {
-                    'la10': round(sv[max(0, int(n * 0.1) - 1)], 1),
-                    'la50': round(sv[max(0, int(n * 0.5) - 1)], 1),
-                    'la90': round(sv[max(0, int(n * 0.9) - 1)], 1),
+                    'la10': round(r['la_l10'], 1),
+                    'la50': round(r['la_l50'], 1) if r['la_l50'] is not None else None,
+                    'la90': round(r['la_l90'], 1) if r['la_l90'] is not None else None,
                 }
+            else:
+                laeq_vals = json.loads(r['laeq_json']) if r['laeq_json'] else []
+                la_stats = {}
+                if laeq_vals:
+                    sv = sorted(laeq_vals, reverse=True)
+                    n = len(sv)
+                    la_stats = {
+                        'la10': round(sv[max(0, int(n * 0.1) - 1)], 1),
+                        'la50': round(sv[max(0, int(n * 0.5) - 1)], 1),
+                        'la90': round(sv[max(0, int(n * 0.9) - 1)], 1),
+                    }
             runs_data.append({
                 'date': r['session_date'],
                 'start_time': r['start_time'],

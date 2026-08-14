@@ -890,7 +890,7 @@ function drawRunChart(canvas, proj) {
   ctx.strokeStyle=css('--grid-border'); ctx.lineWidth=1; ctx.setLineDash([]);
   ctx.strokeRect(PAD.l+.5,PAD.t+.5,cW,cH);
   // small in-chart legend
-  const leg=[['--laeq',1,2,'LA(S)'],['--laimax',.8,1.5,'LAImax'],['--peak',.5,1,'LCpk']];
+  const leg=[['--laeq',1,2,'LAeq,1s'],['--laimax',.8,1.5,'LAImax'],['--peak',.5,1,'LApk']];
   const lx=PAD.l+cW-4, ly=PAD.t+5;
   ctx.font='9px '+css('--font-ui');ctx.textAlign='right';
   leg.forEach(([col,alpha,lw,lbl],i)=>{
@@ -1240,7 +1240,7 @@ obs.observe(document.documentElement,{attributes:true,attributeFilter:['data-the
 window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change',renderAll);
 
 // ── Statistics ────────────────────────────────────────────
-function computeStats(laeq, lcpeak, lafmax, laimax) {
+function computeStats(laeq, lapeak, lafmax, laimax) {
   const n = laeq.length;
   const sorted = [...laeq].sort((a,b)=>b-a);
   const leq = 10*Math.log10(laeq.reduce((s,v)=>s+Math.pow(10,v/10),0)/n);
@@ -1249,7 +1249,7 @@ function computeStats(laeq, lcpeak, lafmax, laimax) {
   return {
     leq: leq.toFixed(1), la10: at(10).toFixed(1), la50: at(50).toFixed(1),
     la90: at(90).toFixed(1), lmax: sorted[0].toFixed(1), lmin: sorted[n-1].toFixed(1),
-    pmx:  Math.max(...lcpeak).toFixed(1),
+    pmx:  Math.max(...lapeak).toFixed(1),   // LApeak from PROF; overridden below by GLOB LCpeak
     pmxf: lafmax ? Math.max(...lafmax).toFixed(1) : null,
     pmxi: laimax ? Math.max(...laimax).toFixed(1) : null,
     pct85: (above85/n*100).toFixed(1),
@@ -1320,7 +1320,7 @@ function drawModalTimeSeries(canvas, proj) {
   }
   ctx.strokeStyle=css('--grid-border');ctx.lineWidth=1;ctx.setLineDash([]);ctx.strokeRect(PAD.l+.5,PAD.t+.5,cW,cH);
   // In-chart legend (top-right, modal)
-  const mleg=[['--laeq',1,2,'LA(S),1s'],['--lafmax',.65,1.5,'LAFmax'],['--laimax',.85,1.5,'LAImax'],['--peak',.5,1,'LCpeak']];
+  const mleg=[['--laeq',1,2,'LAeq,1s'],['--lafmax',.65,1.5,'LAFmax'],['--laimax',.85,1.5,'LAImax'],['--peak',.5,1,'LApeak']];
   const mlx=PAD.l+cW-8, mly=PAD.t+8;
   ctx.font='11px '+css('--font-ui');ctx.textAlign='right';
   mleg.forEach(([col,alpha,lw,lbl],i)=>{
