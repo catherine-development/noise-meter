@@ -138,7 +138,7 @@ def main():
         SELECT r.id, r.run_number, r.source_file, r.avg_laeq, s.date
         FROM runs r
         JOIN sessions s ON r.session_id = s.id
-        WHERE r.lceq IS NULL
+        WHERE r.lapeak IS NULL
         ORDER BY s.date, r.run_number
     ''').fetchall()
 
