@@ -140,6 +140,14 @@ def _migrate(conn):
         ('lc_l01', 'REAL'), ('lc_l1',  'REAL'), ('lc_l5',  'REAL'),
         ('lc_l10', 'REAL'), ('lc_l50', 'REAL'), ('lc_l90', 'REAL'),
         ('lc_l95', 'REAL'), ('lc_l99', 'REAL'),
+        # 1/3-octave spectral arrays (JSON, 36 floats each; NULL for 1069-byte GLOBs)
+        ('spec_lfeq',    'TEXT'), ('spec_lffmax',  'TEXT'), ('spec_lffmin',  'TEXT'),
+        ('spec_lfe',     'TEXT'), ('spec_lfsmax',  'TEXT'), ('spec_lfsmin',  'TEXT'),
+        ('spec_lfieq',   'TEXT'), ('spec_lfimax',  'TEXT'), ('spec_lfimin',  'TEXT'),
+        ('spec_lfie',    'TEXT'),
+        ('spec_lff_l01', 'TEXT'), ('spec_lff_l1',  'TEXT'), ('spec_lff_l5',  'TEXT'),
+        ('spec_lff_l10', 'TEXT'), ('spec_lff_l50', 'TEXT'), ('spec_lff_l90', 'TEXT'),
+        ('spec_lff_l95', 'TEXT'), ('spec_lff_l99', 'TEXT'),
     ]
     for col, typ in _run_migrations:
         if col not in run_cols:
@@ -278,8 +286,12 @@ def import_sessions(sessions_data, metadata=None):
                 '   laimax, lcimax, laimin, lcimin, laie, lcie, '
                 '   la_l01, la_l1, la_l5, la_l10, la_l50, la_l90, la_l95, la_l99, '
                 '   lapeak, lcpeak, '
-                '   lc_l01, lc_l1, lc_l5, lc_l10, lc_l50, lc_l90, lc_l95, lc_l99) '
-                'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) '
+                '   lc_l01, lc_l1, lc_l5, lc_l10, lc_l50, lc_l90, lc_l95, lc_l99, '
+                '   spec_lfeq, spec_lffmax, spec_lffmin, spec_lfe, '
+                '   spec_lfsmax, spec_lfsmin, spec_lfieq, spec_lfimax, spec_lfimin, spec_lfie, '
+                '   spec_lff_l01, spec_lff_l1, spec_lff_l5, spec_lff_l10, '
+                '   spec_lff_l50, spec_lff_l90, spec_lff_l95, spec_lff_l99) '
+                'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) '
                 'ON CONFLICT(session_id, run_number) DO UPDATE SET '
                 '  start_time=excluded.start_time, n_samples=excluded.n_samples, '
                 '  step=excluded.step, avg_laeq=excluded.avg_laeq, '
@@ -326,7 +338,25 @@ def import_sessions(sessions_data, metadata=None):
                 '  lc_l50=COALESCE(excluded.lc_l50,runs.lc_l50), '
                 '  lc_l90=COALESCE(excluded.lc_l90,runs.lc_l90), '
                 '  lc_l95=COALESCE(excluded.lc_l95,runs.lc_l95), '
-                '  lc_l99=COALESCE(excluded.lc_l99,runs.lc_l99)',
+                '  lc_l99=COALESCE(excluded.lc_l99,runs.lc_l99), '
+                '  spec_lfeq=COALESCE(excluded.spec_lfeq,runs.spec_lfeq), '
+                '  spec_lffmax=COALESCE(excluded.spec_lffmax,runs.spec_lffmax), '
+                '  spec_lffmin=COALESCE(excluded.spec_lffmin,runs.spec_lffmin), '
+                '  spec_lfe=COALESCE(excluded.spec_lfe,runs.spec_lfe), '
+                '  spec_lfsmax=COALESCE(excluded.spec_lfsmax,runs.spec_lfsmax), '
+                '  spec_lfsmin=COALESCE(excluded.spec_lfsmin,runs.spec_lfsmin), '
+                '  spec_lfieq=COALESCE(excluded.spec_lfieq,runs.spec_lfieq), '
+                '  spec_lfimax=COALESCE(excluded.spec_lfimax,runs.spec_lfimax), '
+                '  spec_lfimin=COALESCE(excluded.spec_lfimin,runs.spec_lfimin), '
+                '  spec_lfie=COALESCE(excluded.spec_lfie,runs.spec_lfie), '
+                '  spec_lff_l01=COALESCE(excluded.spec_lff_l01,runs.spec_lff_l01), '
+                '  spec_lff_l1=COALESCE(excluded.spec_lff_l1,runs.spec_lff_l1), '
+                '  spec_lff_l5=COALESCE(excluded.spec_lff_l5,runs.spec_lff_l5), '
+                '  spec_lff_l10=COALESCE(excluded.spec_lff_l10,runs.spec_lff_l10), '
+                '  spec_lff_l50=COALESCE(excluded.spec_lff_l50,runs.spec_lff_l50), '
+                '  spec_lff_l90=COALESCE(excluded.spec_lff_l90,runs.spec_lff_l90), '
+                '  spec_lff_l95=COALESCE(excluded.spec_lff_l95,runs.spec_lff_l95), '
+                '  spec_lff_l99=COALESCE(excluded.spec_lff_l99,runs.spec_lff_l99)',
                 (sess_id, i, proj['start'], proj['n'], proj.get('step', 1),
                  proj['avg'], proj['mn'], proj['mx'], proj['pmx'], _g('pmxi'),
                  json.dumps(_g('laeq_profile') or []),
@@ -343,7 +373,25 @@ def import_sessions(sessions_data, metadata=None):
                  _g('la_l10'), _g('la_l50'), _g('la_l90'), _g('la_l95'), _g('la_l99'),
                  _g('lapeak'), _g('lcpeak'),
                  _g('lc_l01'), _g('lc_l1'), _g('lc_l5'),
-                 _g('lc_l10'), _g('lc_l50'), _g('lc_l90'), _g('lc_l95'), _g('lc_l99'))
+                 _g('lc_l10'), _g('lc_l50'), _g('lc_l90'), _g('lc_l95'), _g('lc_l99'),
+                 json.dumps(_g('spec_lfeq'))    if _g('spec_lfeq')    else None,
+                 json.dumps(_g('spec_lffmax'))  if _g('spec_lffmax')  else None,
+                 json.dumps(_g('spec_lffmin'))  if _g('spec_lffmin')  else None,
+                 json.dumps(_g('spec_lfe'))     if _g('spec_lfe')     else None,
+                 json.dumps(_g('spec_lfsmax'))  if _g('spec_lfsmax')  else None,
+                 json.dumps(_g('spec_lfsmin'))  if _g('spec_lfsmin')  else None,
+                 json.dumps(_g('spec_lfieq'))   if _g('spec_lfieq')   else None,
+                 json.dumps(_g('spec_lfimax'))  if _g('spec_lfimax')  else None,
+                 json.dumps(_g('spec_lfimin'))  if _g('spec_lfimin')  else None,
+                 json.dumps(_g('spec_lfie'))    if _g('spec_lfie')    else None,
+                 json.dumps(_g('spec_lff_l01')) if _g('spec_lff_l01') else None,
+                 json.dumps(_g('spec_lff_l1'))  if _g('spec_lff_l1')  else None,
+                 json.dumps(_g('spec_lff_l5'))  if _g('spec_lff_l5')  else None,
+                 json.dumps(_g('spec_lff_l10')) if _g('spec_lff_l10') else None,
+                 json.dumps(_g('spec_lff_l50')) if _g('spec_lff_l50') else None,
+                 json.dumps(_g('spec_lff_l90')) if _g('spec_lff_l90') else None,
+                 json.dumps(_g('spec_lff_l95')) if _g('spec_lff_l95') else None,
+                 json.dumps(_g('spec_lff_l99')) if _g('spec_lff_l99') else None)
             )
         imported += 1
     conn.commit()

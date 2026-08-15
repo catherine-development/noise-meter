@@ -156,13 +156,12 @@ def _read_glob(data):
     date = f"20{yy:02d}-{mo:02d}-{dd:02d}"
     start = f"{hh:02d}:{mm:02d}:{ss:02d}"
     metrics = _read_glob_scalars(data)
-    for _key, offset, key_a, key_c in _GLOB_SPECTRA:
+    for key, offset, key_a, key_c in _GLOB_SPECTRA:
         spec = _read_glob_spectrum(data, offset)
         if spec is not None:
             metrics[f'{key_a}_from_spectrum'] = _spectrum_total(spec, _freq_weight_a)
             metrics[f'{key_c}_from_spectrum'] = _spectrum_total(spec, _freq_weight_c)
-            if key_a == 'laeq':
-                metrics['lfeq_spectrum'] = spec
+            metrics[f'spec_{key}'] = spec
     return date, start, metrics
 
 
@@ -271,6 +270,8 @@ def _parse_session_files(glob_data, prof_data):
         'lc_l90': _gm('lc_l90'),
         'lc_l95': _gm('lc_l95'),
         'lc_l99': _gm('lc_l99'),
+        # 1/3-octave spectral arrays (36 floats each; None for 1069-byte GLOBs)
+        **{f'spec_{key}': glob_metrics.get(f'spec_{key}') for key, *_ in _GLOB_SPECTRA},
         # PROF-derived values (profile graphs and fallback mins/maxes)
         'mn':     _round_db(glob_metrics.get('lafmin', min(laeq_raw)), 1),
         'mx':     _round_db(glob_metrics.get('lafmax', max(lafmax_raw)), 1),

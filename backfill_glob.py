@@ -20,7 +20,7 @@ Usage:
     # Dry-run (print what would change, no writes):
     python3 backfill_glob.py MEAS118.zip --dry-run
 """
-import os, re, struct, sys, zipfile, sqlite3
+import json, os, re, struct, sys, zipfile, sqlite3
 
 DB_PATH  = os.environ.get('NOISE_DB_PATH', '/home/flightdata/noise-meter/noise.db')
 _DATE_RE = re.compile(r'^\d{6}$')
@@ -64,6 +64,18 @@ _SCALAR_COLS = [
     'lc_l10', 'lc_l50', 'lc_l90', 'lc_l95', 'lc_l99',
 ]
 
+# 18 Nortfr-labelled 1/3-octave spectral tables (36 bands each)
+_N_BANDS = 36
+_SPECTRAL_TABLES = [
+    ('spec_lfeq',    0x0428), ('spec_lffmax',  0x0470), ('spec_lffmin',  0x04b8),
+    ('spec_lfe',     0x0500), ('spec_lfsmax',  0x0548), ('spec_lfsmin',  0x0590),
+    ('spec_lfieq',   0x05d8), ('spec_lfimax',  0x0620), ('spec_lfimin',  0x0668),
+    ('spec_lfie',    0x06b0),
+    ('spec_lff_l01', 0x06f8), ('spec_lff_l1',  0x0764), ('spec_lff_l5',  0x07d0),
+    ('spec_lff_l10', 0x083c), ('spec_lff_l50', 0x08a8), ('spec_lff_l90', 0x0914),
+    ('spec_lff_l95', 0x0980), ('spec_lff_l99', 0x09ec),
+]
+
 
 def _decode(raw):
     return raw / 128.0 - 20.0
@@ -87,6 +99,20 @@ def _glob_metrics(data):
         if off + 1 < len(data):
             m[key] = round(_decode(struct.unpack_from('<H', data, off)[0]), 2)
     return m if m else None
+
+
+def _read_spectra(data):
+    """Read all 18 spectral tables. Returns dict of col_name → JSON string (or None)."""
+    out = {}
+    for col, offset in _SPECTRAL_TABLES:
+        end = offset + _N_BANDS * 2
+        if len(data) >= end:
+            bands = [round(_decode(struct.unpack_from('<H', data, offset + i * 2)[0]), 2)
+                     for i in range(_N_BANDS)]
+            out[col] = json.dumps(bands)
+        else:
+            out[col] = None
+    return out
 
 
 def _yymmdd(iso_date):
@@ -138,13 +164,13 @@ def main():
         SELECT r.id, r.run_number, r.source_file, r.avg_laeq, s.date
         FROM runs r
         JOIN sessions s ON r.session_id = s.id
-        WHERE r.lapeak IS NULL
+        WHERE r.spec_lfeq IS NULL
         ORDER BY s.date, r.run_number
     ''').fetchall()
 
     print(f'Runs to backfill:  {len(rows)}\n')
     if not rows:
-        print('Nothing to do — all runs already have GLOB scalar data.')
+        print('Nothing to do — all runs already have spectral data.')
         conn.close()
         return
 
@@ -168,9 +194,15 @@ def main():
                   f'(short GLOB? len={len(glob_data)})')
             continue
 
-        # Build the SET clause — only new scalar cols + avg_laeq correction
+        spectra = _read_spectra(glob_data)
+
+        # Build the SET clause — scalar cols + spectral JSON cols + avg_laeq correction
         set_cols  = list(_SCALAR_COLS)
         set_vals  = [metrics.get(c) for c in _SCALAR_COLS]
+
+        for col, val in spectra.items():
+            set_cols.append(col)
+            set_vals.append(val)
 
         # Correct avg_laeq with GLOB-derived LAeq (more accurate than old PROF value)
         if metrics.get('laeq') is not None:
