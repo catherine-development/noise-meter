@@ -42,7 +42,11 @@ _GLOB_SCALAR_OFFSETS = {
     'la_l01': 0x0408, 'la_l1':  0x040a, 'la_l5':  0x040c,
     'la_l10': 0x040e, 'la_l50': 0x0410, 'la_l90': 0x0412,
     'la_l95': 0x0414, 'la_l99': 0x0416,
+    'lapeak': 0x03d5,
+    'lcpeak': 0x03ef,
+    'lc_l01': 0x0418, 'lc_l1':  0x041a, 'lc_l5':  0x041c,
     'lc_l10': 0x041e, 'lc_l50': 0x0420, 'lc_l90': 0x0422,
+    'lc_l95': 0x0424, 'lc_l99': 0x0426,
 }
 
 # Columns to backfill (all added in the spectral tables migration, except laeq which
@@ -55,7 +59,9 @@ _SCALAR_COLS = [
     'laie',   'lcie',
     'la_l01', 'la_l1',  'la_l5',
     'la_l10', 'la_l50', 'la_l90', 'la_l95', 'la_l99',
-    'lc_l10', 'lc_l50', 'lc_l90',
+    'lapeak', 'lcpeak',
+    'lc_l01', 'lc_l1',  'lc_l5',
+    'lc_l10', 'lc_l50', 'lc_l90', 'lc_l95', 'lc_l99',
 ]
 
 

@@ -136,7 +136,10 @@ def _migrate(conn):
         ('la_l01', 'REAL'), ('la_l1',  'REAL'), ('la_l5',  'REAL'),
         ('la_l10', 'REAL'), ('la_l50', 'REAL'), ('la_l90', 'REAL'),
         ('la_l95', 'REAL'), ('la_l99', 'REAL'),
+        ('lapeak', 'REAL'), ('lcpeak', 'REAL'),
+        ('lc_l01', 'REAL'), ('lc_l1',  'REAL'), ('lc_l5',  'REAL'),
         ('lc_l10', 'REAL'), ('lc_l50', 'REAL'), ('lc_l90', 'REAL'),
+        ('lc_l95', 'REAL'), ('lc_l99', 'REAL'),
     ]
     for col, typ in _run_migrations:
         if col not in run_cols:
@@ -274,8 +277,9 @@ def import_sessions(sessions_data, metadata=None):
                 '   lasmax, lcsmax, lasmin, lcsmin, laieq, lcieq, '
                 '   laimax, lcimax, laimin, lcimin, laie, lcie, '
                 '   la_l01, la_l1, la_l5, la_l10, la_l50, la_l90, la_l95, la_l99, '
-                '   lc_l10, lc_l50, lc_l90) '
-                'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) '
+                '   lapeak, lcpeak, '
+                '   lc_l01, lc_l1, lc_l5, lc_l10, lc_l50, lc_l90, lc_l95, lc_l99) '
+                'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) '
                 'ON CONFLICT(session_id, run_number) DO UPDATE SET '
                 '  start_time=excluded.start_time, n_samples=excluded.n_samples, '
                 '  step=excluded.step, avg_laeq=excluded.avg_laeq, '
@@ -313,9 +317,16 @@ def import_sessions(sessions_data, metadata=None):
                 '  la_l90=COALESCE(excluded.la_l90,runs.la_l90), '
                 '  la_l95=COALESCE(excluded.la_l95,runs.la_l95), '
                 '  la_l99=COALESCE(excluded.la_l99,runs.la_l99), '
+                '  lapeak=COALESCE(excluded.lapeak,runs.lapeak), '
+                '  lcpeak=COALESCE(excluded.lcpeak,runs.lcpeak), '
+                '  lc_l01=COALESCE(excluded.lc_l01,runs.lc_l01), '
+                '  lc_l1=COALESCE(excluded.lc_l1,runs.lc_l1), '
+                '  lc_l5=COALESCE(excluded.lc_l5,runs.lc_l5), '
                 '  lc_l10=COALESCE(excluded.lc_l10,runs.lc_l10), '
                 '  lc_l50=COALESCE(excluded.lc_l50,runs.lc_l50), '
-                '  lc_l90=COALESCE(excluded.lc_l90,runs.lc_l90)',
+                '  lc_l90=COALESCE(excluded.lc_l90,runs.lc_l90), '
+                '  lc_l95=COALESCE(excluded.lc_l95,runs.lc_l95), '
+                '  lc_l99=COALESCE(excluded.lc_l99,runs.lc_l99)',
                 (sess_id, i, proj['start'], proj['n'], proj.get('step', 1),
                  proj['avg'], proj['mn'], proj['mx'], proj['pmx'], _g('pmxi'),
                  json.dumps(_g('laeq_profile') or []),
@@ -330,7 +341,9 @@ def import_sessions(sessions_data, metadata=None):
                  _g('laimin'), _g('lcimin'), _g('laie'), _g('lcie'),
                  _g('la_l01'), _g('la_l1'), _g('la_l5'),
                  _g('la_l10'), _g('la_l50'), _g('la_l90'), _g('la_l95'), _g('la_l99'),
-                 _g('lc_l10'), _g('lc_l50'), _g('lc_l90'))
+                 _g('lapeak'), _g('lcpeak'),
+                 _g('lc_l01'), _g('lc_l1'), _g('lc_l5'),
+                 _g('lc_l10'), _g('lc_l50'), _g('lc_l90'), _g('lc_l95'), _g('lc_l99'))
             )
         imported += 1
     conn.commit()
