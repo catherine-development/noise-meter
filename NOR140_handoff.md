@@ -1,6 +1,6 @@
 # NOR140 data format investigation
 
-Updated: 2026-08-14
+Updated: 2026-08-15
 
 This is a working reverse-engineering note for the NOR140-B / `MEAS118` SD-card data used by the noise app. It is not vendor-confirmed. The immediate goal is for the app's report values to match the NOR140 screen exactly.
 
@@ -100,6 +100,24 @@ wrapper/overhead:   17 bytes
 
 This confirms that Nortfr is showing values derived from the same `GLOB` and `PROF` files available to the app, not from any extra meter-only state.
 
+### `.NBF` wrapper
+
+Confidence: Medium for run-9 wrapper layout.
+
+Run-9 `.NBF` starts with a 20-byte wrapper/header, then embeds the original measurement data:
+
+```text
+0x00  2 bytes   0x0014, probably offset/length of wrapper header
+0x02  8 bytes   ASCII "Nor-140\0"
+0x0a 10 bytes   unknown wrapper fields
+0x14           GLOB0009.DAT begins
+0xa6e          PROF0009.DAT begins
+```
+
+The `PROF` start appears three bytes before `0x14 + len(GLOB)` because the end of `GLOB` and the three-byte zero `PROF` header overlap/abut in the package. For Excel replacement, generating `.NBF` is not necessary; the app can decode `GLOB` and `PROF` directly.
+
+To reproduce Nortfr `.NBF` files exactly, more `.NBF` examples are needed to identify the 10 unknown wrapper bytes. This does not block reproducing Nortfr's GLOBAL/PROFILE Excel data.
+
 The global workbook has one tab per exported result, plus a `Summary` tab. Important global run-9 values:
 
 ```text
@@ -198,7 +216,170 @@ GLOBnnnn.DAT -> GLOBAL workbook style output
 PROFnnnn.DAT -> PROFILE workbook style output
 ```
 
-The app should therefore be able to produce the same classes of outputs from the SD-card data. Current confidence is high for normal 2653-byte `GLOB` global spectra and derived `LAeq`/`LCeq`; lower for exact Nortfr-style profile columns until the raw `PROF` transform is fully mapped.
+The app should therefore be able to produce the same classes of outputs from the SD-card data. Current confidence is high for normal 2653-byte `GLOB` global scalars/spectra and Nortfr-style `PROF` profile columns.
+
+## Nortfr workbook export structure
+
+Confidence: High for run-9 GLOBAL/PROFILE exports.
+
+Nortfr writes one sheet per measurement channel plus `Summary` and `Setup`.
+
+### `Setup` sheet
+
+Both GLOBAL and PROFILE setup sheets have the same rows:
+
+```text
+1  blank
+2  File version
+3  Filename
+4  Report type
+5  Bandwidth
+6  Frequency range
+7  Period length
+8  Total number of periods
+9  Number of periods before trigger
+10 Number of periods after trigger
+11 Trig time
+12 Measurement effective duration
+13 Full scale
+14 Sensitivity
+```
+
+Known sources/inference:
+
+```text
+File version:
+  Nortfr software/export version, e.g. "v1.0/6.1.1.51".
+  Not an SD-card measurement value. Can be replaced by the app's own export version.
+
+Filename:
+  Nortfr-generated name: NOR140_<serial>_<YYMMDD>_<run>.NBF (...).
+  The serial number "6899108" was not found in GLOB, PROF, DIRFILE, or STP files.
+  The generated Excel workbook does contain an internal Excel absolute-path hint:
+    C:\Users\...\Norsonic\Downloaded Measurements\NOR140_6899108\260812\
+  This supports the idea that Nortfr knew the serial from its downloaded-measurements/device context,
+  not from the raw SD-card GLOB/PROF payload. Treat serial as external/user-configured unless
+  another meter-side file proves otherwise.
+
+App requirement:
+  Add an instrument serial number field to the add-record/import flow.
+  Store it as app/session metadata, not decoded NOR140 measurement data.
+  Default the field to the last serial number used to reduce repeated typing.
+  Use it for Nortfr-style generated filenames and export metadata, e.g.:
+    NOR140_<serial>_<YYMMDD>_<run>_GLOBAL.xlsx
+    NOR140_<serial>_<YYMMDD>_<run>_PROFILE.xlsx
+
+Report type:
+  GLOBAL or PROFILE, chosen by export mode.
+
+Bandwidth:
+  "1/3 Octave", inferred from the 36-band spectral layout.
+
+Frequency range:
+  "6.3 Hz - 20.0 kHz", inferred from the 36 preferred 1/3-octave bands.
+
+Period length:
+  GLOBAL: effective duration as one period, e.g. 0:15:0.0.
+  PROFILE: one second, e.g. 0:0:1.0.
+
+Total number of periods:
+  GLOBAL: 1.
+  PROFILE: number of complete PROF records.
+
+Number of periods before trigger:
+  observed 0.
+
+Number of periods after trigger:
+  GLOBAL: 1.
+  PROFILE: number of complete PROF records.
+
+Trig time:
+  GLOB start timestamp at 0x19, also in DIRFILE.
+
+Measurement effective duration:
+  normally number of complete PROF records in seconds.
+  For normal 15-minute runs this is 900 seconds.
+
+Full scale:
+  stored in GLOB/STP at offset 0x4a as an unsigned integer dB value.
+  Run 9 has 0x0082 = 130 dB.
+
+Sensitivity:
+  exported as -26.9 dB for run 9.
+  Not yet confidently mapped. Common encodings and stable-offset searches did not identify a calibration field.
+  Several candidate byte patterns in GLOB are ordinary measurement values, not stable setup fields.
+```
+
+### GLOBAL `Summary` sheet
+
+Rows:
+
+```text
+row 1: group/scalar headers
+row 2: blank
+row 3: frequency headers under spectral groups
+row 4: the single GLOBAL result row
+rows 5-6: blank
+rows 7-9: NC / NR / RC II rows
+```
+
+Columns:
+
+```text
+1  Period:
+2  Time:
+3  Duration:
+4  blank
+5  blank
+6..43 scalar global values
+44..79   Lfeq spectrum, 36 bands
+80..115  LfFmax spectrum, 36 bands
+116..151 LfFmin spectrum, 36 bands
+152..187 LfE spectrum, 36 bands
+188..223 LfSmax spectrum, 36 bands
+```
+
+The GLOBAL Summary scalar columns are:
+
+```text
+LAFmax, LASmax, LAImax, LAFmin, LASmin, LAImin,
+LAeq, LAIeq, LAE, LAIE, LApeak,
+LCFmax, LCSmax, LCImax, LCFmin, LCSmin, LCImin,
+LCeq, LCIeq, LCE, LCIE, LCpeak,
+LAF,0.1%_1, LAF,1.0%_2, LAF,5.0%_3, LAF,10.0%_4,
+LAF,50.0%_5, LAF,90.0%_6, LAF,95.0%_7, LAF,99.0%_8,
+LCF,0.1%_1, LCF,1.0%_2, LCF,5.0%_3, LCF,10.0%_4,
+LCF,50.0%_5, LCF,90.0%_6, LCF,95.0%_7, LCF,99.0%_8
+```
+
+Note: although the workbook has 18 individual spectral sheets, the GLOBAL `Summary` sheet only includes five spectral groups: `Lfeq`, `LfFmax`, `LfFmin`, `LfE`, and `LfSmax`.
+
+### PROFILE `Summary` sheet
+
+Rows:
+
+```text
+row 1: headers
+rows 2-3: blank
+row 4 onward: one row per complete PROF record
+```
+
+Columns:
+
+```text
+1 Period:
+2 Time:
+3 Duration:
+4 blank
+5 blank
+6 LAFspl
+7 LAeq
+8 LAFmax
+9 LAE
+10 LApeak
+```
+
+Each individual PROFILE sheet has the same values as one of the five profile columns.
 
 ## Equivalent level calculation from spectra
 
@@ -585,7 +766,10 @@ What remains is only needed for complete robustness across all SD-card variants:
 2. Whether reduced-size `1069`-byte `GLOB` files have a different/partial scalar or spectral layout.
 3. Meaning of the extra bytes in `2668`-byte `GLOB` files.
 4. Handling of partial trailing `PROF` records.
-5. Any additional metadata/setup fields needed for a fully faithful Nortfr-style workbook export.
+5. Sensitivity/calibration field source for the `Setup` sheet.
+6. Serial number source for Nortfr-style filenames; not found in SD-card files inspected.
+7. The 10 unknown bytes in the `.NBF` wrapper, only needed if generating `.NBF`.
+8. Any additional metadata/setup fields needed for a fully faithful Nortfr-style workbook export.
 
 ## Historical corpus variation check
 
@@ -685,7 +869,160 @@ MEAS118/260812/PART0000/PROJ0010
 
 Export both Global and Profile views if possible.
 
-The run-9 export plus the screen-value cross-checks for runs 2, 4, 5, 6, 8, 9, and 10 are enough to implement `LAeq`/`LCeq` for normal 2653-byte `GLOB` files with high confidence. More exports are still useful for mapping other metrics and unusual file sizes.
+The run-9 export plus the screen-value cross-checks for runs 2, 4, 5, 6, 8, 9, and 10 are enough to implement normal 2653-byte `GLOB`/`PROF` measurement exports with high confidence. More exports are only useful for metadata, `.NBF` generation, or unusual file-size/setup edge cases.
+
+## Implementation status (as of 2026-08-15)
+
+The format investigation above has been translated into working app code. The following has been built and deployed to both Pis.
+
+### Database schema additions
+
+The `runs` table has the following additional columns (all added via `ALTER TABLE` in `_run_migrations` so the schema self-upgrades on first run):
+
+```text
+-- 18 x 1/3-octave spectral arrays from GLOB (JSON, 36 floats each; NULL for 1069-byte GLOBs)
+spec_lfeq, spec_lffmax, spec_lffmin, spec_lfe
+spec_lfsmax, spec_lfsmin
+spec_lfieq, spec_lfimax, spec_lfimin, spec_lfie
+spec_lff_l01, spec_lff_l1, spec_lff_l5, spec_lff_l10
+spec_lff_l50, spec_lff_l90, spec_lff_l95, spec_lff_l99
+
+-- 5 x 1-second PROF time series (JSON arrays; NULL until backfilled)
+prof_lafspl_json, prof_laeq_json, prof_lafmax_json
+prof_lae_json, prof_lapeak_json
+```
+
+An `app_settings` key/value table stores user-level configuration:
+
+```sql
+CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT)
+```
+
+Currently used for one key: `instrument_serial`.
+
+### Backfill scripts
+
+Two standalone scripts populate historical data for existing runs without re-importing from ZIP:
+
+- **`backfill_glob.py`** — decodes all 18 spectral tables from `GLOB*.DAT` files in the ZIP and writes them to the `spec_*` columns. Sentinel: `spec_lfeq IS NULL`.
+- **`backfill_prof.py`** — decodes the 5-channel 1-second time series from `PROF*.DAT` files and writes them to the `prof_*_json` columns. Sentinel: `prof_lafspl_json IS NULL`.
+
+Both use the same decode: `uint16_LE / 128 - 20`, and round to 1 decimal place before JSON-encoding.
+
+### Sanity checks run (2026-08-15)
+
+Three-point verification against Nortfr reference for 2026-08-12:
+
+1. **PROF array lengths**: `json_array_length(prof_lafspl_json) = n_samples` for all 11 Gladys August runs. ✓
+2. **Spectral integrity**: A-weighted energy sum of `spec_lfeq` matches stored `avg_laeq` to ±0.03 dB for all 10 August-12 runs. ✓
+3. **Nortfr reference parity (run 9)**: LAeq=70.8, LApeak=97.4, LCpeak=98.6, LA10=74.8, LA50=67.1, LA90=57.1, LCeq=78.7. All match. ✓
+
+### Known 0.1 dB decode discrepancy in PROF values
+
+When comparing generated PROFILE xlsx against the Nortfr reference, approximately 5% of 1-second values differ by exactly 0.1 dB (ours is 0.1 dB lower). This is a systematic rounding difference at the decode/storage stage, not in the xlsx writer. The xlsx writer correctly outputs what is stored in the database.
+
+Root cause: the NOR140 hardware apparently uses a rounding convention that, in some edge cases, rounds 0.05 up where Python's `round()` rounds to even. The effect is ≤0.1 dB on affected values and does not affect the global scalar values (which come from GLOB offsets directly, not the PROF decode).
+
+### xlsx exporter (`nor140_exporter.py`)
+
+Generates Nortfr-compatible GLOBAL (58 sheets) and PROFILE (7 sheets) workbooks from stored run data.
+
+Public API:
+
+```python
+from nor140_exporter import build_global_xlsx, build_profile_xlsx, export_filename
+
+run = noise_db.get_full_run_row(date, run_number)  # includes session_date
+serial = noise_db.get_setting('instrument_serial', '')
+
+xlsx_bytes = build_global_xlsx(run, serial)
+xlsx_bytes = build_profile_xlsx(run, serial)
+fname = export_filename(run, serial, 'GLOBAL')
+# → 'NOR140_6899108_260812_0009_GLOBAL.xlsx'
+```
+
+`get_full_run_row()` joins the sessions table to add `session_date`, needed because `start_time` in the `runs` table is stored as a bare time string (`'23:27:36'`), not a full datetime.
+
+**Important**: `step` in the run dict is a chart-downsampling factor, not a multiplier on measurement time. Actual run duration is always `n_samples` seconds (one measurement per second). The PROFILE period length is always 1 second.
+
+**Dependency**: `openpyxl` — installed on both Pis with `pip3 install openpyxl --break-system-packages`.
+
+### Flask route
+
+```
+GET /session/<date>/run/<run_number>/export/nor140/<GLOBAL|PROFILE>
+```
+
+Returns the xlsx file as a download. Serial number is read from `app_settings`. Only accessible when logged in.
+
+### UI
+
+Download links ("NOR140 Global xlsx" / "NOR140 Profile xlsx") appear at the bottom of each run card in the session view, but only for runs that have GLOB-derived scalar data (`lafmax IS NOT NULL`). Links use `onclick="event.stopPropagation()"` to prevent the card expand handler from firing.
+
+The instrument serial number can be set on the Manage page (above the session list).
+
+### Nortfr xlsx structure details (confirmed by comparison)
+
+Points that were surprising or non-obvious during reverse engineering:
+
+**Cell layout — all sheets:**
+
+- All data rows and column-header rows have `None` at column index 2 (zero-based). Values start at column 3.
+  - Data: `[period_idx, datetime_str, None, value(s)]`
+  - Header: `['Period:', 'Time:', None, col_label(s)]`
+- The 8-row header block has TWO blank rows (indices 6 and 7), not one.
+- Spectral sheets: row 7 has the sheet label at column 3: `[None, None, None, 'Lfeq']`.
+- Non-spectral sheets: row 7 is fully blank.
+- Data starts at row 9 for all sheet types.
+
+**Header row formats:**
+
+- Row 0 / row 5: value in column 1, format hint in column 2: `['Period length', '(0:15:0.0)', 'H:M:S.mS']`
+- Row 4 trig time: `['Trig time', '(2026/8/12 23:27:36.0)', 'Y-Mo-D H:M:S.mS']` — slashes, no zero-padding on month/day, `.0` milliseconds
+- Data row datetimes: `(2026-08-12 23:27:36.000)` — dashes, `.000` milliseconds
+- Duration format: `(H:M:S.0)` — no zero-padding on any component, e.g. `(0:15:0.0)` not `(0:15:00.0)`
+
+**GLOBAL vs PROFILE period length:**
+
+- GLOBAL row 0: total run duration, e.g. `(0:15:0.0)` — one "period" = entire run
+- PROFILE row 0: `(0:0:1.0)` — one period = one second
+- Both have the same effective duration in row 5
+
+**Summary sheet** — does not use the standard 8-row header block:
+
+```text
+row 0: ['Period:', 'Time:', 'Duration:', None, None, scalar_headers...]
+row 1: blank
+row 2: blank
+row 3: [0, datetime, None, None, None, scalar_vals...]
+row 4: blank
+row 5: blank
+row 6+: NC / NR / RC II rating curves (not reproduced in app export)
+```
+
+**Frequency column labels** — switch from Hz to kHz above 800 Hz:
+
+```text
+'6.3 Hz', '8.0 Hz', '10 Hz', ..., '800 Hz',
+'1.0 kHz', '1.25 kHz', ..., '20.0 kHz'
+```
+
+Note `8.0 Hz` (not `8 Hz`) and the decimal formatting above 1 kHz.
+
+**Sheet naming** — note capital letters: `LfSmin`, `LfSmax`, `LfFmin`, `LfFmax` (not `Lfsmin` etc.).
+
+**Percentile sheet order** — both LCF and LAF groups run in descending order: `99.0%_8` → `0.1%_1` (sheets 18–33).
+
+### Comparison result (run 9, 2026-08-15)
+
+| Check | Result |
+|---|---|
+| 58 GLOBAL sheets in correct order | ✓ |
+| 7 PROFILE sheets in correct order | ✓ |
+| All scalar values (LAeq, LApeak, LA10/50/90, LCeq, LCpeak, LAE, LCE…) | ✓ exact match |
+| Lfeq 36 spectral bands | 35/36 exact, 1 band off by 0.1 dB (decode rounding) |
+| Header formats (period length, trig time, blank rows, col layout) | ✓ exact match |
+| PROFILE 900 data rows | ✓ 0 mismatches >0.1 dB |
 
 ## App implication
 

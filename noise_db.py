@@ -730,6 +730,26 @@ def update_session_metadata(date, recorder_name, location_label, postcode, lat, 
     conn.close()
 
 
+def get_full_run_row(date, run_number):
+    """Return all columns for a single run (including spec_ and prof_ JSON columns).
+    Adds 'session_date' so callers can build full datetimes from start_time."""
+    conn = get_db()
+    sess = conn.execute('SELECT id FROM sessions WHERE date=?', (date,)).fetchone()
+    if not sess:
+        conn.close()
+        return None
+    row = conn.execute(
+        'SELECT * FROM runs WHERE session_id=? AND run_number=?',
+        (sess['id'], run_number)
+    ).fetchone()
+    conn.close()
+    if row is None:
+        return None
+    result = dict(row)
+    result['session_date'] = date
+    return result
+
+
 def update_run_location_tag(date, run_number, tag):
     conn = get_db()
     conn.execute(

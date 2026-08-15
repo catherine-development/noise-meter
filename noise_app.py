@@ -26,7 +26,7 @@ if os.path.exists(_env_path):
                     os.environ[_k.strip()] = _v.strip().strip("'\"")
 
 from flask import (Flask, render_template, request, jsonify, redirect,
-                   url_for, abort, flash, session as flask_session)
+                   url_for, abort, flash, session as flask_session, make_response)
 
 from noise_db import (init_db, import_sessions, get_all_sessions_json,
                       get_import_log, get_sessions_since, get_existing_dates, get_existing_run_starts,
@@ -46,7 +46,8 @@ from noise_db import (init_db, import_sessions, get_all_sessions_json,
                       get_assessment_location, get_assessment_run,
                       get_assessment_runs_by_pairs,
                       get_sessions_export_format,
-                      get_setting, set_setting)
+                      get_setting, set_setting,
+                      get_full_run_row)
 from noise_parser import parse_zip, parse_files
 
 # Shared auth module from flight tracker
@@ -287,8 +288,7 @@ def logout():
 @login_required
 def index():
     data = get_all_sessions_json()
-    data_json = json.dumps(data, separators=(',', ':'))
-    return render_template('index.html', data_json=data_json, pi_name=PI_NAME)
+    return render_template('index.html', data=data, pi_name=PI_NAME)
 
 
 @app.route('/api/data.json')
@@ -543,6 +543,28 @@ def edit_run_tag(date, run_number):
     return jsonify({'status': 'ok', 'tag': tag or None})
 
 
+@app.route('/session/<date>/run/<int:run_number>/export/nor140/<report_type>')
+@login_required
+def export_nor140(date, run_number, report_type):
+    if report_type not in ('GLOBAL', 'PROFILE'):
+        return 'Invalid report type', 400
+    from nor140_exporter import build_global_xlsx, build_profile_xlsx, export_filename
+    run = get_full_run_row(date, run_number)
+    if run is None:
+        return 'Run not found', 404
+    serial = get_setting('instrument_serial', '')
+    if report_type == 'GLOBAL':
+        data = build_global_xlsx(run, serial)
+    else:
+        data = build_profile_xlsx(run, serial)
+    fname = export_filename(run, serial, report_type)
+    safe_fname = fname.replace('"', '').replace('\r', '').replace('\n', '')
+    response = make_response(data)
+    response.headers['Content-Type'] = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    response.headers['Content-Disposition'] = f'attachment; filename="{safe_fname}"'
+    return response
+
+
 @app.route('/session/<date>/delete', methods=['POST'])
 @login_required
 def delete_session_route(date):
@@ -706,311 +728,6 @@ def _run_stats(proj):
     if proj.get('lafmax') is not None: stats['lmax'] = round(proj['lafmax'], 1)
     if proj.get('mn')     is not None: stats['lmin'] = round(proj['mn'], 1)
     return stats
-
-
-@app.route('/session/<date>/report')
-@login_required
-def generate_report(date):
-    from flask import Response
-
-    ANTHROPIC_KEY = os.environ.get('ANTHROPIC_API_KEY', '')
-    if not ANTHROPIC_KEY:
-        return Response(
-            '<html><body style="font-family:sans-serif;padding:40px;max-width:600px;margin:auto">'
-            '<h2>API key not configured</h2>'
-            '<p>Add <code>ANTHROPIC_API_KEY=sk-ant-…</code> to the Pi\'s <code>.env</code> file '
-            'and restart the server, then try again.</p></body></html>',
-            mimetype='text/html'
-        )
-
-    # Pull session + runs from DB
-    all_sessions = get_all_sessions_json()['sessions']
-    sess = next((s for s in all_sessions if s['d'] == date), None)
-    if not sess:
-        abort(404)
-
-    projects = sess.get('projects', [])
-    run_rows = []
-    all_laeq = []
-    for i, proj in enumerate(projects, 1):
-        st = _run_stats(proj)
-        run_rows.append({'run': i, 'start': proj['start'], **st})
-        laeq_full = _expand_run(proj)
-        all_laeq.extend(laeq_full)
-
-    # Session-level stats — prefer GLOB-derived per-run scalars from run_rows,
-    # fall back to PROF profile energy-averaging only when GLOB scalars absent.
-    total_duration_s = sum(p.get('n', 0) for p in projects)
-    run_leq_ns = [(r['leq'], r.get('n') or 1) for r in run_rows if r.get('leq') is not None]
-    if run_leq_ns:
-        total_n = sum(n for _, n in run_leq_ns)
-        session_leq = round(10 * math.log10(
-            sum(n * 10 ** (leq / 10) for leq, n in run_leq_ns) / total_n
-        ), 1)
-    else:
-        session_leq = _energy_avg_db(all_laeq) if all_laeq else None
-    run_la90s = [r['la90'] for r in run_rows if r.get('la90') is not None]
-    run_la10s = [r['la10'] for r in run_rows if r.get('la10') is not None]
-    session_la90 = round(sum(run_la90s) / len(run_la90s), 1) if run_la90s else (
-        _percentile(sorted(all_laeq), 10) if all_laeq else None)
-    session_la10 = round(sum(run_la10s) / len(run_la10s), 1) if run_la10s else (
-        _percentile(sorted(all_laeq), 90) if all_laeq else None)
-    run_lmaxs = [r['lmax'] for r in run_rows if r.get('lmax') is not None]
-    session_lmax = max(run_lmaxs) if run_lmaxs else (max(all_laeq) if all_laeq else None)
-    session_pmx  = max((r.get('pmx', 0) or 0 for r in run_rows), default=None)
-
-    wx = sess.get('wx') or {}
-
-    def wind_dir(deg):
-        if deg is None:
-            return ''
-        dirs = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW']
-        return dirs[round(deg / 45) % 8]
-
-    # Build concise data summary for the prompt
-    loc_parts = [sess.get('loc'), sess.get('post')]
-    location_str = ', '.join(p for p in loc_parts if p) or 'Not recorded'
-    recorder_str = sess.get('name') or 'Not recorded'
-    notes_str    = sess.get('notes') or ''
-
-    wx_str = ''
-    if wx:
-        parts = []
-        if wx.get('ws') is not None:
-            parts.append(f"{wx['ws']} mph {wind_dir(wx.get('wd'))}")
-        if wx.get('tn') is not None and wx.get('tx') is not None:
-            parts.append(f"temp {wx['tn']}–{wx['tx']} °C")
-        if wx.get('pr'):
-            parts.append(f"precip {wx['pr']} mm")
-        wx_str = ', '.join(parts)
-
-    run_summary_lines = []
-    for r in run_rows:
-        run_summary_lines.append(
-            f"  Run {r['run']} ({r['start']}, {r['n']} s): "
-            f"LAeq {r.get('leq')} dB | LA10 {r.get('la10')} | LA50 {r.get('la50')} | LA90 {r.get('la90')} | "
-            f"LAmax {r.get('lmax')} | LCpeak {r.get('pmx')} | Time≥85dB {r.get('pct85')}%"
-        )
-
-    prompt = f"""You are a qualified UK noise consultant producing a professional noise assessment report.
-Instrument: Norsonic NOR140 Class 1 precision sound level meter (IEC 61672-1:2013).
-Measurement date: {date}
-Location: {location_str}
-Recorder: {recorder_str}
-GPS: {f"{sess['lat']}, {sess['lng']}" if sess.get('lat') and sess.get('lng') else 'Not recorded'}
-Notes: {notes_str or 'None'}
-Weather: {wx_str or 'Not available'}
-
-SESSION STATISTICS:
-  Total duration: {total_duration_s} seconds across {len(projects)} run(s)
-  Session LAeq: {session_leq} dB(A)
-  Session LA10: {session_la10} dB(A)
-  Session LA90: {session_la90} dB(A)
-  Session LAmax: {session_lmax} dB(A)
-  Session LCpeak max: {session_pmx} dB(C)
-
-PER-RUN BREAKDOWN:
-{chr(10).join(run_summary_lines)}
-
-Produce a professional noise assessment report as a JSON object with exactly these keys:
-- "executive_summary": 2–3 sentence plain-English overview (HTML allowed)
-- "methodology": brief description of measurement approach, instrument, and parameters (HTML)
-- "results_narrative": narrative interpretation of the per-run and session data — note any significant variability, peaks, and background noise level (LA90) (HTML)
-- "compliance": assessment against: (a) HSE Noise at Work Regulations 2005 — lower/upper/limit action values (80/85/87 dB LAeq, 135/137/140 dB LCpeak); (b) BS 4142:2014+A1:2019 significance criteria relative to LA90 background; (c) WHO Environmental Noise Guidelines 2018 if applicable. Use HTML tables where helpful.
-- "conclusions": clear professional conclusions about the noise environment (HTML)
-- "recommendations": practical next steps if any action is warranted (HTML, may use <ul> list)
-
-Respond with valid JSON only. No markdown fencing. No preamble."""
-
-    usage_info = None
-    try:
-        import anthropic as _anthropic
-        client = _anthropic.Anthropic(api_key=ANTHROPIC_KEY)
-        message = client.messages.create(
-            model='claude-sonnet-5',
-            max_tokens=16000,
-            messages=[{'role': 'user', 'content': prompt}],
-        )
-        raw = next(b.text for b in message.content if hasattr(b, 'text')).strip()
-        if raw.startswith('```'):
-            raw = raw.split('\n', 1)[1].rsplit('```', 1)[0].strip()
-        sections = json.loads(raw)
-        u = message.usage
-        tok_in  = getattr(u, 'input_tokens', 0)
-        tok_out = getattr(u, 'output_tokens', 0)
-        # claude-sonnet-5 pricing: $3/MTok input, $15/MTok output (approximate)
-        cost_usd = (tok_in * 3 + tok_out * 15) / 1_000_000
-        usage_info = {
-            'input_tokens':  tok_in,
-            'output_tokens': tok_out,
-            'cost_usd':      round(cost_usd, 4),
-        }
-        print(f"Report [{date}]: {tok_in} in / {tok_out} out tokens ≈ ${cost_usd:.4f}")
-    except Exception as e:
-        sections = {
-            'executive_summary': f'<em>Report generation failed: {e}</em>',
-            'methodology': '', 'results_narrative': '',
-            'compliance': '', 'conclusions': '', 'recommendations': '',
-        }
-
-    return render_template(
-        'report.html',
-        date=date,
-        pi_name=PI_NAME,
-        sess=sess,
-        run_rows=run_rows,
-        session_leq=session_leq,
-        session_la10=session_la10,
-        session_la90=session_la90,
-        session_lmax=session_lmax,
-        session_pmx=session_pmx,
-        total_duration_s=total_duration_s,
-        wx=wx,
-        wx_str=wx_str,
-        sections=sections,
-        usage_info=usage_info,
-        generated_at=datetime.now().strftime('%d %B %Y at %H:%M'),
-    )
-
-
-@app.route('/session/<date>/run/<int:run_number>/report')
-@login_required
-def generate_run_report(date, run_number):
-    from flask import Response
-
-    ANTHROPIC_KEY = os.environ.get('ANTHROPIC_API_KEY', '')
-    if not ANTHROPIC_KEY:
-        return Response(
-            '<html><body style="font-family:sans-serif;padding:40px;max-width:600px;margin:auto">'
-            '<h2>API key not configured</h2>'
-            '<p>Add <code>ANTHROPIC_API_KEY=sk-ant-…</code> to the Pi\'s <code>.env</code> and restart.</p>'
-            '</body></html>',
-            mimetype='text/html'
-        )
-
-    all_sessions = get_all_sessions_json()['sessions']
-    sess = next((s for s in all_sessions if s['d'] == date), None)
-    if not sess:
-        abort(404)
-
-    projects = sess.get('projects', [])
-    if run_number < 1 or run_number > len(projects):
-        abort(404)
-
-    proj = projects[run_number - 1]
-    st = _run_stats(proj)
-
-    wx = sess.get('wx') or {}
-
-    def wind_dir(deg):
-        if deg is None:
-            return ''
-        dirs = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW']
-        return dirs[round(deg / 45) % 8]
-
-    wx_str = ''
-    if wx:
-        parts = []
-        if wx.get('ws') is not None:
-            parts.append(f"{wx['ws']} mph {wind_dir(wx.get('wd'))}")
-        if wx.get('tn') is not None and wx.get('tx') is not None:
-            parts.append(f"temp {wx['tn']}–{wx['tx']} °C")
-        if wx.get('pr'):
-            parts.append(f"precip {wx['pr']} mm")
-        wx_str = ', '.join(parts)
-
-    loc_parts = [sess.get('loc'), sess.get('post')]
-    location_str = ', '.join(p for p in loc_parts if p) or 'Not recorded'
-
-    # Find the peak moment (index of max LAeq) for temporal context
-    laeq_expanded = _expand_run(proj)
-    peak_idx = laeq_expanded.index(max(laeq_expanded)) if laeq_expanded else 0
-    peak_elapsed = peak_idx  # seconds into the recording
-
-    prompt = f"""You are a qualified UK noise consultant producing a professional noise assessment report for a single measurement run.
-Instrument: Norsonic NOR140 Class 1 precision sound level meter (IEC 61672-1:2013).
-Measurement date: {date}
-Location: {location_str}
-Recorder: {sess.get('name') or 'Not recorded'}
-Notes: {sess.get('notes') or 'None'}
-Weather: {wx_str or 'Not available'}
-
-THIS RUN (Run {run_number} of {len(projects)} in the session):
-  Start time: {proj['start']}
-  Duration: {proj['n']} seconds ({proj['n'] // 60}m {proj['n'] % 60}s)
-  Downsampling: 1 sample per {proj.get('step', 1)} second(s) stored
-
-STATISTICS FOR THIS RUN:
-  LAeq (energy average): {st.get('leq')} dB(A)
-  LA10 (exceeded 10% of time): {st.get('la10')} dB(A)
-  LA50 (median): {st.get('la50')} dB(A)
-  LA90 (background, exceeded 90%): {st.get('la90')} dB(A)
-  LAmax: {st.get('lmax')} dB(A)
-  LAmin: {st.get('lmin')} dB(A)
-  LCpeak max: {st.get('pmx')} dB(C)
-  Time at or above 85 dB(A): {st.get('pct85')}%
-  Peak LAeq occurred at approx. {peak_elapsed}s into the recording ({peak_elapsed // 60}m {peak_elapsed % 60}s)
-
-Produce a professional noise assessment report focused on this single measurement run as a JSON object with exactly these keys:
-- "executive_summary": 2–3 sentence plain-English overview of this specific recording (HTML)
-- "methodology": brief description of measurement approach and instrument (HTML)
-- "results_narrative": detailed narrative of the noise environment during this run — note the background level (LA90), variability (difference between LA10 and LA90 indicates fluctuation), any peak events, and how levels evolved; comment on when the peak occurred relative to the recording duration (HTML)
-- "compliance": assessment against: (a) HSE Noise at Work Regulations 2005 — lower/upper/limit action values (80/85/87 dB LAeq, 135/137/140 dB LCpeak); (b) BS 4142:2014+A1:2019 significance criteria (rating level vs LA90 background); (c) WHO Environmental Noise Guidelines 2018 if applicable. Use HTML tables where helpful.
-- "conclusions": clear professional conclusions about the noise environment in this run (HTML)
-- "recommendations": practical next steps if action is warranted (HTML, may use <ul>)
-
-Respond with valid JSON only. No markdown fencing. No preamble."""
-
-    usage_info = None
-    try:
-        import anthropic as _anthropic
-        client = _anthropic.Anthropic(api_key=ANTHROPIC_KEY)
-        message = client.messages.create(
-            model='claude-sonnet-5',
-            max_tokens=16000,
-            messages=[{'role': 'user', 'content': prompt}],
-        )
-        raw = next(b.text for b in message.content if hasattr(b, 'text')).strip()
-        if raw.startswith('```'):
-            raw = raw.split('\n', 1)[1].rsplit('```', 1)[0].strip()
-        sections = json.loads(raw)
-        u = message.usage
-        tok_in  = getattr(u, 'input_tokens', 0)
-        tok_out = getattr(u, 'output_tokens', 0)
-        cost_usd = (tok_in * 3 + tok_out * 15) / 1_000_000
-        usage_info = {
-            'input_tokens':  tok_in,
-            'output_tokens': tok_out,
-            'cost_usd':      round(cost_usd, 4),
-        }
-        print(f"Run report [{date} run {run_number}]: {tok_in} in / {tok_out} out tokens ≈ ${cost_usd:.4f}")
-    except Exception as e:
-        sections = {
-            'executive_summary': f'<em>Report generation failed: {e}</em>',
-            'methodology': '', 'results_narrative': '',
-            'compliance': '', 'conclusions': '', 'recommendations': '',
-        }
-
-    run_rows = [{'run': run_number, 'start': proj['start'], **st}]
-
-    return render_template(
-        'report.html',
-        date=date,
-        pi_name=PI_NAME,
-        sess=sess,
-        run_rows=run_rows,
-        session_leq=st.get('leq'),
-        session_la10=st.get('la10'),
-        session_la90=st.get('la90'),
-        session_lmax=st.get('lmax'),
-        session_pmx=st.get('pmx'),
-        total_duration_s=proj.get('n', 0),
-        wx=wx,
-        wx_str=wx_str,
-        sections=sections,
-        usage_info=usage_info,
-        generated_at=datetime.now().strftime('%d %B %Y at %H:%M'),
-    )
 
 
 # ── Reports ───────────────────────────────────────────────────────────────────
@@ -1539,7 +1256,7 @@ def export_assessment_csv(aid):
                 r.get('max_lcpeak', ''), r.get('max_laimax', ''),
                 r.get('conditions', '') or '', r.get('notes', '') or '',
             ])
-    aname = data['assessment']['name'].replace(' ', '_')[:40]
+    aname = data['assessment']['name'].replace(' ', '_').replace('"', '').replace('\r', '').replace('\n', '')[:40]
     return app.response_class(
         output.getvalue(),
         mimetype='text/csv',
