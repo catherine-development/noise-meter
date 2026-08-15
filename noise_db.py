@@ -148,6 +148,10 @@ def _migrate(conn):
         ('spec_lff_l01', 'TEXT'), ('spec_lff_l1',  'TEXT'), ('spec_lff_l5',  'TEXT'),
         ('spec_lff_l10', 'TEXT'), ('spec_lff_l50', 'TEXT'), ('spec_lff_l90', 'TEXT'),
         ('spec_lff_l95', 'TEXT'), ('spec_lff_l99', 'TEXT'),
+        # Full 1-second PROF time series (JSON arrays; NULL until backfilled)
+        ('prof_lafspl_json', 'TEXT'), ('prof_laeq_json',   'TEXT'),
+        ('prof_lafmax_json', 'TEXT'), ('prof_lae_json',    'TEXT'),
+        ('prof_lapeak_json', 'TEXT'),
     ]
     for col, typ in _run_migrations:
         if col not in run_cols:
@@ -290,8 +294,10 @@ def import_sessions(sessions_data, metadata=None):
                 '   spec_lfeq, spec_lffmax, spec_lffmin, spec_lfe, '
                 '   spec_lfsmax, spec_lfsmin, spec_lfieq, spec_lfimax, spec_lfimin, spec_lfie, '
                 '   spec_lff_l01, spec_lff_l1, spec_lff_l5, spec_lff_l10, '
-                '   spec_lff_l50, spec_lff_l90, spec_lff_l95, spec_lff_l99) '
-                'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) '
+                '   spec_lff_l50, spec_lff_l90, spec_lff_l95, spec_lff_l99, '
+                '   prof_lafspl_json, prof_laeq_json, prof_lafmax_json, '
+                '   prof_lae_json, prof_lapeak_json) '
+                'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) '
                 'ON CONFLICT(session_id, run_number) DO UPDATE SET '
                 '  start_time=excluded.start_time, n_samples=excluded.n_samples, '
                 '  step=excluded.step, avg_laeq=excluded.avg_laeq, '
@@ -356,7 +362,12 @@ def import_sessions(sessions_data, metadata=None):
                 '  spec_lff_l50=COALESCE(excluded.spec_lff_l50,runs.spec_lff_l50), '
                 '  spec_lff_l90=COALESCE(excluded.spec_lff_l90,runs.spec_lff_l90), '
                 '  spec_lff_l95=COALESCE(excluded.spec_lff_l95,runs.spec_lff_l95), '
-                '  spec_lff_l99=COALESCE(excluded.spec_lff_l99,runs.spec_lff_l99)',
+                '  spec_lff_l99=COALESCE(excluded.spec_lff_l99,runs.spec_lff_l99), '
+                '  prof_lafspl_json=COALESCE(excluded.prof_lafspl_json,runs.prof_lafspl_json), '
+                '  prof_laeq_json=COALESCE(excluded.prof_laeq_json,runs.prof_laeq_json), '
+                '  prof_lafmax_json=COALESCE(excluded.prof_lafmax_json,runs.prof_lafmax_json), '
+                '  prof_lae_json=COALESCE(excluded.prof_lae_json,runs.prof_lae_json), '
+                '  prof_lapeak_json=COALESCE(excluded.prof_lapeak_json,runs.prof_lapeak_json)',
                 (sess_id, i, proj['start'], proj['n'], proj.get('step', 1),
                  proj['avg'], proj['mn'], proj['mx'], proj['pmx'], _g('pmxi'),
                  json.dumps(_g('laeq_profile') or []),
@@ -391,7 +402,12 @@ def import_sessions(sessions_data, metadata=None):
                  json.dumps(_g('spec_lff_l50')) if _g('spec_lff_l50') else None,
                  json.dumps(_g('spec_lff_l90')) if _g('spec_lff_l90') else None,
                  json.dumps(_g('spec_lff_l95')) if _g('spec_lff_l95') else None,
-                 json.dumps(_g('spec_lff_l99')) if _g('spec_lff_l99') else None)
+                 json.dumps(_g('spec_lff_l99')) if _g('spec_lff_l99') else None,
+                 json.dumps(_g('prof_lafspl_json')) if _g('prof_lafspl_json') else None,
+                 json.dumps(_g('prof_laeq_json'))   if _g('prof_laeq_json')   else None,
+                 json.dumps(_g('prof_lafmax_json'))  if _g('prof_lafmax_json') else None,
+                 json.dumps(_g('prof_lae_json'))    if _g('prof_lae_json')    else None,
+                 json.dumps(_g('prof_lapeak_json')) if _g('prof_lapeak_json') else None)
             )
         imported += 1
     conn.commit()

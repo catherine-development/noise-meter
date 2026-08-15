@@ -272,6 +272,12 @@ def _parse_session_files(glob_data, prof_data):
         'lc_l99': _gm('lc_l99'),
         # 1/3-octave spectral arrays (36 floats each; None for 1069-byte GLOBs)
         **{f'spec_{key}': glob_metrics.get(f'spec_{key}') for key, *_ in _GLOB_SPECTRA},
+        # Full 1-second PROF time series
+        'prof_lafspl_json': [_round_db(v, 1) for v in lafspl_raw],
+        'prof_laeq_json':   [_round_db(v, 1) for v in laeq_raw],
+        'prof_lafmax_json': [_round_db(v, 1) for v in lafmax_raw],
+        'prof_lae_json':    [_round_db(v, 1) for v in lae_raw],
+        'prof_lapeak_json': [_round_db(v, 1) for v in lapeak_raw],
         # PROF-derived values (profile graphs and fallback mins/maxes)
         'mn':     _round_db(glob_metrics.get('lafmin', min(laeq_raw)), 1),
         'mx':     _round_db(glob_metrics.get('lafmax', max(lafmax_raw)), 1),
