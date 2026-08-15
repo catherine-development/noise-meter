@@ -45,7 +45,8 @@ from noise_db import (init_db, import_sessions, get_all_sessions_json,
                       get_full_sync_payload, apply_full_sync, apply_sync_event,
                       get_assessment_location, get_assessment_run,
                       get_assessment_runs_by_pairs,
-                      get_sessions_export_format)
+                      get_sessions_export_format,
+                      get_setting, set_setting)
 from noise_parser import parse_zip, parse_files
 
 # Shared auth module from flight tracker
@@ -497,7 +498,17 @@ def manage_page():
     sessions = get_all_sessions_list()
     open_date = request.args.get('open')
     return render_template('manage.html', pi_name=PI_NAME,
-                           sessions=sessions, open_date=open_date)
+                           sessions=sessions, open_date=open_date,
+                           instrument_serial=get_setting('instrument_serial', ''))
+
+
+@app.route('/settings/instrument', methods=['POST'])
+@login_required
+def save_instrument_settings():
+    serial = request.form.get('instrument_serial', '').strip()
+    set_setting('instrument_serial', serial)
+    flash('Instrument settings saved.', 'success')
+    return redirect(url_for('manage_page'))
 
 
 @app.route('/session/<date>/edit', methods=['POST'])

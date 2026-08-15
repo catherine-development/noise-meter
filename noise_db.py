@@ -72,6 +72,12 @@ _DEFAULT_TEMPLATES = [
 
 
 def _migrate(conn):
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key   TEXT PRIMARY KEY,
+            value TEXT
+        )
+    ''')
     existing = {row[1] for row in conn.execute('PRAGMA table_info(sessions)').fetchall()}
     new_cols = [
         ('recorder_name',  'TEXT'),
@@ -963,6 +969,24 @@ def get_import_log(limit=20):
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def get_setting(key, default=None):
+    conn = get_db()
+    row = conn.execute('SELECT value FROM app_settings WHERE key=?', (key,)).fetchone()
+    conn.close()
+    return row['value'] if row else default
+
+
+def set_setting(key, value):
+    conn = get_db()
+    conn.execute(
+        'INSERT INTO app_settings (key, value) VALUES (?,?) '
+        'ON CONFLICT(key) DO UPDATE SET value=excluded.value',
+        (key, value)
+    )
+    conn.commit()
+    conn.close()
 
 
 # ── Assessments ───────────────────────────────────────────────────────────────
