@@ -21,9 +21,6 @@ body{font-family:var(--font);background:var(--bg);color:var(--text);min-height:1
 h1{font-size:22px;font-weight:700;margin-bottom:6px}
 .sub{color:var(--text3);font-size:13px;margin-bottom:32px;line-height:1.6}
 .card{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:28px;margin-bottom:20px}
-.steps{counter-reset:step;list-style:none;margin-bottom:24px}
-.steps li{counter-increment:step;display:flex;gap:14px;margin-bottom:16px;font-size:13px;color:var(--text2);line-height:1.6}
-.steps li::before{content:counter(step);background:var(--accent);color:#fff;border-radius:50%;width:22px;height:22px;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;flex-shrink:0;margin-top:2px}
 .mono{font-family:'SF Mono','Cascadia Code','Consolas',monospace;font-size:11px;background:var(--bg);padding:1px 5px;border-radius:3px;border:1px solid var(--border)}
 .note{font-size:12px;color:var(--text3);margin-top:6px;line-height:1.5}
 .section-label{font-size:11px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--text3);margin-bottom:12px}
@@ -34,17 +31,33 @@ label span{font-weight:400;color:var(--text3)}
 input[type=text],input[type=password],input[type=number]{width:100%;border:1px solid var(--border);border-radius:4px;padding:8px 10px;font-size:13px;background:var(--bg);color:var(--text)}
 input[type=text]:focus,input[type=password]:focus,input[type=number]:focus{outline:none;border-color:var(--accent)}
 .gps-row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
-.file-drop{width:100%;border:2px dashed var(--border);border-radius:6px;padding:22px;font-size:13px;color:var(--text3);background:var(--bg);cursor:pointer;text-align:center;position:relative}
+.divider{border:none;border-top:1px solid var(--border);margin:22px 0}
+.or-divider{text-align:center;font-size:12px;color:var(--text3);margin:14px 0;position:relative}
+.or-divider::before,.or-divider::after{content:'';position:absolute;top:50%;width:42%;height:1px;background:var(--border)}
+.or-divider::before{left:0}.or-divider::after{right:0}
+
+/* Folder picker (primary) */
+.folder-pick{border:2px solid var(--accent);border-radius:6px;padding:20px;text-align:center;cursor:pointer;background:rgba(38,96,196,.04)}
+.folder-pick:hover{background:rgba(38,96,196,.08)}
+.folder-pick-icon{font-size:28px;margin-bottom:8px}
+.folder-pick-label{font-size:14px;font-weight:600;color:var(--accent);margin-bottom:4px}
+.folder-pick-hint{font-size:12px;color:var(--text3)}
+.folder-status{margin-top:10px;font-size:12px;color:var(--text2);min-height:18px}
+.folder-status.found{color:var(--ok)}
+.folder-status.none{color:var(--err)}
+
+/* ZIP drop (secondary) */
+.file-drop{width:100%;border:1px dashed var(--border);border-radius:6px;padding:16px;font-size:13px;color:var(--text3);background:var(--bg);cursor:pointer;text-align:center;position:relative}
 .file-drop:hover{border-color:var(--accent);color:var(--text)}
 .file-drop input[type=file]{position:absolute;inset:0;opacity:0;cursor:pointer}
-.file-drop-icon{font-size:24px;margin-bottom:6px}
-.divider{border:none;border-top:1px solid var(--border);margin:22px 0}
+
 .btn{display:block;width:100%;background:var(--accent);color:#fff;border:none;border-radius:4px;padding:11px 24px;font-size:14px;font-weight:600;cursor:pointer;margin-top:20px}
 .btn:hover{opacity:.9}
-.flash{padding:12px 16px;border-radius:6px;font-size:13px;margin-bottom:20px;line-height:1.5}
-.flash.success{background:rgba(26,127,55,.1);color:var(--ok);border:1px solid rgba(26,127,55,.25)}
-.flash.info{background:rgba(38,96,196,.08);color:var(--accent);border:1px solid rgba(38,96,196,.2)}
-.flash.error{background:rgba(192,57,43,.08);color:var(--err);border:1px solid rgba(192,57,43,.2)}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.flash,.inline-msg{padding:12px 16px;border-radius:6px;font-size:13px;margin-bottom:20px;line-height:1.5}
+.flash.success,.inline-msg.ok{background:rgba(26,127,55,.1);color:var(--ok);border:1px solid rgba(26,127,55,.25)}
+.flash.info,.inline-msg.info{background:rgba(38,96,196,.08);color:var(--accent);border:1px solid rgba(38,96,196,.2)}
+.flash.error,.inline-msg.error{background:rgba(192,57,43,.08);color:var(--err);border:1px solid rgba(192,57,43,.2)}
 h2{font-size:14px;font-weight:600;color:var(--text2);margin-bottom:14px}
 .log-table{width:100%;border-collapse:collapse;font-size:12px}
 .log-table th{text-align:left;padding:6px 8px;color:var(--text3);border-bottom:1px solid var(--border);font-weight:500}
@@ -59,25 +72,24 @@ h2{font-size:14px;font-weight:600;color:var(--text2);margin-bottom:14px}
   <span class="nav-brand">NOR140 Noise Monitor</span>
   <span class="nav-pi">{{ pi_name }}</span>
   <a href="/" class="nav-tab">Sessions</a>
+  <a href="/assessments" class="nav-tab">Assessments</a>
   <a href="/manage" class="nav-tab">Manage</a>
+  <a href="/reports" class="nav-tab">Reports</a>
   <a href="/upload" class="nav-tab active nav-tab-primary">+ Add</a>
+  <a href="/logout" class="nav-tab" style="margin-left:8px;font-size:12px;color:var(--text3)">Sign out</a>
 </nav>
 <div class="page">
   <h1>Add measurements</h1>
-  <p class="sub">Upload a ZIP of the NOR140 SD card. Zip from any level — the whole card, a date folder, or a single session. The system will parse everything it finds and skip any dates already recorded.</p>
+  <p class="sub">Select the SD card (or any folder on it) directly — no need to create a ZIP first. The system will find all recordings and skip any already in the database.</p>
 
   {% for msg, cat in get_flashed_messages(with_categories=true) %}
   <div class="flash {{ cat }}">{{ msg }}</div>
   {% endfor %}
 
-  <div class="card">
-    <ol class="steps">
-      <li>Remove the SD card from the NOR140 and insert it into your computer.</li>
-      <li>Select the SD card contents (or any folder on it) and compress to a ZIP. You can zip the whole card, just the <span class="mono">MEAS118</span> folder, a single date folder like <span class="mono">260810</span>, or even a single session — the system handles any of these.</li>
-      <li>Fill in the details below and upload.</li>
-    </ol>
+  <div id="inlineMsg" style="display:none" class="inline-msg"></div>
 
-    <form method="POST" action="/upload" enctype="multipart/form-data">
+  <div class="card">
+    <form id="uploadForm" method="POST" action="/upload" enctype="multipart/form-data">
       {% if needs_password %}
       <div class="field">
         <label>Upload password</label>
@@ -92,36 +104,46 @@ h2{font-size:14px;font-weight:600;color:var(--text2);margin-bottom:14px}
         <label>Recorded by <span>(optional)</span></label>
         <input type="text" name="recorder_name" placeholder="e.g. Jane Smith">
       </div>
-
       <div class="field">
         <label>Location description <span>(optional)</span></label>
         <input type="text" name="location_label" placeholder="e.g. Front of 42 High Street, outside pub entrance">
       </div>
-
       <div class="field">
         <label>Postcode <span>(optional)</span></label>
         <input type="text" name="postcode" placeholder="e.g. LS1 3AA" style="width:160px">
       </div>
-
       <div class="field">
         <label>GPS coordinates <span>(optional — decimal degrees)</span></label>
         <div class="gps-row">
           <input type="number" name="lat" placeholder="Latitude e.g. 53.7978" step="any" min="-90" max="90">
           <input type="number" name="lng" placeholder="Longitude e.g. -1.5413" step="any" min="-180" max="180">
         </div>
-        <p class="note">To find coordinates: on iPhone open Maps, long-press the location, tap the coordinates at the top. On Google Maps, long-press to drop a pin then read the numbers at the bottom.</p>
+        <p class="note">iPhone Maps: long-press location, tap coordinates at top. Google Maps: long-press to drop a pin, read numbers at bottom.</p>
       </div>
 
       <hr class="divider">
 
-      <div class="section-label">SD card ZIP file</div>
-      <div class="file-drop" id="fileDrop">
-        <div class="file-drop-icon">📁</div>
-        <div id="fileLabel">Tap to choose a ZIP file, or drag it here</div>
-        <input type="file" name="file" accept=".zip,.json" required onchange="document.getElementById('fileLabel').textContent=this.files[0]?.name||'Choose file'">
+      <!-- Primary: folder select -->
+      <div class="section-label">SD card data</div>
+      <div class="folder-pick" onclick="document.getElementById('folderInput').click()">
+        <div class="folder-pick-icon">📂</div>
+        <div class="folder-pick-label">Select SD card folder</div>
+        <div class="folder-pick-hint">Choose the SD card, the MEAS118 folder, a date folder, or a single session — any level works</div>
+        <input type="file" id="folderInput" webkitdirectory multiple style="display:none"
+               onchange="onFolderPicked(this)">
+      </div>
+      <div id="folderStatus" class="folder-status"></div>
+
+      <div class="or-divider">or</div>
+
+      <!-- Secondary: ZIP file -->
+      <div class="file-drop" id="zipDrop">
+        <div id="zipLabel">Select a ZIP file</div>
+        <input type="file" id="zipInput" name="file" accept=".zip,.json"
+               onchange="onZipPicked(this)">
       </div>
 
-      <button type="submit" class="btn">Upload and import</button>
+      <button type="submit" id="submitBtn" class="btn" disabled>Upload and import</button>
     </form>
   </div>
 
@@ -144,5 +166,175 @@ h2{font-size:14px;font-weight:600;color:var(--text2);margin-bottom:14px}
   </div>
   {% endif %}
 </div>
+
+<script>
+(function () {
+  var folderFiles = null;
+  var usingFolder = false;
+  var btn = document.getElementById('submitBtn');
+
+  function isDataFile(name) {
+    var stem = name.toUpperCase().split('.')[0];
+    return stem.startsWith('GLOB') || stem.startsWith('PROF');
+  }
+
+  // Extract a YYMMDD folder name from a file's relative path, if present.
+  function dateFromPath(relPath) {
+    var parts = relPath.replace(/\\/g, '/').split('/');
+    for (var i = 0; i < parts.length; i++) {
+      if (/^\d{6}$/.test(parts[i]) && parts[i] !== '000101') return parts[i];
+    }
+    return null;
+  }
+
+  // Convert YYMMDD → 'YYYY-MM-DD' for comparison with the DB.
+  function yymmddToIso(s) {
+    return '20' + s.slice(0,2) + '-' + s.slice(2,4) + '-' + s.slice(4,6);
+  }
+
+  window.onFolderPicked = function (input) {
+    var all = Array.from(input.files);
+    var data = all.filter(function (f) { return isDataFile(f.name); });
+    var status = document.getElementById('folderStatus');
+
+    if (!data.length) {
+      status.textContent = 'No NOR140 data files found — try a different folder level.';
+      status.className = 'folder-status none';
+      folderFiles = null;
+      usingFolder = false;
+      updateBtn();
+      return;
+    }
+
+    status.textContent = 'Checking for new recordings…';
+    status.className = 'folder-status';
+
+    // Fetch existing dates from server, then filter to only new dates.
+    fetch('/api/existing-dates')
+      .then(function (r) { return r.json(); })
+      .then(function (existing) {
+        var existingSet = new Set(existing);
+
+        // Group files by date folder; files with no date folder in path go in '__new__'.
+        var byDate = {};
+        all.forEach(function (f) {
+          var rel  = f.webkitRelativePath || f.name;
+          var date = dateFromPath(rel);
+          var key  = date ? yymmddToIso(date) : '__new__';
+          byDate[key] = byDate[key] || [];
+          byDate[key].push(f);
+        });
+
+        // Keep files for dates not yet in the DB (and undated files which need parsing).
+        var toSend = [];
+        var skipCount = 0;
+        var newDates = [];
+        Object.keys(byDate).forEach(function (key) {
+          if (key === '__new__' || !existingSet.has(key)) {
+            toSend = toSend.concat(byDate[key]);
+            if (key !== '__new__') newDates.push(key);
+          } else {
+            skipCount++;
+          }
+        });
+
+        var dataNew = toSend.filter(function (f) { return isDataFile(f.name); });
+
+        if (!dataNew.length) {
+          status.textContent = 'All ' + skipCount + ' day' + (skipCount===1?'':'s') + ' already in database — nothing new to upload.';
+          status.className = 'folder-status none';
+          folderFiles = null;
+          usingFolder = false;
+          updateBtn();
+          return;
+        }
+
+        folderFiles = toSend;
+        usingFolder = true;
+
+        document.getElementById('zipInput').value = '';
+        document.getElementById('zipLabel').textContent = 'Select a ZIP file';
+
+        var msg = (dataNew.length / 2 | 0) + ' new recording' + (dataNew.length/2===1?'':'s');
+        if (skipCount) msg += ' (' + skipCount + ' day' + (skipCount===1?'':'s') + ' already imported, skipping)';
+        status.textContent = msg + '.';
+        status.className = 'folder-status found';
+        updateBtn();
+      })
+      .catch(function () {
+        // If the check fails, fall back to sending everything.
+        folderFiles = all;
+        usingFolder = true;
+        var days = new Set();
+        data.forEach(function (f) {
+          var d = dateFromPath(f.webkitRelativePath || f.name);
+          if (d) days.add(d);
+        });
+        status.textContent = (data.length/2|0) + ' recordings found (could not check for duplicates).';
+        status.className = 'folder-status found';
+        updateBtn();
+      });
+  };
+
+  window.onZipPicked = function (input) {
+    if (input.files.length) {
+      document.getElementById('zipLabel').textContent = input.files[0].name;
+      folderFiles = null;
+      usingFolder = false;
+      document.getElementById('folderStatus').textContent = '';
+      document.getElementById('folderStatus').className = 'folder-status';
+      updateBtn();
+    }
+  };
+
+  function updateBtn() {
+    btn.disabled = !(usingFolder || document.getElementById('zipInput').files.length);
+  }
+
+  function showMsg(text, kind) {
+    var el = document.getElementById('inlineMsg');
+    el.textContent = text;
+    el.className = 'inline-msg ' + kind;
+    el.style.display = 'block';
+    el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }
+
+  document.getElementById('uploadForm').addEventListener('submit', function (e) {
+    if (!usingFolder) return; // let normal form POST handle ZIP
+
+    e.preventDefault();
+    btn.disabled = true;
+    btn.textContent = 'Uploading…';
+
+    var formData = new FormData(this);
+    formData.delete('file');
+    folderFiles.forEach(function (f) {
+      formData.append('files', f, f.webkitRelativePath || f.name);
+    });
+
+    fetch('/upload', { method: 'POST', body: formData })
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        if (data.status === 'ok') {
+          showMsg(data.message, 'ok');
+          setTimeout(function () { window.location.href = '/'; }, 1200);
+        } else if (data.status === 'info') {
+          showMsg(data.message, 'info');
+          btn.disabled = false;
+          btn.textContent = 'Upload and import';
+        } else {
+          showMsg(data.message, 'error');
+          btn.disabled = false;
+          btn.textContent = 'Upload and import';
+        }
+      })
+      .catch(function (err) {
+        showMsg('Upload failed: ' + err, 'error');
+        btn.disabled = false;
+        btn.textContent = 'Upload and import';
+      });
+  });
+})();
+</script>
 </body>
 </html>

@@ -11,6 +11,8 @@
   --accent: #C56A00;
   --laeq: #2660C4;
   --laeq-fill: rgba(38,96,196,0.13);
+  --lafmax: #3A9A6A;
+  --laimax: #8840B8;
   --peak: #C56A00;
   --grid: rgba(10,30,80,0.065);
   --grid-border: rgba(10,30,80,0.09);
@@ -31,6 +33,8 @@
     --accent: #F09828;
     --laeq: #4A90E8;
     --laeq-fill: rgba(74,144,232,0.18);
+    --lafmax: #50C880;
+    --laimax: #B060F0;
     --peak: #F09828;
     --grid: rgba(80,150,230,0.07);
     --grid-border: rgba(80,150,230,0.12);
@@ -38,8 +42,8 @@
     --sel-bar: #F09828;
   }
 }
-:root[data-theme="light"]{--bg:#EFF2F7;--surface:#FFFFFF;--panel:#F6F8FC;--border:#D0D8E8;--text:#0C1A2E;--text2:#3D5270;--text3:#7A92AE;--accent:#C56A00;--laeq:#2660C4;--laeq-fill:rgba(38,96,196,0.13);--peak:#C56A00;--grid:rgba(10,30,80,0.065);--grid-border:rgba(10,30,80,0.09);--warn-line:rgba(180,60,0,0.5);--sel-bar:#C56A00}
-:root[data-theme="dark"]{--bg:#090F1C;--surface:#111C30;--panel:#172540;--border:#1E3050;--text:#D0E4F8;--text2:#7A9ABE;--text3:#456082;--accent:#F09828;--laeq:#4A90E8;--laeq-fill:rgba(74,144,232,0.18);--peak:#F09828;--grid:rgba(80,150,230,0.07);--grid-border:rgba(80,150,230,0.12);--warn-line:rgba(240,80,30,0.55);--sel-bar:#F09828}
+:root[data-theme="light"]{--bg:#EFF2F7;--surface:#FFFFFF;--panel:#F6F8FC;--border:#D0D8E8;--text:#0C1A2E;--text2:#3D5270;--text3:#7A92AE;--accent:#C56A00;--laeq:#2660C4;--laeq-fill:rgba(38,96,196,0.13);--lafmax:#3A9A6A;--laimax:#8840B8;--peak:#C56A00;--grid:rgba(10,30,80,0.065);--grid-border:rgba(10,30,80,0.09);--warn-line:rgba(180,60,0,0.5);--sel-bar:#C56A00}
+:root[data-theme="dark"]{--bg:#090F1C;--surface:#111C30;--panel:#172540;--border:#1E3050;--text:#D0E4F8;--text2:#7A9ABE;--text3:#456082;--accent:#F09828;--laeq:#4A90E8;--laeq-fill:rgba(74,144,232,0.18);--lafmax:#50C880;--laimax:#B060F0;--peak:#F09828;--grid:rgba(80,150,230,0.07);--grid-border:rgba(80,150,230,0.12);--warn-line:rgba(240,80,30,0.55);--sel-bar:#F09828}
 
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 body{background:var(--bg);color:var(--text);font-family:var(--font-ui);font-size:13px;line-height:1.5;-webkit-font-smoothing:antialiased}
@@ -72,6 +76,11 @@ body{background:var(--bg);color:var(--text);font-family:var(--font-ui);font-size
 .run-row{display:flex;align-items:center;justify-content:space-between;margin-bottom:5px}
 .run-id{font-size:10px;font-weight:600;letter-spacing:.09em;text-transform:uppercase;color:var(--text3)}
 .run-time{font-family:var(--font-data);font-size:11px;color:var(--text2);font-variant-numeric:tabular-nums}
+.run-tag-wrap{display:flex;align-items:center;gap:5px}
+.run-tag{font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;background:var(--laeq);color:#fff;border-radius:3px;padding:1px 6px;cursor:pointer;white-space:nowrap;line-height:1.6}
+.run-tag.empty{background:var(--border);color:var(--text3);font-weight:400;letter-spacing:0}
+.run-tag-input{font-size:11px;font-weight:700;text-transform:uppercase;width:52px;border:1.5px solid var(--laeq);border-radius:3px;padding:1px 5px;background:var(--surface);color:var(--text);font-family:var(--font-ui);outline:none;display:none}
+.run-assess-badge{font-size:10px;font-weight:600;padding:1px 6px;border-radius:3px;background:color-mix(in srgb,var(--lafmax) 18%,transparent);color:var(--lafmax);letter-spacing:.02em;white-space:nowrap}
 .run-stats{display:flex;gap:10px}
 .rs{font-size:10px;color:var(--text3)}
 .rs span{font-family:var(--font-data);font-size:13px;font-weight:500;color:var(--text);display:block;font-variant-numeric:tabular-nums;line-height:1.3}
@@ -79,6 +88,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--font-ui);font-size
 .run-chart-wrap{height:110px;background:var(--panel)}
 .run-chart-wrap canvas{display:block;width:100%;height:100%}
 .run-foot{padding:4px 12px;font-size:10px;color:var(--text3);font-variant-numeric:tabular-nums;border-top:1px solid var(--grid-border)}
+.run-src{color:var(--text2);font-weight:600;letter-spacing:.02em}
 
 /* No-detail state */
 .no-detail{padding:32px 20px;text-align:center;color:var(--text3)}
@@ -106,10 +116,15 @@ body{background:var(--bg);color:var(--text);font-family:var(--font-ui);font-size
 .cl-item{display:flex;align-items:center;gap:4px;font-size:10px;color:var(--text3)}
 .cl-line{width:16px;height:2px;border-radius:1px;flex-shrink:0}
 .cl-line.laeq{background:var(--laeq)}
+.cl-line.lafmax{background:var(--lafmax);opacity:.75}
+.cl-line.laimax{background:var(--laimax)}
 .cl-line.peak{background:var(--peak);opacity:.6}
 .cl-line.ref{background:transparent;border-top:1px dashed var(--accent)}
 
 .page-footer{margin-top:28px;padding-top:14px;border-top:1px solid var(--border);font-size:11px;color:var(--text3);line-height:1.65}
+.run-scalars{display:flex;gap:12px;padding:3px 12px 4px;flex-wrap:wrap;border-top:1px solid var(--grid-border)}
+.rsc{font-size:9.5px;color:var(--text3)}
+.rsc span{font-family:var(--font-data);font-size:11px;font-weight:500;color:var(--text2);font-variant-numeric:tabular-nums;display:block;line-height:1.3}
 @media(max-width:600px){.runs-grid{grid-template-columns:1fr 1fr}.sum-tiles{grid-template-columns:1fr 1fr}}
 @media(max-width:380px){.runs-grid{grid-template-columns:1fr}}
 
@@ -168,8 +183,41 @@ body{background:var(--bg);color:var(--text);font-family:var(--font-ui);font-size
 .mf-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px 16px;margin-bottom:12px}
 @media(max-width:560px){.mf-grid{grid-template-columns:1fr}}
 .mf-field label{display:block;font-size:10.5px;font-weight:500;letter-spacing:.05em;text-transform:uppercase;color:var(--text3);margin-bottom:3px}
-.mf-field input{width:100%;border:1px solid var(--border);border-radius:4px;padding:6px 8px;font-size:12px;background:var(--surface);color:var(--text);font-family:var(--font)}
-.mf-field input:focus{outline:none;border-color:var(--laeq)}
+.mf-field input,.mf-field textarea{width:100%;border:1px solid var(--border);border-radius:4px;padding:6px 8px;font-size:12px;background:var(--surface);color:var(--text);font-family:var(--font-ui)}
+.mf-field input:focus,.mf-field textarea:focus{outline:none;border-color:var(--laeq)}
+.mf-field textarea{resize:vertical;min-height:52px}
+/* Filter bar */
+.filter-bar{background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:10px 14px;margin-bottom:12px;display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end}
+.ff{display:flex;flex-direction:column;gap:3px}
+.ff label{font-size:10px;font-weight:500;letter-spacing:.05em;text-transform:uppercase;color:var(--text3)}
+.ff input{border:1px solid var(--border);border-radius:4px;padding:5px 8px;font-size:12px;background:var(--bg);color:var(--text);font-family:var(--font-ui)}
+.ff input:focus{outline:none;border-color:var(--laeq)}
+.filter-count{font-size:11px;color:var(--text3);align-self:center;white-space:nowrap}
+.filter-apply{background:var(--accent);color:#fff;border:none;border-radius:4px;padding:5px 12px;font-size:11px;cursor:pointer;font-family:var(--font-ui);white-space:nowrap;font-weight:600}
+.filter-apply:hover{opacity:.88}
+.filter-clear{background:none;border:1px solid var(--border);border-radius:4px;padding:5px 10px;font-size:11px;cursor:pointer;color:var(--text2);font-family:var(--font-ui);white-space:nowrap;display:none}
+.filter-clear:hover{background:var(--panel)}
+.filter-export{background:var(--laeq);color:#fff;border:none;border-radius:4px;padding:5px 12px;font-size:11px;cursor:pointer;font-family:var(--font-ui);white-space:nowrap;text-decoration:none;align-self:flex-end}
+.filter-export:hover{opacity:.88}
+.sess-export-btn{background:var(--laeq);color:#fff;border:none;border-radius:4px;padding:5px 12px;font-size:11px;cursor:pointer;font-family:var(--font-ui);white-space:nowrap;font-weight:500;flex-shrink:0}
+.sess-export-btn:hover{opacity:.88}
+/* Session table */
+.sess-table-wrap{background:var(--surface);border:1px solid var(--border);border-radius:6px;overflow:hidden;margin-bottom:20px}
+.sess-table-scroll{max-height:320px;overflow-y:auto}
+.sess-table{width:100%;border-collapse:collapse;font-size:12px}
+.sess-table thead th{position:sticky;top:0;background:var(--panel);padding:8px 12px;text-align:left;font-size:10px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--text3);border-bottom:1px solid var(--border);white-space:nowrap;z-index:1}
+.sess-table td{padding:8px 12px;border-bottom:1px solid var(--border);vertical-align:middle;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sess-table tr:last-child td{border-bottom:none}
+.sess-table tbody tr{cursor:pointer}
+.sess-table tbody tr:hover{background:var(--panel)}
+.sess-table tbody tr.sel{background:rgba(38,96,196,.09);box-shadow:inset 3px 0 0 var(--laeq)}
+.td-date{font-family:var(--font-data);font-weight:600;font-variant-numeric:tabular-nums}
+.td-loc{color:var(--text2);max-width:220px}
+.td-by{color:var(--text3)}
+.td-db{font-family:var(--font-data);font-variant-numeric:tabular-nums;text-align:right!important}
+.td-hi{color:var(--accent)}
+.td-runs{color:var(--text3);text-align:center!important}
+.sess-table-empty{padding:32px;text-align:center;color:var(--text3);font-size:13px}
 .mf-gps{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 .mf-footer{display:flex;align-items:center;gap:8px}
 .mf-save{background:var(--laeq);color:#fff;border:none;border-radius:4px;padding:6px 16px;font-size:12px;font-weight:600;cursor:pointer;font-family:var(--font)}
@@ -183,8 +231,11 @@ body{background:var(--bg);color:var(--text);font-family:var(--font-ui);font-size
   <span class="nav-brand">NOR140 Noise Monitor</span>
   <span class="nav-pi">{{ pi_name }}</span>
   <a href="/" class="nav-tab active">Sessions</a>
+  <a href="/assessments" class="nav-tab">Assessments</a>
   <a href="/manage" class="nav-tab">Manage</a>
+  <a href="/reports" class="nav-tab">Reports</a>
   <a href="/upload" class="nav-tab nav-tab-primary">+ Add</a>
+  <a href="/logout" class="nav-tab" style="margin-left:8px;font-size:12px;color:var(--text3)">Sign out</a>
 </nav>
 <div class="page">
   <header class="header">
@@ -198,37 +249,92 @@ body{background:var(--bg);color:var(--text);font-family:var(--font-ui);font-size
     </div>
   </header>
 
+  <div class="section-label">Session history — click to explore</div>
+  <div class="filter-bar">
+    <div class="ff" style="flex:2;min-width:160px">
+      <label>Search (name / location / notes)</label>
+      <input type="text" id="fText" placeholder="e.g. Gladys, LS1, construction…">
+    </div>
+    <div class="ff">
+      <label>From date</label>
+      <input type="date" id="fFrom">
+    </div>
+    <div class="ff">
+      <label>To date</label>
+      <input type="date" id="fTo">
+    </div>
+    <div class="ff" style="min-width:72px">
+      <label>LAeq avg ≥</label>
+      <input type="number" id="fAvg" placeholder="dB" min="0" max="160" step="1">
+    </div>
+    <div class="ff" style="min-width:72px">
+      <label>LAeq max ≥</label>
+      <input type="number" id="fMax" placeholder="dB" min="0" max="160" step="1">
+    </div>
+    <div class="ff" style="min-width:150px">
+      <label>Assessment (name or ref)</label>
+      <input type="text" id="fAssess" placeholder="e.g. Manor Road, ENF/26…">
+    </div>
+    <span class="filter-count" id="filterCount"></span>
+    <button class="filter-apply" id="filterApply">Filter</button>
+    <button class="filter-clear" id="filterClear" onclick="clearFilter()">Clear</button>
+    <a class="filter-export" id="filterExport" href="/export/sessions.csv" download>Export CSV</a>
+  </div>
+  <div id="assessBanner" style="display:none;padding:7px 16px;gap:8px;flex-wrap:wrap;align-items:center;background:color-mix(in srgb,var(--lafmax) 8%,transparent);border-bottom:1px solid var(--border)"></div>
+  <div class="sess-table-wrap">
+    <div class="sess-table-scroll">
+      <table class="sess-table">
+        <thead><tr>
+          <th>Date</th>
+          <th>Location</th>
+          <th>By</th>
+          <th id="th-assess">Assessment</th>
+          <th style="text-align:right">LAeq avg</th>
+          <th style="text-align:right">LAeq max</th>
+          <th style="text-align:center">Runs</th>
+        </tr></thead>
+        <tbody id="sessTableBody"></tbody>
+      </table>
+    </div>
+    <div id="sessTableEmpty" class="sess-table-empty" style="display:none">No sessions match the current filter.</div>
+  </div>
+
   <div id="sessPanel" class="sess-panel">
     <div class="sess-panel-header">
       <div class="sess-date-group">
         <div class="sess-date-label" id="sessDateLabel"></div>
         <div class="sess-location" id="sessLocation"></div>
       </div>
-      <div class="sess-meta" id="sessMeta"></div>
+      <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
+        <div class="sess-meta" id="sessMeta"></div>
+        <button id="sessExportBtn" class="sess-export-btn" style="display:none">Export runs CSV</button>
+        <button id="sessReportBtn" class="sess-export-btn" style="display:none">Generate report</button>
+      </div>
     </div>
     <div id="sessContent"></div>
   </div>
 
-  <div class="section-label">Session history — click to explore</div>
+  <div class="section-label" style="margin-top:28px">Level overview — all sessions</div>
   <div class="hist-wrap">
     <div class="hist-canvas-wrap" id="histWrap">
       <canvas id="histCanvas"></canvas>
       <div class="hist-tip" id="histTip"></div>
     </div>
     <div class="hist-legend">
-      <div class="leg"><div class="leg-sw" style="background:#4BA86A"></div>Below 80 dB avg</div>
-      <div class="leg"><div class="leg-sw" style="background:#D09520"></div>80–95 dB</div>
-      <div class="leg"><div class="leg-sw" style="background:#C05028"></div>95–110 dB</div>
-      <div class="leg"><div class="leg-sw" style="background:#A02818"></div>Above 110 dB</div>
+      <div class="leg"><div class="leg-sw" style="background:#4BA86A"></div>Below 50 dB avg</div>
+      <div class="leg"><div class="leg-sw" style="background:#D09520"></div>50–65 dB</div>
+      <div class="leg"><div class="leg-sw" style="background:#C05028"></div>65–80 dB</div>
+      <div class="leg"><div class="leg-sw" style="background:#A02818"></div>Above 80 dB</div>
       <div class="leg"><div class="leg-sw" style="background:var(--sel-bar)"></div>Selected</div>
     </div>
   </div>
 
   <footer class="page-footer">
-    Data from MEAS118/YYMMDD/PART0000/PROJnnnn/PROFnnnn.DAT (Norsonic proprietary binary, 10 bytes/record: 5&times;uint16 LE &divide;100&nbsp;=&nbsp;dB).
-    Field&nbsp;0&nbsp;=&nbsp;LA<sub>eq,1s</sub>; Field&nbsp;4&nbsp;=&nbsp;LC<sub>peak</sub>.
-    85&nbsp;dB reference = HSE occupational exposure action level.
-    Values &gt;130&nbsp;dB may indicate impulsive events at close range or measurement saturation.
+    PROF file (10 bytes/record, 5&times;uint16 LE &divide;100&nbsp;&minus;&nbsp;40&nbsp;=&nbsp;dB):
+    Field&nbsp;0&nbsp;=&nbsp;LA<sub>S</sub> (slow-weighted SPL at each second — profile shape only; session LA<sub>eq</sub> is instrument-derived from the GLOB 1/3-octave spectrum);
+    Field&nbsp;1&nbsp;=&nbsp;LA<sub>Fmax</sub>; Field&nbsp;2&nbsp;=&nbsp;LA<sub>Imax</sub>; Field&nbsp;4&nbsp;=&nbsp;LC<sub>peak</sub>.
+    Scalar metrics (LA<sub>eq</sub>, LC<sub>eq</sub>, LA<sub>Fmax</sub>, LA10–LA99&nbsp;etc.) are decoded from the GLOB file 1/3-octave spectrum (36-band, 6.3&nbsp;Hz–20&nbsp;kHz, uint16&nbsp;LE&nbsp;&divide;&nbsp;128&nbsp;&minus;&nbsp;20&nbsp;dB), then A/C-weighted and energy-summed.
+    85&nbsp;dB reference = HSE lower exposure action value.
     Chart resolution varies by run length (1&nbsp;s for short runs, up to 1/10&nbsp;s for long ones).
   </footer>
 </div>
@@ -244,7 +350,11 @@ body{background:var(--bg);color:var(--text);font-family:var(--font-ui);font-size
           <button class="modal-meta-edit-btn" onclick="openModalMetaEdit()">Edit metadata</button>
         </div>
       </div>
-      <button id="modalCloseBtn" class="modal-close" aria-label="Close">&#x2715;</button>
+      <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
+        <button id="modalExportBtn" class="sess-export-btn">Export CSV</button>
+        <button id="modalReportBtn" class="sess-export-btn">Generate report</button>
+        <button id="modalCloseBtn" class="modal-close" aria-label="Close">&#x2715;</button>
+      </div>
     </div>
     <div class="modal-body">
       <div id="modalMetaForm" class="modal-meta-form" style="display:none">
@@ -259,6 +369,10 @@ body{background:var(--bg);color:var(--text);font-family:var(--font-ui);font-size
               <input type="number" id="modal-mf-lat" placeholder="Latitude" step="any" min="-90" max="90">
               <input type="number" id="modal-mf-lng" placeholder="Longitude" step="any" min="-180" max="180">
             </div>
+          </div>
+          <div class="mf-field" style="grid-column:span 2">
+            <label>Notes</label>
+            <textarea id="modal-mf-notes" placeholder="e.g. Construction site nearby, easterly wind, windows open"></textarea>
           </div>
         </div>
         <div class="mf-footer">
@@ -279,6 +393,62 @@ body{background:var(--bg);color:var(--text);font-family:var(--font-ui);font-size
           <div class="modal-chart-cnv"><canvas id="modalExcCanvas"></canvas></div>
         </div>
       </div>
+    </div>
+  </div>
+</div>
+
+<style>
+#reportOptOverlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:2000;align-items:center;justify-content:center;padding:16px}
+#reportOptOverlay.open{display:flex}
+.ropt-box{background:var(--surface);border:1px solid var(--border);border-radius:10px;width:100%;max-width:420px;box-shadow:0 20px 60px rgba(0,0,0,.25);overflow:hidden}
+.ropt-hdr{padding:14px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
+.ropt-hdr h3{font-size:14px;font-weight:600}
+.ropt-body{padding:18px;display:flex;flex-direction:column;gap:12px}
+.ropt-field label{display:block;font-size:11px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:.04em;margin-bottom:4px}
+.ropt-field select{width:100%;padding:7px 10px;border:1px solid var(--border);border-radius:5px;background:var(--bg);color:var(--text);font-size:13px;font-family:inherit;outline:none}
+.ropt-field select:focus{border-color:var(--laeq)}
+.ropt-row{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.ropt-foot{padding:12px 18px;border-top:1px solid var(--border);display:flex;align-items:center;gap:10px}
+.ropt-spin{display:inline-block;width:13px;height:13px;border:2px solid rgba(255,255,255,.3);border-top-color:#fff;border-radius:50%;animation:spin .7s linear infinite}
+.ropt-notice{font-size:12px;color:var(--text3);flex:1}
+.ropt-notice.err{color:var(--err)}
+.ropt-notice.ok{color:var(--ok)}
+</style>
+
+<div id="reportOptOverlay">
+  <div class="ropt-box">
+    <div class="ropt-hdr">
+      <h3 id="roptTitle">Generate report</h3>
+      <button class="modal-close" onclick="closeReportOpt()" aria-label="Close">&#x2715;</button>
+    </div>
+    <div class="ropt-body">
+      <div class="ropt-field">
+        <label>Template</label>
+        <select id="roptTemplate"></select>
+      </div>
+      <div class="ropt-row">
+        <div class="ropt-field">
+          <label>Model</label>
+          <select id="roptModel" onchange="roptModelChange()">
+            <option value="claude-sonnet-5">Sonnet 5 (recommended)</option>
+            <option value="claude-opus-5">Opus 5 (most thorough)</option>
+            <option value="claude-haiku-4-5-20251001">Haiku 4.5 (fast)</option>
+          </select>
+        </div>
+        <div class="ropt-field">
+          <label>Thinking</label>
+          <select id="roptThinking">
+            <option value="none">None</option>
+            <option value="standard">Standard</option>
+            <option value="extended">Extended</option>
+          </select>
+        </div>
+      </div>
+    </div>
+    <div class="ropt-foot">
+      <button class="sess-export-btn" id="roptGenBtn" onclick="submitReportOpt()">Generate</button>
+      <button class="sess-export-btn" style="background:var(--panel);color:var(--text2);border:1px solid var(--border)" onclick="closeReportOpt()">Cancel</button>
+      <span class="ropt-notice" id="roptNotice"></span>
     </div>
   </div>
 </div>
@@ -347,11 +517,29 @@ function renderSessionPanel(date) {
     </div>
     ${sess.projects ? `<div class="sess-meta-item"><span class="sess-meta-label">Runs</span><span class="sess-meta-val">${sess.projects.length}</span></div>` : ''}
   `;
+  const sessExportBtn = document.getElementById('sessExportBtn');
+  const sessReportBtn = document.getElementById('sessReportBtn');
+  if (sess.projects && sess.projects.length) {
+    sessExportBtn.style.display = '';
+    sessExportBtn.onclick = () => exportSessionRuns(date);
+    sessReportBtn.style.display = '';
+    sessReportBtn.onclick = () => openReportOpt(date, null, date);
+  } else {
+    sessExportBtn.style.display = 'none';
+    sessReportBtn.style.display = 'none';
+  }
 
   const content = document.getElementById('sessContent');
 
   if (sess.projects) {
-    renderRunsGrid(content, sess.projects);
+    let displayProjects = sess.projects;
+    let displayNums = null;
+    if (assessFilter.runSet) {
+      const pairs = sess.projects.map((p, i) => [p, i + 1]).filter(([, n]) => assessFilter.runSet.has(sess.d + '|' + n));
+      displayProjects = pairs.map(([p]) => p);
+      displayNums = pairs.map(([, n]) => n);
+    }
+    renderRunsGrid(content, displayProjects, displayNums);
   } else {
     content.innerHTML = `
       <div class="sum-tiles">
@@ -376,14 +564,32 @@ function esc(s) {
 
 function metaChipsHtml(sess) {
   const chips = [];
-  if (sess.name) chips.push(`<span class="meta-chip"><strong>By</strong> ${esc(sess.name)}</span>`);
-  if (sess.loc)  chips.push(`<span class="meta-chip">${esc(sess.loc)}</span>`);
-  if (sess.post) chips.push(`<span class="meta-chip">${esc(sess.post)}</span>`);
+  if (sess.name)  chips.push(`<span class="meta-chip"><strong>By</strong> ${esc(sess.name)}</span>`);
+  if (sess.loc)   chips.push(`<span class="meta-chip">${esc(sess.loc)}</span>`);
+  if (sess.post)  chips.push(`<span class="meta-chip">${esc(sess.post)}</span>`);
   if (sess.lat != null && sess.lng != null)
     chips.push(`<span class="meta-chip">${sess.lat.toFixed(5)}, ${sess.lng.toFixed(5)}</span>`);
+  if (sess.notes) chips.push(`<span class="meta-chip" title="${esc(sess.notes)}">📝 ${esc(sess.notes.length > 60 ? sess.notes.slice(0,57)+'…' : sess.notes)}</span>`);
   return chips.length
     ? chips.join('')
     : '<span class="meta-chip empty">No location data recorded</span>';
+}
+
+function windCardinal(deg) {
+  const dirs = ['N','NE','E','SE','S','SW','W','NW'];
+  return dirs[Math.round(deg / 45) % 8];
+}
+
+function wxChipsHtml(wx) {
+  if (!wx) return '';
+  const parts = [];
+  if (wx.ws != null && wx.wd != null)
+    parts.push(`💨 ${wx.ws} mph ${windCardinal(wx.wd)}`);
+  if (wx.tn != null && wx.tx != null)
+    parts.push(`🌡 ${wx.tn}–${wx.tx} °C`);
+  if (wx.pr != null && wx.pr > 0)
+    parts.push(`🌧 ${wx.pr} mm`);
+  return parts.map(p => `<span class="meta-chip">${p}</span>`).join('');
 }
 
 function appendMetaSection(container, sess, date) {
@@ -393,6 +599,10 @@ function appendMetaSection(container, sess, date) {
     <div class="meta-strip">
       <div class="meta-chips" id="meta-chips-${date}">${metaChipsHtml(sess)}</div>
       <button class="meta-edit-btn" onclick="openMetaEdit('${date}')">Edit metadata</button>
+    </div>
+    <div class="meta-strip" id="wx-strip-${date}" style="border-top:none;padding-top:6px;padding-bottom:8px;min-height:0">
+      <div class="meta-chips" id="wx-chips-${date}">${wxChipsHtml(sess.wx)}</div>
+      ${!sess.wx ? `<button class="meta-edit-btn" id="wx-btn-${date}" onclick="fetchWeather('${date}')">Fetch weather</button>` : ''}
     </div>
     <div class="meta-form-wrap" id="meta-form-${date}">
       <div class="mf-grid">
@@ -414,6 +624,10 @@ function appendMetaSection(container, sess, date) {
             <input id="mf-lat-${date}" type="number" name="lat" value="${sess.lat??''}" placeholder="Latitude" step="any" min="-90" max="90">
             <input id="mf-lng-${date}" type="number" name="lng" value="${sess.lng??''}" placeholder="Longitude" step="any" min="-180" max="180">
           </div>
+        </div>
+        <div class="mf-field" style="grid-column:span 2">
+          <label>Notes</label>
+          <textarea id="mf-notes-${date}" name="notes" placeholder="e.g. Construction site nearby, easterly wind, windows open">${esc(sess.notes||'')}</textarea>
         </div>
       </div>
       <div class="mf-footer">
@@ -443,6 +657,7 @@ function saveMetaEdit(date) {
     postcode:       g('mf-post').toUpperCase(),
     lat:            fl(g('mf-lat')),
     lng:            fl(g('mf-lng')),
+    notes:          g('mf-notes'),
   });
   const status = document.getElementById('mf-status-' + date);
   status.style.color = 'var(--text3)';
@@ -460,9 +675,10 @@ function saveMetaEdit(date) {
     // Update in-memory data
     const sess = DATA.sessions.find(s => s.d === date);
     if (sess) {
-      sess.name = g('mf-name') || null;
-      sess.loc  = g('mf-loc')  || null;
-      sess.post = g('mf-post').toUpperCase() || null;
+      sess.name  = g('mf-name')  || null;
+      sess.loc   = g('mf-loc')   || null;
+      sess.post  = g('mf-post').toUpperCase() || null;
+      sess.notes = g('mf-notes') || null;
       const lat = fl(g('mf-lat')), lng = fl(g('mf-lng'));
       sess.lat = lat !== '' ? lat : null;
       sess.lng = lng !== '' ? lng : null;
@@ -484,19 +700,31 @@ function saveMetaEdit(date) {
 // ── Runs grid ──────────────────────────────────────────────
 const runCanvases = [];
 
-function renderRunsGrid(container, projects) {
+function renderRunsGrid(container, projects, runNums) {
   runCanvases.length = 0;
-  container.innerHTML = `
-    <div class="runs-grid" id="runsGrid"></div>`;
+  container.innerHTML = `<div class="runs-grid" id="runsGrid"></div>`;
   const grid = container.querySelector('.runs-grid');
 
   projects.forEach((proj, idx) => {
+    const runNum = runNums ? runNums[idx] : idx + 1;
     const card = document.createElement('div');
     card.className = 'run-card';
+    const tagVal = proj.loc_tag || '';
+    const assessBadge = proj.assess
+      ? `<span class="run-assess-badge" title="Assessment location">${proj.assess}</span>`
+      : '';
     card.innerHTML = `
       <div class="run-card-header">
         <div class="run-row">
-          <span class="run-id">Run ${idx+1}</span>
+          <span class="run-id">Run ${runNum}</span>
+          <div class="run-tag-wrap">
+            <span class="run-tag${tagVal ? '' : ' empty'}" title="Click to set location tag"
+                  onclick="startTagEdit(event,this)">${tagVal || 'tag'}</span>
+            <input class="run-tag-input" maxlength="8" placeholder="e.g. A"
+                   data-date="${selectedDate}" data-run="${runNum}"
+                   onblur="saveTag(this)" onkeydown="tagKeydown(event,this)">
+            ${assessBadge}
+          </div>
           <span class="run-time">${proj.start}</span>
         </div>
         <div class="run-stats">
@@ -507,12 +735,20 @@ function renderRunsGrid(container, projects) {
       </div>
       <div class="run-chart-wrap"><canvas data-idx="${idx}"></canvas></div>
       <div class="chart-leg">
-        <div class="cl-item"><div class="cl-line laeq"></div>LA<sub>eq,1s</sub></div>
+        <div class="cl-item"><div class="cl-line laeq"></div>LA<sub>eq</sub></div>
+        <div class="cl-item"><div class="cl-line laimax"></div>LA<sub>Imax</sub></div>
         <div class="cl-item"><div class="cl-line peak"></div>LC<sub>peak</sub></div>
         <div class="cl-item"><div class="cl-line ref"></div>85 dB</div>
       </div>
-      <div class="run-foot">${fmtDuration(proj.n)} · ${proj.n} samples${proj.step > 1 ? ' · chart 1/'+proj.step+'s' : ''}</div>`;
-    card.addEventListener('click', () => openRunModal(proj, idx, selectedDate));
+      ${(proj.la_l10 != null || proj.lafmax != null || proj.lceq != null) ? `<div class="run-scalars">
+        ${proj.lafmax != null ? `<div class="rsc">LA<sub>Fmax</sub><span>${proj.lafmax.toFixed(1)}</span></div>` : ''}
+        ${proj.la_l10 != null ? `<div class="rsc">LA10<span>${proj.la_l10.toFixed(1)}</span></div>` : ''}
+        ${proj.la_l50 != null ? `<div class="rsc">LA50<span>${proj.la_l50.toFixed(1)}</span></div>` : ''}
+        ${proj.la_l90 != null ? `<div class="rsc">LA90<span>${proj.la_l90.toFixed(1)}</span></div>` : ''}
+        ${proj.lceq != null ? `<div class="rsc">LC<sub>eq</sub><span>${proj.lceq.toFixed(1)}</span></div>` : ''}
+      </div>` : ''}
+      <div class="run-foot">${fmtDuration(proj.n)} · ${proj.n} samples${proj.step > 1 ? ' · chart 1/'+proj.step+'s' : ''}${proj.source_file ? ` · <span class="run-src" title="NOR140 project folder">${proj.source_file}</span>` : ''}</div>`;
+    card.addEventListener('click', () => openRunModal(proj, runNum, selectedDate));
     grid.appendChild(card);
     runCanvases.push(card.querySelector('canvas'));
   });
@@ -520,8 +756,60 @@ function renderRunsGrid(container, projects) {
   drawAllRunCharts(projects);
 }
 
+// ── Location tag editing ───────────────────────────────────
+function startTagEdit(e, badge) {
+  e.stopPropagation();
+  const input = badge.nextElementSibling;
+  input.value = badge.classList.contains('empty') ? '' : badge.textContent;
+  badge.style.display = 'none';
+  input.style.display = '';
+  input.focus();
+  input.select();
+}
+
+function tagKeydown(e, input) {
+  if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
+  if (e.key === 'Escape') {
+    const badge = input.previousElementSibling;
+    input.style.display = 'none';
+    badge.style.display = '';
+  }
+}
+
+function saveTag(input) {
+  const tag = input.value.trim().toUpperCase().slice(0, 8);
+  const badge = input.previousElementSibling;
+  const date = input.dataset.date;
+  const runNum = parseInt(input.dataset.run);
+
+  badge.textContent = tag || 'tag';
+  badge.className = 'run-tag' + (tag ? '' : ' empty');
+  input.style.display = 'none';
+  badge.style.display = '';
+
+  // Update in-memory data so the modal picks it up
+  const sess = DATA.sessions.find(s => s.d === date);
+  if (sess && sess.projects && sess.projects[runNum - 1]) {
+    sess.projects[runNum - 1].loc_tag = tag || null;
+  }
+
+  fetch(`/session/${date}/run/${runNum}/tag`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({tag}),
+  }).catch(() => {}); // fire and forget — badge already updated optimistically
+}
+
 // ── Run chart drawing ──────────────────────────────────────
-const Y_MIN = 48, Y_MAX = 115;
+function dynYMin(laeq) {
+  const lo = Math.min(...laeq);
+  return Math.max(0, Math.floor(lo / 10) * 10 - 10);
+}
+
+function dynYMax(laeq, lcpeak) {
+  const hi = Math.max(Math.max(...laeq), lcpeak ? Math.max(...lcpeak) : 0);
+  return Math.max(85, Math.ceil(hi / 10) * 10);
+}
 
 function drawRunChart(canvas, proj) {
   const W = canvas.parentElement.offsetWidth || 200;
@@ -529,8 +817,10 @@ function drawRunChart(canvas, proj) {
   const ctx = setupCanvas(canvas, W, H);
   const PAD = {t:8, r:8, b:22, l:34};
   const cW = W-PAD.l-PAD.r, cH = H-PAD.t-PAD.b;
-  const laeq = proj.laeq, lcpeak = proj.lcpeak, n = laeq.length;
+  const laeq = proj.laeq_profile, lcpeak = proj.lcpeak_profile, n = laeq.length;
   if (!n) return;
+  const Y_MIN = dynYMin(laeq);
+  const Y_MAX = dynYMax(laeq, lcpeak);
 
   const yP = db => PAD.t + cH*(1-(clamp(db,Y_MIN,Y_MAX)-Y_MIN)/(Y_MAX-Y_MIN));
   const xP = i => PAD.l + (n===1 ? cW/2 : (i/(n-1))*cW);
@@ -538,12 +828,12 @@ function drawRunChart(canvas, proj) {
   ctx.fillStyle = css('--panel'); ctx.fillRect(0,0,W,H);
 
   // Zone tints
-  [[Y_MIN,65,'rgba(50,160,80,.07)'],[65,80,'rgba(200,160,0,.06)'],[80,95,'rgba(210,80,20,.07)'],[95,Y_MAX,'rgba(180,20,10,.07)']].forEach(([lo,hi,c])=>{
+  [[Y_MIN,50,'rgba(50,160,80,.07)'],[50,65,'rgba(200,160,0,.06)'],[65,80,'rgba(210,80,20,.07)'],[80,Y_MAX,'rgba(180,20,10,.07)']].forEach(([lo,hi,c])=>{
     ctx.fillStyle=c; ctx.fillRect(PAD.l,yP(hi),cW,yP(lo)-yP(hi));
   });
 
   // Grid
-  [60,70,80,90,100,110].forEach(db=>{
+  [20,30,40,50,60,70,80,90,100,110].forEach(db=>{
     if(db<Y_MIN||db>Y_MAX)return;
     const y=yP(db);
     ctx.strokeStyle=css('--grid'); ctx.lineWidth=1; ctx.setLineDash([]);
@@ -575,6 +865,22 @@ function drawRunChart(canvas, proj) {
   laeq.forEach((v,i)=>{ const x=xP(i),y=yP(v); i?ctx.lineTo(x,y):ctx.moveTo(x,y); });
   ctx.stroke();
 
+  // LAFmax (thin, subtle — floats above LAeq)
+  if (proj.lafmax_profile) {
+    ctx.strokeStyle=css('--lafmax'); ctx.lineWidth=1; ctx.globalAlpha=.6;
+    ctx.beginPath();
+    proj.lafmax_profile.forEach((v,i)=>{ const x=xP(i),y=yP(v); i?ctx.lineTo(x,y):ctx.moveTo(x,y); });
+    ctx.stroke(); ctx.globalAlpha=1;
+  }
+
+  // LAImax (impulse peak — shows transient events)
+  if (proj.laimax_profile) {
+    ctx.strokeStyle=css('--laimax'); ctx.lineWidth=1.5; ctx.globalAlpha=.8;
+    ctx.beginPath();
+    proj.laimax_profile.forEach((v,i)=>{ const x=xP(i),y=yP(v); i?ctx.lineTo(x,y):ctx.moveTo(x,y); });
+    ctx.stroke(); ctx.globalAlpha=1;
+  }
+
   // X labels
   ctx.fillStyle=css('--text3'); ctx.font='9px '+css('--font-ui');
   ctx.textAlign='left'; ctx.fillText('0s',PAD.l,H-3);
@@ -584,7 +890,7 @@ function drawRunChart(canvas, proj) {
   ctx.strokeStyle=css('--grid-border'); ctx.lineWidth=1; ctx.setLineDash([]);
   ctx.strokeRect(PAD.l+.5,PAD.t+.5,cW,cH);
   // small in-chart legend
-  const leg=[['--laeq',1,2,'LAeq'],['--peak',.5,1,'LCpk']];
+  const leg=[['--laeq',1,2,'LAeq,1s'],['--laimax',.8,1.5,'LAImax'],['--peak',.5,1,'LApk']];
   const lx=PAD.l+cW-4, ly=PAD.t+5;
   ctx.font='9px '+css('--font-ui');ctx.textAlign='right';
   leg.forEach(([col,alpha,lw,lbl],i)=>{
@@ -606,10 +912,201 @@ function drawAllRunCharts(projects) {
 // ── History chart ──────────────────────────────────────────
 function barColor(avg) {
   const dk = isDarkMode();
-  if (avg < 80)  return dk ? '#3A9A5A' : '#4BA86A';
-  if (avg < 95)  return dk ? '#B88018' : '#D09520';
-  if (avg < 110) return dk ? '#A84820' : '#C05028';
+  if (avg < 50)  return dk ? '#3A9A5A' : '#4BA86A';
+  if (avg < 65)  return dk ? '#B88018' : '#D09520';
+  if (avg < 80)  return dk ? '#A84820' : '#C05028';
   return dk ? '#902010' : '#A02818';
+}
+
+let filteredSessions = DATA.sessions;
+let allAssessments = [];
+let assessFilter = { runSet: null, matches: [] };
+let _assessDebounce = null;
+
+async function loadAssessmentFilter() {
+  const res = await fetch('/api/assessments');
+  allAssessments = await res.json();
+}
+
+function onAssessFilterChange() {
+  clearTimeout(_assessDebounce);
+  _assessDebounce = setTimeout(_doAssessFilter, 350);
+}
+
+async function _doAssessFilter() {
+  const text = document.getElementById('fAssess').value.trim().toLowerCase();
+  if (!text) {
+    assessFilter = { runSet: null, matches: [] };
+    applyFilter();
+    _updateAssessBanner();
+    return;
+  }
+  const matches = allAssessments.filter(a =>
+    (a.name || '').toLowerCase().includes(text) ||
+    (a.client_ref || '').toLowerCase().includes(text)
+  );
+  if (!matches.length) {
+    assessFilter = { runSet: new Set(), matches: [] };
+    applyFilter();
+    _updateAssessBanner();
+    return;
+  }
+  const details = await Promise.all(
+    matches.map(a => fetch(`/api/assessments/${a.id}`).then(r => r.json()))
+  );
+  const runSet = new Set();
+  const sessAssessments = new Map();
+  for (let i = 0; i < details.length; i++) {
+    const { runs } = details[i];
+    const assessName = matches[i].name;
+    for (const r of runs) {
+      if (r.ar_id === null) continue;  // skip unassigned runs
+      runSet.add(r.session_date + '|' + r.run_number);
+      if (!sessAssessments.has(r.session_date)) sessAssessments.set(r.session_date, new Set());
+      sessAssessments.get(r.session_date).add(assessName);
+    }
+  }
+  assessFilter = { runSet, matches, sessAssessments };
+  applyFilter();
+  _updateAssessBanner();
+}
+
+function _updateAssessBanner() {
+  const banner = document.getElementById('assessBanner');
+  const { matches } = assessFilter;
+  if (!matches || !matches.length) { banner.style.display = 'none'; return; }
+  banner.style.display = 'flex';
+  banner.innerHTML =
+    '<span style="font-size:11px;color:var(--text2);font-weight:500;white-space:nowrap">Assessment filter:</span>' +
+    matches.map(a =>
+      `<span style="display:inline-flex;align-items:center;gap:6px;background:var(--surface);border:1px solid var(--border);border-radius:4px;padding:2px 8px;font-size:12px">
+        <span style="color:var(--text)">${esc(a.name)}${a.client_ref ? ' <span style="color:var(--text3)">· ' + esc(a.client_ref) + '</span>' : ''}</span>
+        <a href="/assessments?open=${a.id}" style="color:var(--laeq);font-weight:600;text-decoration:none;font-size:11px" title="Open in Assessments">Open ↗</a>
+      </span>`
+    ).join('');
+}
+
+function buildTable(sessions) {
+  const tbody = document.getElementById('sessTableBody');
+  const empty = document.getElementById('sessTableEmpty');
+  if (!sessions.length) {
+    tbody.innerHTML = '';
+    empty.style.display = '';
+    return;
+  }
+  empty.style.display = 'none';
+  tbody.innerHTML = sessions.map(s => {
+    const loc = [s.loc, s.post].filter(Boolean).join(', ');
+    const sel = s.d === selectedDate ? ' sel' : '';
+    const assessNames = (s.assmnts || []).join(', ');
+    return `<tr data-date="${s.d}" class="${sel}" onclick="selectSession('${s.d}')">
+      <td class="td-date">${s.d}</td>
+      <td class="td-loc">${esc(loc)}</td>
+      <td class="td-by">${esc(s.name || '')}</td>
+      <td class="td-assess" style="font-size:12px;color:var(--text2);max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(assessNames)}</td>
+      <td class="td-db">${s.avg.toFixed(1)}&thinsp;dB</td>
+      <td class="td-db td-hi">${s.mx.toFixed(1)}&thinsp;dB</td>
+      <td class="td-runs">${s.projects ? s.projects.length : '—'}</td>
+    </tr>`;
+  }).join('');
+}
+
+function selectSession(date) {
+  selectedDate = date;
+  renderSessionPanel(date);
+  document.querySelectorAll('#sessTableBody tr').forEach(tr =>
+    tr.classList.toggle('sel', tr.dataset.date === date)
+  );
+  drawHistory();
+  document.getElementById('sessPanel').scrollIntoView({behavior: 'smooth', block: 'nearest'});
+}
+
+function applyFilter() {
+  const text = document.getElementById('fText').value.trim().toLowerCase();
+  const from = document.getElementById('fFrom').value;
+  const to   = document.getElementById('fTo').value;
+  const avg  = parseFloat(document.getElementById('fAvg').value);
+  const max  = parseFloat(document.getElementById('fMax').value);
+  filteredSessions = DATA.sessions.filter(s => {
+    if (text) {
+      const hay = [s.name, s.loc, s.post, s.notes].filter(Boolean).join(' ').toLowerCase();
+      if (!hay.includes(text)) return false;
+    }
+    if (from && s.d < from) return false;
+    if (to   && s.d > to)   return false;
+    if (!isNaN(avg) && s.avg < avg) return false;
+    if (!isNaN(max) && s.mx  < max) return false;
+    if (assessFilter.runSet) {
+      const hasRun = (s.projects || []).some((_, i) => assessFilter.runSet.has(s.d + '|' + (i + 1)));
+      if (!hasRun) return false;
+    }
+    return true;
+  });
+  const n = filteredSessions.length, total = DATA.sessions.length;
+  const anyActive = text || from || to || !isNaN(avg) || !isNaN(max) || assessFilter.runSet;
+  document.getElementById('filterCount').textContent = anyActive ? `${n} of ${total} sessions` : `${total} sessions`;
+  document.getElementById('filterClear').style.display = anyActive ? '' : 'none';
+  // Keep export link in sync with active filters
+  const params = new URLSearchParams();
+  if (text) params.set('q', document.getElementById('fText').value.trim());
+  if (from) params.set('from', from);
+  if (to)   params.set('to', to);
+  if (!isNaN(avg)) params.set('avg_min', document.getElementById('fAvg').value);
+  if (!isNaN(max)) params.set('max_min', document.getElementById('fMax').value);
+  const qs = params.toString();
+  document.getElementById('filterExport').href = '/export/sessions.csv' + (qs ? '?' + qs : '');
+  buildTable(filteredSessions);
+  drawHistory();
+}
+
+function clearFilter() {
+  ['fText','fFrom','fTo','fAvg','fMax','fAssess'].forEach(id => document.getElementById(id).value = '');
+  assessFilter = { runSet: null, matches: [] };
+  document.getElementById('assessBanner').style.display = 'none';
+  applyFilter();
+}
+
+// ── CSV export helpers ─────────────────────────────────────
+function downloadCsv(filename, rows) {
+  const csv = rows.map(r => r.map(v => {
+    const s = String(v ?? '');
+    return (s.includes(',') || s.includes('"') || s.includes('\n'))
+      ? '"' + s.replace(/"/g, '""') + '"' : s;
+  }).join(',')).join('\r\n');
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([csv], {type: 'text/csv'}));
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 0);
+}
+
+function exportSessionRuns(date) {
+  const sess = DATA.sessions.find(s => s.d === date);
+  if (!sess || !sess.projects || !sess.projects.length) return;
+  const rows = [['run', 'start_time', 'n_samples', 'step_s', 'laeq_avg_db', 'laeq_min_db', 'laeq_max_db', 'lcpeak_max_db', 'duration_s']];
+  sess.projects.forEach((p, i) => {
+    rows.push([i + 1, p.start, p.n, p.step, p.avg.toFixed(2), p.mn, p.mx, p.pmx, p.n]);
+  });
+  downloadCsv('noise-' + date + '-runs.csv', rows);
+}
+
+function exportRunCSV(proj, runIdx, date) {
+  const hasFmax = proj.lafmax_profile && proj.lafmax_profile.length;
+  const hasImax = proj.laimax_profile && proj.laimax_profile.length;
+  const hdrs = ['elapsed_s', 'laeq_db'];
+  if (hasFmax) hdrs.push('lafmax_db');
+  if (hasImax) hdrs.push('laimax_db');
+  hdrs.push('lcpeak_db');
+  const rows = [hdrs];
+  proj.laeq_profile.forEach((v, i) => {
+    const row = [i * proj.step, v];
+    if (hasFmax) row.push(proj.lafmax_profile[i]);
+    if (hasImax) row.push(proj.laimax_profile[i]);
+    row.push(proj.lcpeak_profile[i]);
+    rows.push(row);
+  });
+  downloadCsv('noise-' + date + '-run' + (runIdx + 1) + '.csv', rows);
 }
 
 function drawHistory() {
@@ -619,7 +1116,7 @@ function drawHistory() {
   const H = 130;
   const PAD = {t:10,r:12,b:30,l:36};
   const ctx = setupCanvas(canvas,W,H);
-  const sessions = DATA.sessions;
+  const sessions = filteredSessions;
   const n = sessions.length;
   const cW = W-PAD.l-PAD.r, cH = H-PAD.t-PAD.b;
 
@@ -627,13 +1124,13 @@ function drawHistory() {
   const spacing = (cW - barW*n) / (n+1);
   const xP = i => PAD.l + spacing + i*(barW+spacing);
 
-  const DB_LO=50, DB_HI=130;
+  const DB_LO=20, DB_HI=130;
   const yP = db => PAD.t + cH*(1-(clamp(db,DB_LO,DB_HI)-DB_LO)/(DB_HI-DB_LO));
 
   ctx.fillStyle = css('--surface'); ctx.fillRect(0,0,W,H);
 
   // Grid
-  [60,70,80,90,100,110,120].forEach(db=>{
+  [30,40,50,60,70,80,90,100,110,120].forEach(db=>{
     const y=yP(db);
     ctx.strokeStyle=css('--grid'); ctx.lineWidth=1; ctx.setLineDash([]);
     ctx.beginPath(); ctx.moveTo(PAD.l,y); ctx.lineTo(PAD.l+cW,y); ctx.stroke();
@@ -719,6 +1216,7 @@ histWrap.addEventListener('click', e=>{
 // ── Render & resize ────────────────────────────────────────
 function renderAll(){
   renderSessionPanel(selectedDate);
+  buildTable(filteredSessions);
   drawHistory();
 }
 
@@ -742,7 +1240,7 @@ obs.observe(document.documentElement,{attributes:true,attributeFilter:['data-the
 window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change',renderAll);
 
 // ── Statistics ────────────────────────────────────────────
-function computeStats(laeq, lcpeak) {
+function computeStats(laeq, lapeak, lafmax, laimax) {
   const n = laeq.length;
   const sorted = [...laeq].sort((a,b)=>b-a);
   const leq = 10*Math.log10(laeq.reduce((s,v)=>s+Math.pow(10,v/10),0)/n);
@@ -751,7 +1249,9 @@ function computeStats(laeq, lcpeak) {
   return {
     leq: leq.toFixed(1), la10: at(10).toFixed(1), la50: at(50).toFixed(1),
     la90: at(90).toFixed(1), lmax: sorted[0].toFixed(1), lmin: sorted[n-1].toFixed(1),
-    pmx: Math.max(...lcpeak).toFixed(1),
+    pmx:  Math.max(...lapeak).toFixed(1),   // LApeak from PROF; overridden below by GLOB LCpeak
+    pmxf: lafmax ? Math.max(...lafmax).toFixed(1) : null,
+    pmxi: laimax ? Math.max(...laimax).toFixed(1) : null,
     pct85: (above85/n*100).toFixed(1),
   };
 }
@@ -763,16 +1263,18 @@ function drawModalTimeSeries(canvas, proj) {
   const ctx = setupCanvas(canvas, W, H);
   const PAD = {t:14,r:14,b:32,l:50};
   const cW=W-PAD.l-PAD.r, cH=H-PAD.t-PAD.b;
-  const laeq=proj.laeq, lcpeak=proj.lcpeak, n=laeq.length;
+  const laeq=proj.laeq_profile, lcpeak=proj.lcpeak_profile, n=laeq.length;
   if(!n)return;
+  const Y_MIN=dynYMin(laeq);
+  const Y_MAX=dynYMax(laeq,lcpeak);
   const yP=db=>PAD.t+cH*(1-(clamp(db,Y_MIN,Y_MAX)-Y_MIN)/(Y_MAX-Y_MIN));
   const xP=i=>PAD.l+(n===1?cW/2:(i/(n-1))*cW);
   ctx.fillStyle=css('--panel'); ctx.fillRect(0,0,W,H);
-  [[Y_MIN,65,'rgba(50,160,80,.07)'],[65,80,'rgba(200,160,0,.06)'],[80,95,'rgba(210,80,20,.07)'],[95,Y_MAX,'rgba(180,20,10,.07)']].forEach(([lo,hi,c])=>{
+  [[Y_MIN,50,'rgba(50,160,80,.07)'],[50,65,'rgba(200,160,0,.06)'],[65,80,'rgba(210,80,20,.07)'],[80,Y_MAX,'rgba(180,20,10,.07)']].forEach(([lo,hi,c])=>{
     ctx.fillStyle=c; ctx.fillRect(PAD.l,yP(hi),cW,yP(lo)-yP(hi));
   });
-  for(let db=50;db<=110;db+=5){
-    if(db<Y_MIN||db>Y_MAX)continue;
+  for(let db=Y_MIN;db<=Y_MAX;db+=5){
+    if(db<Y_MIN)continue;
     const y=yP(db), maj=db%10===0;
     ctx.strokeStyle=css('--grid'); ctx.lineWidth=maj?1:.5; ctx.setLineDash([]);
     ctx.beginPath();ctx.moveTo(PAD.l,y);ctx.lineTo(PAD.l+cW,y);ctx.stroke();
@@ -799,6 +1301,16 @@ function drawModalTimeSeries(canvas, proj) {
   // LAeq line
   ctx.strokeStyle=css('--laeq');ctx.lineWidth=2;
   ctx.beginPath();laeq.forEach((v,i)=>{const x=xP(i),y=yP(v);i?ctx.lineTo(x,y):ctx.moveTo(x,y);});ctx.stroke();
+  // LAFmax
+  if(proj.lafmax_profile){
+    ctx.strokeStyle=css('--lafmax');ctx.lineWidth=1.5;ctx.globalAlpha=.65;
+    ctx.beginPath();proj.lafmax_profile.forEach((v,i)=>{const x=xP(i),y=yP(v);i?ctx.lineTo(x,y):ctx.moveTo(x,y);});ctx.stroke();ctx.globalAlpha=1;
+  }
+  // LAImax
+  if(proj.laimax_profile){
+    ctx.strokeStyle=css('--laimax');ctx.lineWidth=1.5;ctx.globalAlpha=.85;
+    ctx.beginPath();proj.laimax_profile.forEach((v,i)=>{const x=xP(i),y=yP(v);i?ctx.lineTo(x,y):ctx.moveTo(x,y);});ctx.stroke();ctx.globalAlpha=1;
+  }
   // X axis
   const label_n=Math.min(8,Math.floor(cW/80));
   ctx.fillStyle=css('--text3');ctx.font='10px '+css('--font-ui');
@@ -808,8 +1320,8 @@ function drawModalTimeSeries(canvas, proj) {
   }
   ctx.strokeStyle=css('--grid-border');ctx.lineWidth=1;ctx.setLineDash([]);ctx.strokeRect(PAD.l+.5,PAD.t+.5,cW,cH);
   // In-chart legend (top-right, modal)
-  const mleg=[['--laeq',1,2,'LAeq,1s'],['--peak',.5,1,'LCpeak']];
-  const mlx=PAD.l+cW-8, mly=PAD.t+10;
+  const mleg=[['--laeq',1,2,'LAeq,1s'],['--lafmax',.65,1.5,'LAFmax'],['--laimax',.85,1.5,'LAImax'],['--peak',.5,1,'LApeak']];
+  const mlx=PAD.l+cW-8, mly=PAD.t+8;
   ctx.font='11px '+css('--font-ui');ctx.textAlign='right';
   mleg.forEach(([col,alpha,lw,lbl],i)=>{
     const y=mly+i*17;
@@ -825,7 +1337,7 @@ function drawHistogram(canvas, laeq) {
   const ctx=setupCanvas(canvas,W,H);
   const PAD={t:8,r:10,b:26,l:36};
   const cW=W-PAD.l-PAD.r, cH=H-PAD.t-PAD.b;
-  const BLO=45,BWI=5,NBIN=Math.ceil((120-BLO)/BWI);
+  const BLO=20,BWI=5,NBIN=Math.ceil((120-BLO)/BWI);
   const bins=new Array(NBIN).fill(0);
   laeq.forEach(v=>{const b=Math.floor((clamp(v,BLO,119.9)-BLO)/BWI);bins[Math.max(0,Math.min(b,NBIN-1))]++;});
   const mx=Math.max(...bins,1);
@@ -833,11 +1345,11 @@ function drawHistogram(canvas, laeq) {
   const bW=cW/NBIN;
   bins.forEach((cnt,bi)=>{
     const db=BLO+bi*BWI,h=cH*(cnt/mx),x=PAD.l+bi*bW,y=PAD.t+cH-h;
-    ctx.fillStyle=db<65?'rgba(50,160,80,.8)':db<80?'rgba(200,160,0,.8)':db<95?'rgba(210,80,20,.8)':'rgba(180,20,10,.8)';
+    ctx.fillStyle=db<50?'rgba(50,160,80,.8)':db<65?'rgba(200,160,0,.8)':db<80?'rgba(210,80,20,.8)':'rgba(180,20,10,.8)';
     ctx.fillRect(x+1,y,bW-2,h);
   });
   ctx.fillStyle=css('--text3');ctx.font='9px '+css('--font-data');ctx.textAlign='center';
-  [50,60,70,80,90,100,110].forEach(db=>{
+  [20,30,40,50,60,70,80,90,100,110].forEach(db=>{
     if(db<BLO)return;
     const x=PAD.l+(db-BLO)/BWI*bW;
     ctx.fillText(db,x,H-3);
@@ -853,7 +1365,7 @@ function drawExceedance(canvas, laeq) {
   const ctx=setupCanvas(canvas,W,H);
   const PAD={t:8,r:14,b:26,l:36};
   const cW=W-PAD.l-PAD.r, cH=H-PAD.t-PAD.b;
-  const XLO=48, XHI=115;
+  const XLO=dynYMin(laeq), XHI=dynYMax(laeq,[]);
   const xP=db=>PAD.l+(db-XLO)/(XHI-XLO)*cW;
   const yP=pct=>PAD.t+cH*(1-pct/100);
   const n=laeq.length;
@@ -866,7 +1378,7 @@ function drawExceedance(canvas, laeq) {
     ctx.beginPath();ctx.moveTo(PAD.l,y);ctx.lineTo(PAD.l+cW,y);ctx.stroke();
     ctx.fillStyle=css('--text3');ctx.font='9px '+css('--font-ui');ctx.textAlign='right';ctx.fillText(pct+'%',PAD.l-4,y+3);
   });
-  [50,60,70,80,90,100,110].forEach(db=>{
+  [20,30,40,50,60,70,80,90,100,110].forEach(db=>{
     if(db<XLO||db>XHI)return;
     const x=xP(db);
     ctx.strokeStyle=css('--grid');ctx.lineWidth=1;ctx.setLineDash([]);
@@ -903,10 +1415,17 @@ function drawExceedance(canvas, laeq) {
 }
 
 // ── Open / close modal ────────────────────────────────────
-function openRunModal(proj, runIdx, date) {
-  const stats = computeStats(proj.laeq, proj.lcpeak);
+function openRunModal(proj, runNum, date) {
+  const runIdx = runNum - 1;
+  const stats = computeStats(proj.laeq_profile, proj.lcpeak_profile, proj.lafmax_profile, proj.laimax_profile);
+  if (proj.avg    != null) stats.leq  = proj.avg.toFixed(1);
+  if (proj.la_l10 != null) stats.la10 = proj.la_l10.toFixed(1);
+  if (proj.la_l50 != null) stats.la50 = proj.la_l50.toFixed(1);
+  if (proj.la_l90 != null) stats.la90 = proj.la_l90.toFixed(1);
+  if (proj.lafmax != null) stats.pmxf = proj.lafmax.toFixed(1);
   const sess = DATA.sessions.find(s => s.d === date);
-  document.getElementById('modalTitle').textContent = `Run ${runIdx+1}  ·  ${proj.start}`;
+  const tagLabel = proj.loc_tag ? `  ·  Location ${proj.loc_tag}` : '';
+  document.getElementById('modalTitle').textContent = `Run ${runIdx+1}${tagLabel}  ·  ${proj.start}`;
   document.getElementById('modalSub').textContent =
     `${fmtDate(date)}  ·  ${fmtDuration(proj.n)}  ·  ${proj.n.toLocaleString()} samples${proj.step>1?' (downsampled 1/'+proj.step+'s)':''}`;
 
@@ -914,30 +1433,36 @@ function openRunModal(proj, runIdx, date) {
   document.getElementById('modalMetaChips').innerHTML = metaChipsHtml(sess);
 
   // Pre-fill edit form
-  document.getElementById('modal-mf-date').value = date;
-  document.getElementById('modal-mf-name').value = sess.name || '';
-  document.getElementById('modal-mf-loc').value  = sess.loc  || '';
-  document.getElementById('modal-mf-post').value = sess.post || '';
-  document.getElementById('modal-mf-lat').value  = sess.lat  != null ? sess.lat : '';
-  document.getElementById('modal-mf-lng').value  = sess.lng  != null ? sess.lng : '';
+  document.getElementById('modal-mf-date').value  = date;
+  document.getElementById('modal-mf-name').value  = sess.name  || '';
+  document.getElementById('modal-mf-loc').value   = sess.loc   || '';
+  document.getElementById('modal-mf-post').value  = sess.post  || '';
+  document.getElementById('modal-mf-lat').value   = sess.lat   != null ? sess.lat : '';
+  document.getElementById('modal-mf-lng').value   = sess.lng   != null ? sess.lng : '';
+  document.getElementById('modal-mf-notes').value = sess.notes || '';
   closeModalMetaEdit();
 
   document.getElementById('modalStats').innerHTML = [
     ['LA<sub>eq</sub> (energy avg)', stats.leq, 'dB', false],
+    ...(proj.lceq != null ? [['LC<sub>eq</sub>', proj.lceq.toFixed(1), 'dB', false]] : []),
     ['LA10', stats.la10, 'dB', false],
     ['LA50 (median)', stats.la50, 'dB', false],
     ['LA90 (background)', stats.la90, 'dB', false],
     ['LA<sub>max</sub>', stats.lmax, 'dB', false],
     ['LA<sub>min</sub>', stats.lmin, 'dB', false],
+    ...(stats.pmxf ? [['LA<sub>Fmax</sub> peak', stats.pmxf, 'dB', false]] : []),
+    ...(stats.pmxi ? [['LA<sub>Imax</sub> peak', stats.pmxi, 'dB', false]] : []),
     ['LC<sub>peak</sub> max', stats.pmx, 'dB', true],
     ['Time ≥ 85 dB', stats.pct85, '%', parseFloat(stats.pct85)>5],
   ].map(([n,v,u,hi])=>`<div class="mstat"><span class="mstat-n">${n}</span><span class="mstat-v${hi?' hi':''}">${v}&thinsp;${u}</span></div>`).join('');
+  document.getElementById('modalExportBtn').onclick = () => exportRunCSV(proj, runIdx, date);
+  document.getElementById('modalReportBtn').onclick = () => openReportOpt(date, runIdx + 1, `${date} — Run ${runIdx + 1}`);
   document.getElementById('modalOverlay').classList.add('open');
   document.body.style.overflow='hidden';
   requestAnimationFrame(()=>{
     drawModalTimeSeries(document.getElementById('modalMainCanvas'), proj);
-    drawHistogram(document.getElementById('modalHistCanvas'), proj.laeq);
-    drawExceedance(document.getElementById('modalExcCanvas'), proj.laeq);
+    drawHistogram(document.getElementById('modalHistCanvas'), proj.laeq_profile);
+    drawExceedance(document.getElementById('modalExcCanvas'), proj.laeq_profile);
   });
 }
 function openModalMetaEdit() {
@@ -958,6 +1483,7 @@ function saveModalMetaEdit() {
     postcode:       g('post').toUpperCase(),
     lat:            fl(g('lat')),
     lng:            fl(g('lng')),
+    notes:          g('notes'),
   });
   const status = document.getElementById('modal-mf-status');
   status.style.color = 'var(--text3)';
@@ -973,9 +1499,10 @@ function saveModalMetaEdit() {
     if (json.status !== 'ok') throw new Error(json.error || 'Error');
     const sess = DATA.sessions.find(s => s.d === date);
     if (sess) {
-      sess.name = g('name') || null;
-      sess.loc  = g('loc')  || null;
-      sess.post = g('post').toUpperCase() || null;
+      sess.name  = g('name')  || null;
+      sess.loc   = g('loc')   || null;
+      sess.post  = g('post').toUpperCase() || null;
+      sess.notes = g('notes') || null;
       const lat = fl(g('lat')), lng = fl(g('lng'));
       sess.lat = lat !== '' ? lat : null;
       sess.lng = lng !== '' ? lng : null;
@@ -1000,6 +1527,16 @@ document.getElementById('modalOverlay').addEventListener('click',e=>{if(e.target
 document.getElementById('modalCloseBtn').addEventListener('click',closeModal);
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closeModal();});
 
+// Filter listeners
+['fText','fFrom','fTo','fAvg','fMax'].forEach(id =>
+  document.getElementById(id).addEventListener('input', applyFilter)
+);
+document.getElementById('fAssess').addEventListener('input', onAssessFilterChange);
+document.getElementById('fAssess').addEventListener('keydown', e => { if (e.key === 'Enter') _doAssessFilter(); });
+document.getElementById('filterApply').addEventListener('click', () => { _doAssessFilter(); applyFilter(); });
+applyFilter(); // initialise count
+loadAssessmentFilter();
+
 // Expose onclick-called functions to global scope (they're inside the IIFE)
 window.openMetaEdit       = openMetaEdit;
 window.closeMetaEdit      = closeMetaEdit;
@@ -1007,6 +1544,114 @@ window.saveMetaEdit       = saveMetaEdit;
 window.openModalMetaEdit  = openModalMetaEdit;
 window.closeModalMetaEdit = closeModalMetaEdit;
 window.saveModalMetaEdit  = saveModalMetaEdit;
+window.clearFilter        = clearFilter;
+window.selectSession      = selectSession;
+window.fetchWeather       = fetchWeather;
+window.startTagEdit       = startTagEdit;
+window.tagKeydown         = tagKeydown;
+window.saveTag            = saveTag;
+
+function fetchWeather(date) {
+  const btn = document.getElementById('wx-btn-' + date);
+  if (btn) { btn.textContent = 'Fetching…'; btn.disabled = true; }
+  fetch('/session/' + date + '/fetch-weather', { method: 'POST',
+    headers: {'X-Requested-With': 'XMLHttpRequest'} })
+  .then(r => r.json())
+  .then(json => {
+    if (json.status !== 'ok') throw new Error(json.message || 'Error');
+    // Update in-memory data
+    const sess = DATA.sessions.find(s => s.d === date);
+    if (sess) sess.wx = json.wx;
+    // Refresh chips and hide button
+    const chips = document.getElementById('wx-chips-' + date);
+    if (chips) chips.innerHTML = wxChipsHtml(json.wx);
+    if (btn) btn.remove();
+  })
+  .catch(err => {
+    if (btn) { btn.textContent = 'Fetch weather'; btn.disabled = false; }
+    alert('Weather fetch failed: ' + err.message);
+  });
+}
 
 })();
+</script>
+
+<script>
+// ── Report options modal ───────────────────────────────────────────────────
+let _roptDate = null, _roptRun = null;
+
+async function openReportOpt(date, runNumber, label) {
+  _roptDate = date;
+  _roptRun  = runNumber || null;
+  document.getElementById('roptTitle').textContent = 'Report — ' + label;
+  document.getElementById('roptNotice').textContent = '';
+  document.getElementById('roptNotice').className = 'ropt-notice';
+  document.getElementById('roptGenBtn').disabled = false;
+  document.getElementById('roptGenBtn').textContent = 'Generate';
+
+  // Populate template selector (fetch each time so edits in Reports tab are reflected)
+  const sel = document.getElementById('roptTemplate');
+  sel.innerHTML = '<option>Loading…</option>';
+  try {
+    const templates = await fetch('/api/report-templates').then(r => r.json());
+    sel.innerHTML = templates.map(t =>
+      `<option value="${t.id}"${t.is_default ? ' selected' : ''}>${t.name}${t.is_default ? ' ★' : ''}</option>`
+    ).join('');
+  } catch (e) {
+    sel.innerHTML = '<option value="">Could not load templates</option>';
+  }
+
+  document.getElementById('reportOptOverlay').classList.add('open');
+}
+
+function closeReportOpt() {
+  document.getElementById('reportOptOverlay').classList.remove('open');
+}
+
+function roptModelChange() {
+  const isHaiku = document.getElementById('roptModel').value.includes('haiku');
+  const th = document.getElementById('roptThinking');
+  th.disabled = isHaiku;
+  if (isHaiku) th.value = 'none';
+}
+
+async function submitReportOpt() {
+  const btn = document.getElementById('roptGenBtn');
+  const notice = document.getElementById('roptNotice');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="ropt-spin"></span> Generating…';
+  notice.textContent = '';
+
+  const body = {
+    session_date:   _roptDate,
+    template_id:    parseInt(document.getElementById('roptTemplate').value),
+    model:          document.getElementById('roptModel').value,
+    thinking_level: document.getElementById('roptThinking').value,
+  };
+  if (_roptRun) body.run_number = _roptRun;
+
+  try {
+    const res  = await fetch('/api/generate-report', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Generation failed');
+    const url = '/reports/' + data.report_id;
+    notice.innerHTML = `Done &mdash; ${data.input_tokens}+${data.output_tokens} tokens ($${data.cost_usd?.toFixed(4)}) &mdash; <a href="${url}" target="_blank" style="color:inherit;font-weight:600">View Report &rarr;</a>`;
+    notice.className = 'ropt-notice ok';
+    btn.disabled = false;
+    btn.textContent = 'Generate';
+  } catch (e) {
+    notice.textContent = 'Error: ' + e.message;
+    notice.className = 'ropt-notice err';
+    btn.disabled = false;
+    btn.textContent = 'Generate';
+  }
+}
+
+document.getElementById('reportOptOverlay').addEventListener('click', e => {
+  if (e.target === e.currentTarget) closeReportOpt();
+});
 </script>

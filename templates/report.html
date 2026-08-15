@@ -1,0 +1,332 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Noise Assessment Report · {{ date }}</title>
+<style>
+:root{
+  --ink:#1A2235;--ink2:#3D5270;--ink3:#7A92AE;
+  --rule:#C8D4E8;--rule2:#E0E8F4;
+  --bg:#F4F7FB;--surface:#fff;
+  --accent:#1F4E8A;--accent2:#2B6DB5;
+  --warn:#B04800;--ok:#1A6B3A;
+  --font:'Georgia',serif;--font-ui:system-ui,-apple-system,'Helvetica Neue',sans-serif;
+  --font-data:'SF Mono','Cascadia Code','Consolas',monospace;
+}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html{font-size:14px}
+body{
+  background:var(--bg);color:var(--ink);font-family:var(--font);
+  line-height:1.7;-webkit-font-smoothing:antialiased;
+}
+
+/* ── Page shell ── */
+.shell{max-width:860px;margin:0 auto;padding:32px 24px 64px}
+
+/* ── Report cover bar ── */
+.cover{
+  background:var(--accent);color:#fff;
+  padding:28px 36px 24px;border-radius:6px 6px 0 0;
+  margin-bottom:0;
+}
+.cover-title{font-size:22px;font-weight:700;letter-spacing:-.02em;margin-bottom:4px}
+.cover-sub{font-size:12px;letter-spacing:.12em;text-transform:uppercase;opacity:.7}
+.cover-meta{margin-top:18px;display:flex;gap:32px;flex-wrap:wrap}
+.cover-field{font-size:12px}
+.cover-field .lbl{display:block;opacity:.6;text-transform:uppercase;letter-spacing:.08em;font-size:10px;margin-bottom:2px;font-family:var(--font-ui)}
+.cover-field .val{font-family:var(--font-ui);font-weight:600;font-size:13px}
+
+/* ── Body card ── */
+.report-body{
+  background:var(--surface);
+  border:1px solid var(--rule);border-top:none;
+  border-radius:0 0 6px 6px;
+  padding:32px 36px 40px;
+}
+
+/* ── Sections ── */
+.section{margin-bottom:32px}
+.section:last-child{margin-bottom:0}
+.section-title{
+  font-family:var(--font-ui);font-size:11px;font-weight:700;
+  letter-spacing:.12em;text-transform:uppercase;color:var(--accent);
+  border-bottom:2px solid var(--accent);padding-bottom:5px;margin-bottom:14px;
+}
+
+/* ── Metadata grid ── */
+.meta-grid{display:grid;grid-template-columns:1fr 1fr;gap:0;border:1px solid var(--rule);border-radius:4px;overflow:hidden;font-family:var(--font-ui);font-size:12px}
+.meta-row{display:contents}
+.meta-k{background:var(--bg);padding:7px 12px;color:var(--ink3);font-weight:500;border-bottom:1px solid var(--rule2)}
+.meta-v{background:var(--surface);padding:7px 12px;border-bottom:1px solid var(--rule2);border-left:1px solid var(--rule2)}
+.meta-row:last-child .meta-k,.meta-row:last-child .meta-v{border-bottom:none}
+
+/* ── Stat tiles ── */
+.stat-tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:1px;background:var(--rule);border:1px solid var(--rule);border-radius:4px;overflow:hidden;margin-bottom:20px}
+.stat-tile{background:var(--surface);padding:12px 14px}
+.stat-lbl{font-family:var(--font-ui);font-size:9.5px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--ink3);display:block;margin-bottom:4px}
+.stat-val{font-family:var(--font-data);font-size:18px;font-weight:500;font-variant-numeric:tabular-nums;line-height:1.2}
+.stat-val.warn{color:var(--warn)}
+.stat-val.ok{color:var(--ok)}
+
+/* ── Tables ── */
+table{width:100%;border-collapse:collapse;font-size:12px;font-family:var(--font-ui);margin-bottom:4px}
+thead th{
+  background:var(--bg);padding:7px 10px;
+  text-align:left;font-size:10px;font-weight:700;letter-spacing:.06em;
+  text-transform:uppercase;color:var(--ink3);
+  border-bottom:2px solid var(--rule);white-space:nowrap;
+}
+thead th:not(:first-child){text-align:right}
+tbody td{padding:7px 10px;border-bottom:1px solid var(--rule2);vertical-align:top}
+tbody td:not(:first-child){text-align:right;font-family:var(--font-data);font-variant-numeric:tabular-nums}
+tbody tr:last-child td{border-bottom:none}
+tbody tr:hover{background:var(--bg)}
+.td-hi{color:var(--warn);font-weight:500}
+.td-ok{color:var(--ok)}
+
+/* ── Prose from Claude ── */
+.prose{font-size:13.5px;line-height:1.75;color:var(--ink)}
+.prose p{margin-bottom:10px}
+.prose p:last-child{margin-bottom:0}
+.prose ul,.prose ol{padding-left:22px;margin-bottom:10px}
+.prose li{margin-bottom:4px}
+.prose table{margin:12px 0}
+.prose strong{color:var(--ink);font-weight:600}
+.prose em{color:var(--ink2)}
+
+/* ── Compliance band chips ── */
+.band{display:inline-block;font-family:var(--font-ui);font-size:11px;font-weight:600;border-radius:3px;padding:2px 8px;margin:2px 0}
+.band-no{background:#E8F5EC;color:#1A6B3A;border:1px solid #9DCCA8}
+.band-warn{background:#FFF3E0;color:#8B5000;border:1px solid #FFBA6A}
+.band-crit{background:#FDECEA;color:#B01C1C;border:1px solid #F5A0A0}
+
+/* ── Footer ── */
+.report-footer{
+  margin-top:28px;padding:14px 0;
+  border-top:1px solid var(--rule);
+  font-family:var(--font-ui);font-size:11px;color:var(--ink3);line-height:1.6;
+}
+
+/* ── Print button ── */
+.print-bar{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:10px 0 20px;font-family:var(--font-ui);
+}
+.print-btn{
+  background:var(--accent);color:#fff;border:none;border-radius:4px;
+  padding:8px 20px;font-size:13px;font-weight:600;cursor:pointer;
+  font-family:var(--font-ui);
+}
+.print-btn:hover{opacity:.9}
+.print-label{font-size:12px;color:var(--ink3)}
+
+@media print{
+  body{background:#fff;font-size:11pt}
+  .shell{max-width:none;padding:0}
+  .print-bar{display:none}
+  .cover{border-radius:0;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+  .report-body{border:none;padding:20pt 0}
+  .section{page-break-inside:avoid}
+  table{font-size:9pt}
+}
+@media(max-width:600px){
+  .shell{padding:16px 12px 48px}
+  .cover{padding:20px}
+  .report-body{padding:20px}
+  .meta-grid{grid-template-columns:1fr}
+  .meta-v{border-left:none}
+}
+</style>
+</head>
+<body>
+<div class="shell">
+
+  <div class="print-bar">
+    <span class="print-label">Generated {{ generated_at }} · {{ pi_name }}</span>
+    <button class="print-btn" onclick="window.print()">Print / Save PDF</button>
+  </div>
+
+  <div class="cover">
+    <div class="cover-sub">Noise Assessment Report</div>
+    <div class="cover-title">Sound Level Survey · {{ date }}</div>
+    <div class="cover-meta">
+      {% set loc = [sess.loc, sess.post] | select | list %}
+      <div class="cover-field">
+        <span class="lbl">Location</span>
+        <span class="val">{{ loc | join(', ') if loc else 'Not recorded' }}</span>
+      </div>
+      <div class="cover-field">
+        <span class="lbl">Recorded by</span>
+        <span class="val">{{ sess.name or 'Not recorded' }}</span>
+      </div>
+      <div class="cover-field">
+        <span class="lbl">Instrument</span>
+        <span class="val">Norsonic NOR140 · Class 1 (IEC 61672)</span>
+      </div>
+      <div class="cover-field">
+        <span class="lbl">Runs</span>
+        <span class="val">{{ run_rows | length }}</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="report-body">
+
+    <!-- Executive summary -->
+    <div class="section">
+      <div class="section-title">Executive Summary</div>
+      <div class="prose">{{ sections.executive_summary | safe }}</div>
+    </div>
+
+    <!-- Session statistics -->
+    <div class="section">
+      <div class="section-title">Session Statistics</div>
+      <div class="stat-tiles">
+        <div class="stat-tile">
+          <span class="stat-lbl">LA<sub>eq</sub></span>
+          <span class="stat-val {% if session_leq and session_leq >= 85 %}warn{% endif %}">{{ session_leq }} dB</span>
+        </div>
+        <div class="stat-tile">
+          <span class="stat-lbl">LA10</span>
+          <span class="stat-val">{{ session_la10 }} dB</span>
+        </div>
+        <div class="stat-tile">
+          <span class="stat-lbl">LA90 (background)</span>
+          <span class="stat-val">{{ session_la90 }} dB</span>
+        </div>
+        <div class="stat-tile">
+          <span class="stat-lbl">LA<sub>max</sub></span>
+          <span class="stat-val {% if session_lmax and session_lmax >= 95 %}warn{% endif %}">{{ session_lmax }} dB</span>
+        </div>
+        <div class="stat-tile">
+          <span class="stat-lbl">LC<sub>peak</sub> max</span>
+          <span class="stat-val {% if session_pmx and session_pmx >= 135 %}warn{% endif %}">{{ session_pmx }} dB</span>
+        </div>
+        <div class="stat-tile">
+          <span class="stat-lbl">Total duration</span>
+          <span class="stat-val" style="font-size:15px">
+            {% set m = (total_duration_s // 60) %}
+            {% set s_ = total_duration_s % 60 %}
+            {{ m }}m {% if s_ %}{{ s_ }}s{% endif %}
+          </span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Measurement details -->
+    <div class="section">
+      <div class="section-title">Measurement Details</div>
+      <div class="meta-grid">
+        <div class="meta-row"><div class="meta-k">Date</div><div class="meta-v">{{ date }}</div></div>
+        <div class="meta-row">
+          <div class="meta-k">Location</div>
+          <div class="meta-v">{% set loc = [sess.loc, sess.post] | select | list %}{{ loc | join(', ') if loc else '—' }}</div>
+        </div>
+        {% if sess.lat and sess.lng %}
+        <div class="meta-row">
+          <div class="meta-k">GPS</div>
+          <div class="meta-v">{{ '%.5f' | format(sess.lat) }}, {{ '%.5f' | format(sess.lng) }}</div>
+        </div>
+        {% endif %}
+        <div class="meta-row"><div class="meta-k">Recorder</div><div class="meta-v">{{ sess.name or '—' }}</div></div>
+        <div class="meta-row"><div class="meta-k">Instrument</div><div class="meta-v">Norsonic NOR140, Class 1 Sound Level Meter (IEC 61672-1:2013)</div></div>
+        <div class="meta-row"><div class="meta-k">Parameters measured</div><div class="meta-v">LA<sub>eq,1s</sub>, LC<sub>peak</sub> · 1-second resolution</div></div>
+        {% if wx_str %}
+        <div class="meta-row"><div class="meta-k">Weather conditions</div><div class="meta-v">{{ wx_str }}</div></div>
+        {% endif %}
+        {% if sess.notes %}
+        <div class="meta-row"><div class="meta-k">Site notes</div><div class="meta-v">{{ sess.notes }}</div></div>
+        {% endif %}
+      </div>
+    </div>
+
+    <!-- Methodology -->
+    <div class="section">
+      <div class="section-title">Methodology</div>
+      <div class="prose">{{ sections.methodology | safe }}</div>
+    </div>
+
+    <!-- Per-run results -->
+    <div class="section">
+      <div class="section-title">Measurement Results</div>
+      <table>
+        <thead>
+          <tr>
+            <th>Run</th>
+            <th>Start</th>
+            <th>Duration</th>
+            <th>LA<sub>eq</sub></th>
+            <th>LA10</th>
+            <th>LA50</th>
+            <th>LA90</th>
+            <th>LA<sub>max</sub></th>
+            <th>LC<sub>peak</sub></th>
+            <th>≥85dB</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for r in run_rows %}
+          <tr>
+            <td>{{ r.run }}</td>
+            <td>{{ r.start }}</td>
+            <td>
+              {% set m = (r.n // 60) %}{% set s_ = r.n % 60 %}
+              {{ m ~ 'm ' if m else '' }}{{ s_ ~ 's' if s_ else '' }}
+            </td>
+            <td class="{% if r.leq >= 85 %}td-hi{% endif %}">{{ r.leq }}</td>
+            <td>{{ r.la10 }}</td>
+            <td>{{ r.la50 }}</td>
+            <td>{{ r.la90 }}</td>
+            <td class="{% if r.lmax >= 95 %}td-hi{% endif %}">{{ r.lmax }}</td>
+            <td class="{% if r.pmx >= 135 %}td-hi{% endif %}">{{ r.pmx }}</td>
+            <td class="{% if r.pct85 > 25 %}td-hi{% elif r.pct85 < 5 %}td-ok{% endif %}">{{ r.pct85 }}%</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      <div style="font-size:11px;color:var(--ink3);margin-top:6px;font-family:var(--font-ui)">
+        All values in dB(A) except LC<sub>peak</sub> (dB(C)). LA90 = background level (exceeded 90% of time). LA10 = exceeded 10% of time. ≥85dB = proportion of measurement period at or above 85 dB(A).
+      </div>
+    </div>
+
+    <!-- Results narrative -->
+    <div class="section">
+      <div class="section-title">Results Interpretation</div>
+      <div class="prose">{{ sections.results_narrative | safe }}</div>
+    </div>
+
+    <!-- Compliance assessment -->
+    <div class="section">
+      <div class="section-title">Compliance Assessment</div>
+      <div class="prose">{{ sections.compliance | safe }}</div>
+    </div>
+
+    <!-- Conclusions -->
+    <div class="section">
+      <div class="section-title">Conclusions</div>
+      <div class="prose">{{ sections.conclusions | safe }}</div>
+    </div>
+
+    <!-- Recommendations -->
+    {% if sections.recommendations %}
+    <div class="section">
+      <div class="section-title">Recommendations</div>
+      <div class="prose">{{ sections.recommendations | safe }}</div>
+    </div>
+    {% endif %}
+
+    <div class="report-footer">
+      This report was produced using data from a Norsonic NOR140 Class 1 sound level meter (IEC 61672-1:2013).
+      Measurements represent conditions at the time and location recorded and may not reflect long-term average noise levels.
+      Analysis prepared on {{ generated_at }} using NOR140 Noise Monitor ({{ pi_name }}).
+      Reference standards: HSE Noise at Work Regulations 2005; BS 4142:2014+A1:2019; WHO Environmental Noise Guidelines 2018.
+      {% if usage_info %}
+      <br>API usage (claude-sonnet-5): {{ usage_info.input_tokens | int }} input + {{ usage_info.output_tokens | int }} output tokens ≈ ${{ '%.4f' | format(usage_info.cost_usd) }} (pricing approximate).
+      {% endif %}
+    </div>
+
+  </div><!-- /report-body -->
+</div><!-- /shell -->
+</body>
+</html>
