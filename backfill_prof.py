@@ -10,31 +10,20 @@ Usage:
     python3 backfill_prof.py /path/to/MEAS118.zip --dry-run
 """
 import json, os, re, struct, sys, zipfile, sqlite3
+from nor140_format import decode_value, FLOOR_DB, CAP_LAEQ, CAP_PEAK
 
 DB_PATH  = os.environ.get('NOISE_DB_PATH', '/home/flightdata/noise-meter/noise.db')
 _DATE_RE = re.compile(r'^\d{6}$')
 _PROJ_RE = re.compile(r'^PROJ', re.IGNORECASE)
 EXCLUDE  = {'000101'}
 
-_FLOOR_DB = 20.0
-_CAP_LAEQ = 130.0
-_CAP_PEAK = 145.0
-
-
-def _decode(raw):
-    return raw / 128.0 - 20.0
-
-
-def _clamp(v, lo, hi):
-    return max(lo, min(hi, v))
-
 
 def _read_prof(data):
-    """Return list of [LAFspl, LAeq, LAFmax, LAE, LApeak] per second."""
+    """Return list of 5 raw uint16 values per second (un-decoded)."""
     if len(data) < 13:
         return []
     return [
-        [_decode(struct.unpack_from('<H', data, off + i * 2)[0]) for i in range(5)]
+        [struct.unpack_from('<H', data, off + i * 2)[0] for i in range(5)]
         for off in range(3, len(data) - 9, 10)
     ]
 
@@ -122,11 +111,11 @@ def main():
             print(f'  PARSE FAIL {row["date"]}  {proj_folder}  (len={len(prof_data)})')
             continue
 
-        lafspl = [round(_clamp(r[0], _FLOOR_DB, _CAP_LAEQ), 1) for r in recs]
-        laeq   = [round(_clamp(r[1], _FLOOR_DB, _CAP_LAEQ), 1) for r in recs]
-        lafmax = [round(_clamp(r[2], _FLOOR_DB, _CAP_LAEQ), 1) for r in recs]
-        lae    = [round(_clamp(r[3], _FLOOR_DB, _CAP_LAEQ), 1) for r in recs]
-        lapeak = [round(_clamp(r[4], _FLOOR_DB, _CAP_PEAK),  1) for r in recs]
+        lafspl = [decode_value(r[0], digits=1, clamp_min=FLOOR_DB, clamp_max=CAP_LAEQ) for r in recs]
+        laeq   = [decode_value(r[1], digits=1, clamp_min=FLOOR_DB, clamp_max=CAP_LAEQ) for r in recs]
+        lafmax = [decode_value(r[2], digits=1, clamp_min=FLOOR_DB, clamp_max=CAP_LAEQ) for r in recs]
+        lae    = [decode_value(r[3], digits=1, clamp_min=FLOOR_DB, clamp_max=CAP_LAEQ) for r in recs]
+        lapeak = [decode_value(r[4], digits=1, clamp_min=FLOOR_DB, clamp_max=CAP_PEAK)  for r in recs]
 
         if dry_run:
             print(f'  WOULD UPDATE  {row["date"]}  {proj_folder}  n={len(recs)}')

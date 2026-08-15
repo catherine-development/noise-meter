@@ -553,6 +553,10 @@ def export_nor140(date, run_number, report_type):
     if run is None:
         return 'Run not found', 404
     serial = get_setting('instrument_serial', '')
+    if not run.get('spec_lfeq'):
+        return ('Spectral data not available for this session. '
+                'It was received via peer sync and has not been locally backfilled. '
+                'Re-run backfill_glob.py and backfill_prof.py on this Pi to enable xlsx export.', 409)
     if report_type == 'GLOBAL':
         data = build_global_xlsx(run, serial)
     else:

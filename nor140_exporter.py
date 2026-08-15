@@ -15,16 +15,7 @@ from datetime import datetime, timedelta
 
 from openpyxl import Workbook
 
-# 36 1/3-octave centre-frequency column labels, matching Nortfr exactly
-_FREQ_LABELS = [
-    '6.3 Hz', '8.0 Hz', '10 Hz', '12.5 Hz', '16 Hz', '20 Hz',
-    '25 Hz', '31.5 Hz', '40 Hz', '50 Hz', '63 Hz', '80 Hz',
-    '100 Hz', '125 Hz', '160 Hz', '200 Hz', '250 Hz', '315 Hz',
-    '400 Hz', '500 Hz', '630 Hz', '800 Hz',
-    '1.0 kHz', '1.25 kHz', '1.6 kHz', '2.0 kHz', '2.5 kHz', '3.15 kHz',
-    '4.0 kHz', '5.0 kHz', '6.3 kHz', '8.0 kHz', '10.0 kHz',
-    '12.5 kHz', '16.0 kHz', '20.0 kHz',
-]
+from nor140_format import FREQ_LABELS as _FREQ_LABELS
 
 # 18 spectral sheets: sheet index 0–17 (Nortfr order)
 _SPECTRAL_SHEETS = [
@@ -101,6 +92,15 @@ _PROF_SHEETS = [
     ('LAFmax',  'prof_lafmax_json'),
     ('LAeq',    'prof_laeq_json'),
     ('LAFspl',  'prof_lafspl_json'),
+]
+
+# Five spectral groups included in the GLOBAL Summary sheet (180 extra columns)
+_SUMMARY_SPECTRAL = [
+    ('Lfeq',   'spec_lfeq'),
+    ('LfFmax', 'spec_lffmax'),
+    ('LfFmin', 'spec_lffmin'),
+    ('LfE',    'spec_lfe'),
+    ('LfSmax', 'spec_lfsmax'),
 ]
 
 # Summary sheet scalar column order
@@ -246,16 +246,32 @@ def _write_global_summary(ws, run, trig_dt, duration_s):
     """Write GLOBAL Summary sheet.
 
     Structure (no standard header block):
-      Row 0: ['Period:', 'Time:', 'Duration:', None, None, scalar_headers...]
+      Row 0: ['Period:', 'Time:', 'Duration:', None, None,
+               <38 scalar headers>, <5 groups × 36 freq headers>]
       Row 1-2: blank
-      Row 3: [0, datetime, None, None, None, scalar_vals...]
+      Row 3: [0, datetime, None, None, None,
+               <38 scalar vals>, <5 groups × 36 band vals>]
+
+    Column count: 5 + 38 + 180 = 223, matching Nortfr GLOBAL Summary.
+    Note: spectral header prefix format (e.g. 'Lfeq 6.3 Hz') needs visual
+    verification against the Nortfr reference once available.
     """
     scalar_headers = [name for name, _ in _SUMMARY_SCALARS]
-    ws.append(['Period:', 'Time:', 'Duration:', None, None] + scalar_headers)
+    spec_headers = [
+        f'{group} {freq}'
+        for group, _ in _SUMMARY_SPECTRAL
+        for freq in _FREQ_LABELS
+    ]
+    ws.append(['Period:', 'Time:', 'Duration:', None, None] + scalar_headers + spec_headers)
     ws.append([])
     ws.append([])
     scalar_vals = [_rv(run.get(col)) for _, col in _SUMMARY_SCALARS]
-    ws.append([0, _fmt_dt(trig_dt), None, None, None] + scalar_vals)
+    spec_vals = [
+        _rv(band)
+        for _, col in _SUMMARY_SPECTRAL
+        for band in (json.loads(run[col]) if isinstance(run.get(col), str) else (run.get(col) or [None] * 36))
+    ]
+    ws.append([0, _fmt_dt(trig_dt), None, None, None] + scalar_vals + spec_vals)
 
 
 def _write_global_setup(ws, run, serial, trig_dt, duration_s):

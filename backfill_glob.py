@@ -21,6 +21,7 @@ Usage:
     python3 backfill_glob.py MEAS118.zip --dry-run
 """
 import json, os, re, struct, sys, zipfile, sqlite3
+from nor140_format import decode_value
 
 DB_PATH  = os.environ.get('NOISE_DB_PATH', '/home/flightdata/noise-meter/noise.db')
 _DATE_RE = re.compile(r'^\d{6}$')
@@ -77,10 +78,6 @@ _SPECTRAL_TABLES = [
 ]
 
 
-def _decode(raw):
-    return raw / 128.0 - 20.0
-
-
 def _bcd(b):
     return (b >> 4) * 10 + (b & 0xF)
 
@@ -97,7 +94,7 @@ def _glob_metrics(data):
     m = {}
     for key, off in _GLOB_SCALAR_OFFSETS.items():
         if off + 1 < len(data):
-            m[key] = round(_decode(struct.unpack_from('<H', data, off)[0]), 2)
+            m[key] = decode_value(struct.unpack_from('<H', data, off)[0], digits=2)
     return m if m else None
 
 
@@ -107,7 +104,7 @@ def _read_spectra(data):
     for col, offset in _SPECTRAL_TABLES:
         end = offset + _N_BANDS * 2
         if len(data) >= end:
-            bands = [round(_decode(struct.unpack_from('<H', data, offset + i * 2)[0]), 2)
+            bands = [decode_value(struct.unpack_from('<H', data, offset + i * 2)[0], digits=2)
                      for i in range(_N_BANDS)]
             out[col] = json.dumps(bands)
         else:
