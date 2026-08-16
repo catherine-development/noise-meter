@@ -26,6 +26,7 @@ FILES=(
     noise_db.py
     reports_db.py
     assessments_db.py
+    sync_db.py
     noise_parser.py
     nor140_format.py
     nor140_exporter.py

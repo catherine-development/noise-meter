@@ -19,7 +19,8 @@ if _env_file.exists():
                 k, _, v = line.partition('=')
                 os.environ.setdefault(k.strip(), v.strip().strip("'\""))
 
-from noise_db import init_db, import_sessions, get_last_sync_time, update_last_sync_time
+from noise_db import init_db, import_sessions
+from sync_db import get_last_sync_time, update_last_sync_time
 
 PEER_URL  = os.environ.get('PEER_URL', '')
 PI_NAME   = os.environ.get('PI_NAME', 'Pi')

@@ -29,14 +29,15 @@ from flask import (Flask, render_template, request, jsonify, redirect,
                    url_for, abort, flash, session as flask_session, make_response)
 
 from noise_db import (init_db, import_sessions, get_all_sessions_json,
-                      get_import_log, get_sessions_since, get_existing_dates, get_existing_run_starts,
+                      get_sessions_since, get_existing_dates, get_existing_run_starts,
                       get_all_sessions_list, update_session_metadata, delete_session,
                       save_weather, get_weather,
                       update_run_location_tag, purge_sessions_before,
-                      get_full_sync_payload, apply_full_sync, apply_sync_event,
                       get_sessions_export_format,
                       get_setting, set_setting,
                       get_full_run_row, get_session_prof_lafspl)
+from sync_db import (get_import_log, get_full_sync_payload,
+                     apply_full_sync, apply_sync_event)
 from assessments_db import (create_assessment, list_assessments, get_assessment,
                             update_assessment, delete_assessment,
                             add_assessment_location, get_assessment_location,
