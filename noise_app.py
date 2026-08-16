@@ -47,7 +47,7 @@ from noise_db import (init_db, import_sessions, get_all_sessions_json,
                       get_assessment_runs_by_pairs,
                       get_sessions_export_format,
                       get_setting, set_setting,
-                      get_full_run_row)
+                      get_full_run_row, get_session_prof_laeq)
 from noise_parser import parse_zip, parse_files
 
 # Shared auth module from flight tracker
@@ -298,6 +298,7 @@ def api_data():
 
 
 @app.route('/api/sync')
+@require_api_key
 def api_sync():
     since = request.args.get('since', '1970-01-01T00:00:00')
     sessions = get_sessions_since(since)
@@ -774,14 +775,18 @@ def _build_session_data_block(sess, run_rows, all_laeq, total_duration_s):
         ), 1)
     else:
         session_leq = _energy_avg_db(all_laeq) if all_laeq else None
-    # LA10/LA90: duration-weighted avg of per-run GLOB values where available,
-    # else fall back to PROF-expanded percentiles (imprecise but ordered correctly).
-    run_la90s = [r['la90'] for r in run_rows if r.get('la90') is not None]
-    run_la10s = [r['la10'] for r in run_rows if r.get('la10') is not None]
-    session_la90 = round(sum(run_la90s) / len(run_la90s), 1) if run_la90s else (
-        _percentile(sorted(all_laeq), 10) if all_laeq else None)
-    session_la10 = round(sum(run_la10s) / len(run_la10s), 1) if run_la10s else (
-        _percentile(sorted(all_laeq), 90) if all_laeq else None)
+    # LA10/LA90: true percentile of every run's pooled 1-second LAeq samples —
+    # not an average of each run's own percentile, since percentiles don't
+    # compose linearly across sub-samples of different sizes. Falls back to
+    # PROF-expanded percentiles only for older sessions without full 1s data.
+    pooled_laeq = get_session_prof_laeq(sess['d'], [r['run'] for r in run_rows])
+    if pooled_laeq:
+        s = sorted(pooled_laeq)
+        session_la90 = _percentile(s, 10)
+        session_la10 = _percentile(s, 90)
+    else:
+        session_la90 = _percentile(sorted(all_laeq), 10) if all_laeq else None
+        session_la10 = _percentile(sorted(all_laeq), 90) if all_laeq else None
     run_lmaxs = [r['lmax'] for r in run_rows if r.get('lmax') is not None]
     session_lmax = max(run_lmaxs) if run_lmaxs else (max(all_laeq) if all_laeq else None)
     session_pmx  = max((r.get('pmx', 0) or 0 for r in run_rows), default=None)

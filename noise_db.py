@@ -10,6 +10,7 @@ DB_PATH = os.environ.get('NOISE_DB_PATH', '/home/flightdata/noise-meter/noise.db
 def get_db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
+    conn.execute('PRAGMA foreign_keys = ON')
     return conn
 
 
@@ -305,7 +306,7 @@ def import_sessions(sessions_data, metadata=None):
                 '   spec_lff_l50, spec_lff_l90, spec_lff_l95, spec_lff_l99, '
                 '   prof_lafspl_json, prof_laeq_json, prof_lafmax_json, '
                 '   prof_lae_json, prof_lapeak_json) '
-                'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) '
+                'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) '
                 'ON CONFLICT(session_id, run_number) DO UPDATE SET '
                 '  start_time=excluded.start_time, n_samples=excluded.n_samples, '
                 '  step=excluded.step, avg_laeq=excluded.avg_laeq, '
@@ -467,6 +468,7 @@ def _run_to_dict(r, full=False):
         'laieq':  r['laieq'],  'lcieq':  r['lcieq'],
         'laimax': r['laimax'], 'lcimax': r['lcimax'], 'laimin': r['laimin'], 'lcimin': r['lcimin'],
         'laie':   r['laie'],   'lcie':   r['lcie'],
+        'lapeak': r['lapeak'], 'lcpeak': r['lcpeak'],
         'la_l01': r['la_l01'], 'la_l1':  r['la_l1'],  'la_l5':  r['la_l5'],
         'la_l10': r['la_l10'], 'la_l50': r['la_l50'], 'la_l90': r['la_l90'],
         'la_l95': r['la_l95'], 'la_l99': r['la_l99'],
@@ -758,6 +760,38 @@ def get_full_run_row(date, run_number):
     return result
 
 
+def get_session_prof_laeq(date, run_numbers=None):
+    """Return the pooled list of 1-second LAeq values across the given runs
+    (or all runs, if run_numbers is None) of a session.
+
+    Used for computing a true LA10/LA90 percentile of the combined measurement
+    distribution when reporting across multiple runs — pooling actual samples
+    is correct where averaging each run's own percentile is not (percentiles
+    don't compose linearly across sub-samples of different sizes).
+    """
+    conn = get_db()
+    sess = conn.execute('SELECT id FROM sessions WHERE date=?', (date,)).fetchone()
+    if not sess:
+        conn.close()
+        return []
+    if run_numbers:
+        ph = ','.join('?' * len(run_numbers))
+        rows = conn.execute(
+            f'SELECT prof_laeq_json FROM runs WHERE session_id=? AND run_number IN ({ph})',
+            (sess['id'], *run_numbers)
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            'SELECT prof_laeq_json FROM runs WHERE session_id=?', (sess['id'],)
+        ).fetchall()
+    conn.close()
+    pooled = []
+    for r in rows:
+        if r['prof_laeq_json']:
+            pooled.extend(json.loads(r['prof_laeq_json']))
+    return pooled
+
+
 def update_run_location_tag(date, run_number, tag):
     conn = get_db()
     conn.execute(
@@ -793,11 +827,10 @@ def get_sessions_export_format(dates=None):
             'SELECT * FROM runs WHERE session_id=? ORDER BY run_number', (sess['id'],)
         ).fetchall()
         projects = [_run_to_dict(r, full=True) for r in runs]
-        laeqs = [p['avg'] for p in projects if p['avg'] is not None]
         result.append({
             'd': sess['date'],
-            'avg': round(sum(laeqs) / len(laeqs), 1) if laeqs else 0,
-            'mx': max(laeqs) if laeqs else 0,
+            'avg': sess['avg_laeq'],
+            'mx': sess['max_laeq'],
             'projects': projects,
         })
     conn.close()

@@ -25,6 +25,10 @@ FILES=(
     noise_app.py
     noise_db.py
     noise_parser.py
+    nor140_format.py
+    nor140_exporter.py
+    backfill_glob.py
+    backfill_prof.py
     sync_peer.py
     requirements.txt
     setup.sh
@@ -61,6 +65,17 @@ deploy_to() {
         echo "  Running setup.sh on $PI..."
         ssh "$HOST" "cd $REMOTE_DIR && bash setup.sh --pi $PI"
     else
+        # Gladys uses the flight-tracker's venv; Catherine uses system Python.
+        # Always reconcile dependencies on every deploy, not just --setup, so
+        # a package added to requirements.txt can never silently go missing
+        # on one Pi while present on the other.
+        if [ "$PI" = "Gladys" ]; then
+            PIP="/home/flightdata/flightdata/venv/bin/pip"
+        else
+            PIP="pip3"
+        fi
+        echo "  Syncing dependencies..."
+        ssh "$HOST" "$PIP install -r $REMOTE_DIR/requirements.txt --quiet 2>/dev/null || $PIP install --break-system-packages -r $REMOTE_DIR/requirements.txt --quiet"
         echo "  Restarting noise-app service..."
         ssh "$HOST" "sudo systemctl restart noise-app"
         ssh "$HOST" "sudo systemctl status noise-app --no-pager | head -5"

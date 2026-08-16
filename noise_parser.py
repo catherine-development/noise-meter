@@ -150,14 +150,14 @@ def _parse_session_files(glob_data, prof_data):
     if not recs:
         return date, None
 
+    if max(r[1] for r in recs) > 140:  # corrupted record — check before clamping
+        return date, None
+
     lafspl_raw = [_clamp(r[0], FLOOR_DB, CAP_LAEQ) for r in recs]
     laeq_raw   = [_clamp(r[1], FLOOR_DB, CAP_LAEQ) for r in recs]
     lafmax_raw = [_clamp(r[2], FLOOR_DB, CAP_LAEQ) for r in recs]
     lae_raw    = [_clamp(r[3], FLOOR_DB, CAP_LAEQ) for r in recs]
     lapeak_raw = [_clamp(r[4], FLOOR_DB, CAP_PEAK)  for r in recs]
-
-    if max(laeq_raw) > 140:  # corrupted record
-        return date, None
 
     n      = len(recs)
     step   = 1 if n <= 120 else 2 if n <= 300 else 5 if n <= 900 else 10

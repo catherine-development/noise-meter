@@ -56,9 +56,10 @@ fi
 
 echo "Python: $PYTHON"
 
-# Install Flask (likely already present)
+# Install all app dependencies from requirements.txt
 echo "Checking dependencies..."
-$PIP install flask --quiet 2>/dev/null || $PIP install --break-system-packages flask --quiet
+$PIP install -r "$SCRIPT_DIR/requirements.txt" --quiet 2>/dev/null || \
+    $PIP install --break-system-packages -r "$SCRIPT_DIR/requirements.txt" --quiet
 
 # Install systemd service
 SERVICE_FILE="/etc/systemd/system/noise-app.service"

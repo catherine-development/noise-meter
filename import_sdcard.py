@@ -8,131 +8,64 @@ Usage:
   python3 import_sdcard.py --output noise_data.json # save JSON file
   python3 import_sdcard.py --push https://noise.ives.org.uk  # push to Pi
   python3 import_sdcard.py --push https://... --since 2026-08-01  # only new sessions
+
+Parsing is delegated entirely to noise_parser.parse_files() — the same
+canonical, Nortfr-verified decoder used for web uploads and the Pi backfill
+scripts — so SD-card imports carry full spectral/1-second-profile fidelity
+and never drift out of sync with the rest of the app's NOR140 format logic.
 """
 
-import struct
 import os
 import json
-import math
 import sys
 import argparse
 import urllib.request
 import urllib.error
-from datetime import datetime
+
+from noise_parser import parse_files
 
 SD_ROOT    = os.environ.get('SD_ROOT', '/Volumes/NO LABEL/MEAS118')
 IMPORT_KEY = os.environ.get('IMPORT_API_KEY', '')
-
-CAP_LAEQ   = 130
-CAP_PEAK   = 160
 EXCLUDE_DIRS = {'000101'}
 
 
-def bcd(b):
-    return (b >> 4) * 10 + (b & 0xF)
-
-
-def read_glob(path):
-    with open(path, 'rb') as f:
-        raw = f.read()
-    o = 0x19
-    yy, mo, dd, hh, mm, ss = (bcd(raw[o+i]) for i in range(6))
-    return f"{2000+yy:04d}-{mo:02d}-{dd:02d}", f"{hh:02d}:{mm:02d}:{ss:02d}"
-
-
-def read_prof(path):
-    with open(path, 'rb') as f:
-        raw = f.read()
-    if len(raw) < 13:
-        return []
-    return [
-        [struct.unpack_from('<H', raw, off + i * 2)[0] / 100 for i in range(5)]
-        for off in range(3, len(raw) - 9, 10)
-    ]
-
-
-def clamp(v, lo, hi):
-    return max(lo, min(hi, v))
-
-
-def downsample(arr, step):
-    return [max(arr[i:i + step]) for i in range(0, len(arr), step)]
-
-
-def energy_avg(values):
-    return 10 * math.log10(sum(10 ** (v / 10) for v in values) / len(values))
-
-
-def parse_session(sess_dir):
-    part_dir = os.path.join(sess_dir, 'PART0000')
-    if not os.path.isdir(part_dir):
-        return None
-
-    projects = []
-    for pname in sorted(os.listdir(part_dir)):
-        pdir = os.path.join(part_dir, pname)
-        if not os.path.isdir(pdir):
-            continue
-        gfiles = sorted(f for f in os.listdir(pdir) if f.startswith('GLOB'))
-        pfiles = sorted(f for f in os.listdir(pdir) if f.startswith('PROF'))
-        if not gfiles or not pfiles:
-            continue
-
-        date, start = read_glob(os.path.join(pdir, gfiles[0]))
-        recs = read_prof(os.path.join(pdir, pfiles[0]))
-        if not recs:
-            continue
-
-        laeq_raw   = [clamp(r[0], 30, CAP_LAEQ) for r in recs]
-        lcpeak_raw = [clamp(r[4], 30, CAP_PEAK)  for r in recs]
-        n    = len(recs)
-        step = 1 if n <= 120 else 2 if n <= 300 else 5 if n <= 900 else 10
-
-        # Sanity check — skip corrupted sessions
-        if max(laeq_raw) > 200:
-            continue
-
-        leq = round(energy_avg(laeq_raw), 2)
-        projects.append({
-            'start':  start,
-            'n':      n,
-            'step':   step,
-            'avg':    leq,
-            'mn':     round(min(laeq_raw), 1),
-            'mx':     round(max(laeq_raw), 1),
-            'pmx':    round(max(lcpeak_raw), 1),
-            'laeq':   [round(v, 1) for v in downsample(laeq_raw,   step)],
-            'lcpeak': [round(v, 1) for v in downsample(lcpeak_raw, step)],
-        })
-    return projects or None
-
-
-def parse_all(since=None):
-    if not os.path.isdir(SD_ROOT):
-        print(f"ERROR: SD card not found at {SD_ROOT}", file=sys.stderr)
-        sys.exit(1)
-
-    sessions = []
-    for dname in sorted(os.listdir(SD_ROOT)):
+def _collect_files(sd_root, since=None):
+    """Walk the SD card tree and collect (relative_path, bytes) for every
+    GLOB/PROF file, in the layout noise_parser.parse_files() expects:
+    YYMMDD/PART0000/PROJnnnn/{GLOB,PROF}nnnn.DAT
+    """
+    pairs = []
+    for dname in sorted(os.listdir(sd_root)):
         if dname in EXCLUDE_DIRS or not dname.isdigit() or len(dname) != 6:
             continue
         yy, mo, dd = int(dname[:2]), int(dname[2:4]), int(dname[4:6])
         date_str = f"20{yy:02d}-{mo:02d}-{dd:02d}"
         if since and date_str < since:
             continue
-
-        projects = parse_session(os.path.join(SD_ROOT, dname))
-        if not projects:
+        part_dir = os.path.join(sd_root, dname, 'PART0000')
+        if not os.path.isdir(part_dir):
             continue
+        for pname in sorted(os.listdir(part_dir)):
+            pdir = os.path.join(part_dir, pname)
+            if not os.path.isdir(pdir):
+                continue
+            for fname in sorted(os.listdir(pdir)):
+                up = fname.upper()
+                if up.startswith('GLOB') or up.startswith('PROF'):
+                    with open(os.path.join(pdir, fname), 'rb') as f:
+                        pairs.append((f'{dname}/PART0000/{pname}/{fname}', f.read()))
+    return pairs
 
-        avg = round(energy_avg([p['avg'] for p in projects]), 2)
-        sessions.append({
-            'd':        date_str,
-            'avg':      avg,
-            'mx':       round(max(p['mx'] for p in projects), 1),
-            'projects': projects,
-        })
-    return sessions
+
+def parse_all(sd_root=None, since=None):
+    root = sd_root or SD_ROOT
+    if not os.path.isdir(root):
+        print(f"ERROR: SD card not found at {root}", file=sys.stderr)
+        sys.exit(1)
+    pairs = _collect_files(root, since=since)
+    if not pairs:
+        return []
+    return parse_files(pairs)
 
 
 def latest_date_on_pi(url):
@@ -174,13 +107,10 @@ def main():
     parser.add_argument('--sd-root', help='SD card root (default: /Volumes/NO LABEL/MEAS118)')
     args = parser.parse_args()
 
-    if args.sd_root:
-        global SD_ROOT
-        SD_ROOT = args.sd_root
-
+    sd_root = args.sd_root or SD_ROOT
     since = args.since
-    print(f"Reading SD card from {SD_ROOT}" + (f" (since {since})" if since else ""))
-    sessions = parse_all(since=since)
+    print(f"Reading SD card from {sd_root}" + (f" (since {since})" if since else ""))
+    sessions = parse_all(sd_root=sd_root, since=since)
 
     if not sessions:
         print("No sessions found.")
