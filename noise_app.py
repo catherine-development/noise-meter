@@ -7,23 +7,14 @@ import csv
 import io
 import math
 import os
-import sys
 import json
-import functools
 import urllib.request
-import urllib.error
 import threading
-from datetime import timedelta, datetime
+from datetime import timedelta
 
-_env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env')
-if os.path.exists(_env_path):
-    with open(_env_path) as _f:
-        for _line in _f:
-            _line = _line.strip()
-            if _line and not _line.startswith('#') and '=' in _line:
-                _k, _v = _line.split('=', 1)
-                if _k.strip() not in os.environ:
-                    os.environ[_k.strip()] = _v.strip().strip("'\"")
+# Imported before noise_db on purpose: importing config is what loads .env, and
+# noise_db reads NOISE_DB_PATH at module scope.
+from config import PI_NAME, IMPORT_KEY, UPLOAD_PASS
 
 from flask import (Flask, render_template, request, jsonify, redirect,
                    url_for, abort, flash, session as flask_session, make_response)
@@ -51,27 +42,20 @@ from reports_db import (get_report_templates, get_report_template, save_report_t
                         save_generated_report, get_generated_reports,
                         get_generated_report, delete_generated_report)
 from noise_parser import parse_zip, parse_files
+from webauth import (AUTH_AVAILABLE, login_required, require_api_key,
+                     login_or_api_key, check_upload_auth)
+from peer_client import push_to_peer, sync_event_to_peer, startup_sync_from_peer
 
-# Shared auth module from flight tracker
-sys.path.insert(0, '/home/flightdata/flightdata')
-try:
+if AUTH_AVAILABLE:
+    # webauth put the flight tracker's directory on sys.path when it imported
+    # login_required; these are only needed by the /login route below.
     from auth import (is_authorised_user, generate_otp, verify_otp,
                       send_otp_email, send_otp_sms, get_user_phone,
-                      activate_user, login_required)
-    AUTH_AVAILABLE = True
-except ImportError:
-    AUTH_AVAILABLE = False
-    def login_required(f):
-        return f
+                      activate_user)
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', os.urandom(24))
 app.permanent_session_lifetime = timedelta(days=7)
-
-IMPORT_KEY = os.environ.get('IMPORT_API_KEY', '')
-UPLOAD_PASS = os.environ.get('UPLOAD_PASSWORD', '')
-PI_NAME    = os.environ.get('PI_NAME', 'Pi')
-PEER_URL   = os.environ.get('PEER_URL', '')
 
 
 def _fetch_weather_for_session(date, lat, lng):
@@ -127,113 +111,6 @@ def _auto_fetch_weather(sessions):
             print(f"Weather fetched for {date}")
         except Exception as e:
             print(f"Weather fetch failed for {date}: {e}")
-
-
-def _push_to_peer(sessions):
-    """Push sessions to peer Pi in a background thread (best-effort)."""
-    if not PEER_URL or not sessions:
-        return
-
-    def _do_push():
-        payload = json.dumps({'sessions': sessions}, separators=(',', ':')).encode()
-        req = urllib.request.Request(
-            PEER_URL.rstrip('/') + '/import',
-            data=payload,
-            headers={'Content-Type': 'application/json',
-                     'X-Import-Key': IMPORT_KEY,
-                     'User-Agent': _PEER_UA},
-            method='POST',
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=20) as resp:
-                print(f"Peer sync: {resp.read().decode()}")
-        except Exception as e:
-            print(f"Peer sync failed: {e}")
-
-    threading.Thread(target=_do_push, daemon=True).start()
-
-
-_PEER_UA = 'noise-meter/1.0'
-
-def _sync_event_to_peer(entity, action, data):
-    """Push a single mutation to the peer Pi. Fire-and-forget."""
-    if not PEER_URL or not IMPORT_KEY:
-        return
-    def _do():
-        try:
-            payload = json.dumps({'entity': entity, 'action': action, 'data': data},
-                                 default=str).encode()
-            req = urllib.request.Request(
-                PEER_URL.rstrip('/') + '/api/peer-sync',
-                data=payload,
-                headers={'Content-Type': 'application/json',
-                         'X-Import-Key': IMPORT_KEY,
-                         'User-Agent': _PEER_UA},
-                method='POST',
-            )
-            urllib.request.urlopen(req, timeout=10)
-        except Exception as e:
-            print(f'Peer sync ({entity}/{action}) failed: {e}', flush=True)
-    threading.Thread(target=_do, daemon=True).start()
-
-
-def _startup_sync_from_peer():
-    """On startup, pull full state from peer and apply it (catches up on offline period)."""
-    if not PEER_URL or not IMPORT_KEY:
-        return
-    def _do():
-        import time
-        time.sleep(8)  # let both Pis finish starting before attempting peer connection
-        try:
-            req = urllib.request.Request(
-                PEER_URL.rstrip('/') + '/api/peer-sync-full',
-                headers={'X-Import-Key': IMPORT_KEY, 'User-Agent': _PEER_UA},
-                method='GET',
-            )
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                data = json.loads(resp.read())
-            apply_full_sync(data)
-            print('Startup peer sync: applied full payload from peer', flush=True)
-        except Exception as e:
-            print(f'Startup peer sync failed: {e}', flush=True)
-    threading.Thread(target=_do, daemon=True).start()
-
-
-def require_api_key(f):
-    @functools.wraps(f)
-    def decorated(*args, **kwargs):
-        key = (request.headers.get('X-Import-Key') or
-               request.form.get('api_key', '') or
-               request.args.get('api_key', ''))
-        if not IMPORT_KEY or key != IMPORT_KEY:
-            abort(403)
-        return f(*args, **kwargs)
-    return decorated
-
-
-def login_or_api_key(f):
-    """Allow either a valid browser session or a valid X-Import-Key header —
-    for endpoints normal logged-in page JS calls, that also need to be
-    reachable non-interactively (e.g. import_sdcard.py checking what's
-    already on a Pi before pushing new sessions)."""
-    @functools.wraps(f)
-    def decorated(*args, **kwargs):
-        key = (request.headers.get('X-Import-Key') or
-               request.form.get('api_key', '') or
-               request.args.get('api_key', ''))
-        if IMPORT_KEY and key == IMPORT_KEY:
-            return f(*args, **kwargs)
-        return login_required(f)(*args, **kwargs)
-    return decorated
-
-
-def check_upload_auth():
-    """Check upload password (from form or header). Returns True if authorised."""
-    if not UPLOAD_PASS:
-        return True  # no password set — open
-    provided = (request.form.get('upload_password', '') or
-                request.headers.get('X-Upload-Password', ''))
-    return provided == UPLOAD_PASS
 
 
 # ── Auth routes ───────────────────────────────────────────────────────────────
@@ -428,7 +305,7 @@ def do_upload():
     import_sessions(new_sessions, metadata=metadata)
 
     # Push to peer Pi and fetch weather in background
-    _push_to_peer(new_sessions)
+    push_to_peer(new_sessions)
     threading.Thread(target=_auto_fetch_weather, args=(new_sessions,), daemon=True).start()
 
     msg = f'Added {len(new_sessions)} new session(s)'
@@ -546,7 +423,7 @@ def edit_session(date):
         notes          = request.form.get('notes', '').strip(),
     )
     update_session_metadata(date, **meta)
-    _sync_event_to_peer('session_meta', 'upsert', {'date': date, **meta})
+    sync_event_to_peer('session_meta', 'upsert', {'date': date, **meta})
     if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
         return jsonify({'status': 'ok', 'date': date})
     flash(f'Session {date} updated.', 'success')
@@ -558,7 +435,7 @@ def edit_session(date):
 def edit_run_tag(date, run_number):
     tag = (request.json or {}).get('tag', '').strip().upper()
     update_run_location_tag(date, run_number, tag)
-    _sync_event_to_peer('run_tag', 'upsert', {'session_date': date, 'run_number': run_number, 'location_tag': tag or None})
+    sync_event_to_peer('run_tag', 'upsert', {'session_date': date, 'run_number': run_number, 'location_tag': tag or None})
     return jsonify({'status': 'ok', 'tag': tag or None})
 
 
@@ -664,7 +541,7 @@ def admin_push_to_peer():
     sessions = get_sessions_export_format(dates=dates)
     if not sessions:
         return jsonify({'error': 'no matching sessions found'}), 404
-    _push_to_peer(sessions)
+    push_to_peer(sessions)
     return jsonify({'pushed': len(sessions), 'dates': [s['d'] for s in sessions]})
 
 
@@ -1152,7 +1029,7 @@ def api_create_assessment():
         client_ref=data.get('client_ref', ''),
         notes=data.get('notes', ''),
     )
-    _sync_event_to_peer('assessment', 'upsert', get_assessment(aid))
+    sync_event_to_peer('assessment', 'upsert', get_assessment(aid))
     return jsonify({'id': aid})
 
 
@@ -1182,7 +1059,7 @@ def api_update_assessment(aid):
         client_ref=data.get('client_ref', ''),
         notes=data.get('notes', ''),
     )
-    _sync_event_to_peer('assessment', 'upsert', get_assessment(aid))
+    sync_event_to_peer('assessment', 'upsert', get_assessment(aid))
     return jsonify({'status': 'ok'})
 
 
@@ -1190,7 +1067,7 @@ def api_update_assessment(aid):
 @login_required
 def api_delete_assessment(aid):
     delete_assessment(aid)
-    _sync_event_to_peer('assessment', 'delete', {'id': aid})
+    sync_event_to_peer('assessment', 'delete', {'id': aid})
     return jsonify({'status': 'ok'})
 
 
@@ -1206,7 +1083,7 @@ def api_add_location(aid):
         lng=data.get('lng'),
         notes=data.get('notes', ''),
     )
-    _sync_event_to_peer('assessment_location', 'upsert', get_assessment_location(loc_id))
+    sync_event_to_peer('assessment_location', 'upsert', get_assessment_location(loc_id))
     return jsonify({'id': loc_id})
 
 
@@ -1222,7 +1099,7 @@ def api_update_location(aid, loc_id):
         lng=data.get('lng'),
         notes=data.get('notes', ''),
     )
-    _sync_event_to_peer('assessment_location', 'upsert', get_assessment_location(loc_id))
+    sync_event_to_peer('assessment_location', 'upsert', get_assessment_location(loc_id))
     return jsonify({'status': 'ok'})
 
 
@@ -1230,7 +1107,7 @@ def api_update_location(aid, loc_id):
 @login_required
 def api_delete_location(aid, loc_id):
     delete_assessment_location(loc_id)
-    _sync_event_to_peer('assessment_location', 'delete', {'id': loc_id})
+    sync_event_to_peer('assessment_location', 'delete', {'id': loc_id})
     return jsonify({'status': 'ok'})
 
 
@@ -1243,7 +1120,7 @@ def api_assign_runs(aid):
     pairs = [(r['date'], r['run_number']) for r in runs]
     assign_runs(aid, location_id, pairs)
     for row in get_assessment_runs_by_pairs(aid, pairs):
-        _sync_event_to_peer('assessment_run', 'upsert', row)
+        sync_event_to_peer('assessment_run', 'upsert', row)
     return jsonify({'status': 'ok', 'assigned': len(pairs)})
 
 
@@ -1251,7 +1128,7 @@ def api_assign_runs(aid):
 @login_required
 def api_unassign_run(ar_id):
     unassign_run(ar_id)
-    _sync_event_to_peer('assessment_run', 'delete', {'id': ar_id})
+    sync_event_to_peer('assessment_run', 'delete', {'id': ar_id})
     return jsonify({'status': 'ok'})
 
 
@@ -1260,7 +1137,7 @@ def api_unassign_run(ar_id):
 def api_update_ar(ar_id):
     data = request.json or {}
     update_assessment_run(ar_id, data.get('conditions', ''), data.get('notes', ''))
-    _sync_event_to_peer('assessment_run', 'upsert', get_assessment_run(ar_id))
+    sync_event_to_peer('assessment_run', 'upsert', get_assessment_run(ar_id))
     return jsonify({'status': 'ok'})
 
 
@@ -1296,6 +1173,6 @@ def export_assessment_csv(aid):
 
 if __name__ == '__main__':
     init_db()
-    _startup_sync_from_peer()
+    startup_sync_from_peer()
     port = int(os.environ.get('PORT', 5001))
     app.run(host='0.0.0.0', port=port, debug=False, threaded=True)
