@@ -24,6 +24,7 @@ done
 FILES=(
     noise_app.py
     noise_db.py
+    reports_db.py
     noise_parser.py
     nor140_format.py
     nor140_exporter.py

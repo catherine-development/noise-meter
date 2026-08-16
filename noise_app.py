@@ -32,10 +32,6 @@ from noise_db import (init_db, import_sessions, get_all_sessions_json,
                       get_import_log, get_sessions_since, get_existing_dates, get_existing_run_starts,
                       get_all_sessions_list, update_session_metadata, delete_session,
                       save_weather, get_weather,
-                      get_report_templates, get_report_template, save_report_template,
-                      update_report_template, delete_report_template,
-                      save_generated_report, get_generated_reports,
-                      get_generated_report, delete_generated_report,
                       update_run_location_tag,
                       create_assessment, list_assessments, get_assessment, update_assessment,
                       delete_assessment, add_assessment_location, update_assessment_location,
@@ -48,6 +44,10 @@ from noise_db import (init_db, import_sessions, get_all_sessions_json,
                       get_sessions_export_format,
                       get_setting, set_setting,
                       get_full_run_row, get_session_prof_lafspl)
+from reports_db import (get_report_templates, get_report_template, save_report_template,
+                        update_report_template, delete_report_template,
+                        save_generated_report, get_generated_reports,
+                        get_generated_report, delete_generated_report)
 from noise_parser import parse_zip, parse_files
 
 # Shared auth module from flight tracker
