@@ -165,6 +165,15 @@ def _rv(value):
     return round_half_up(value, 1) if value is not None else None
 
 
+def _as_list(value):
+    """Coerce a spec_*/prof_* field to a list, accepting either a JSON string
+    (as stored in the DB) or an already-parsed list (as returned directly by
+    noise_parser, e.g. in a direct parse-to-export smoke test)."""
+    if isinstance(value, str):
+        return json.loads(value)
+    return value or []
+
+
 # ── Sheet writers ─────────────────────────────────────────────────────────────
 
 def _write_period_trigger_block(ws, n, duration_s, trig_dt, period_s=None):
@@ -213,7 +222,7 @@ def _write_spectral_sheet(ws, label, spec_json, trig_dt, duration_s):
     """
     _write_header(ws, 1, duration_s, trig_dt, label=label)
     ws.append(['Period:', 'Time:', None] + _FREQ_LABELS)
-    vals = json.loads(spec_json) if isinstance(spec_json, str) else (spec_json or [])
+    vals = _as_list(spec_json)
     ws.append([0, _fmt_dt(trig_dt), None] + [_rv(v) for v in vals])
 
 
@@ -237,7 +246,7 @@ def _write_prof_sheet(ws, label, prof_json, trig_dt):
     Row 8: ['Period:', 'Time:', None, label]
     Row 9+: [i, datetime_i, None, value_i]
     """
-    vals = json.loads(prof_json) if isinstance(prof_json, str) else (prof_json or [])
+    vals = _as_list(prof_json)
     n = len(vals)
     _write_header(ws, n, n, trig_dt, label=None, period_s=1)  # one period = 1 s
     ws.append(['Period:', 'Time:', None, label])
@@ -329,14 +338,14 @@ def _write_global_setup(ws, run, serial, trig_dt, duration_s):
 
 def _profile_n(run):
     prof_json = run.get('prof_laeq_json') or run.get('prof_lafspl_json')
-    return len(json.loads(prof_json)) if prof_json else (run.get('n_samples', 1) or 1)
+    return len(_as_list(prof_json)) if prof_json else (run.get('n_samples', 1) or 1)
 
 
 def _write_profile_summary(ws, run, trig_dt):
     """Write PROFILE Summary sheet: the full 1-second time series of all 5
     PROF channels side by side, in reverse sheet order (LAFspl, LAeq, LAFmax,
-    LAE, LApeak) — verified against the Nortfr reference, NOT the GLOBAL-style
-    38-scalar layout and NOT a single-row snapshot.
+    LAE, LApeak), followed by two blank rows and three NC/NR/RC room-acoustics
+    rating rows — verified against the Nortfr reference (908 rows total).
     """
     channels = list(reversed(_PROF_SHEETS))
     headers = [name for name, _ in channels]
@@ -346,14 +355,19 @@ def _write_profile_summary(ws, run, trig_dt):
     series = []
     n = 0
     for _, col in channels:
-        raw = run.get(col)
-        vals = json.loads(raw) if isinstance(raw, str) else (raw or [])
+        vals = _as_list(run.get(col))
         series.append(vals)
         n = max(n, len(vals))
     for i in range(n):
         t = trig_dt + timedelta(seconds=i)
         row_vals = [_rv(s[i]) if i < len(s) else None for s in series]
         ws.append([i, _fmt_dt(t), None, None, None] + row_vals)
+
+    ws.append([])
+    ws.append([])
+    ws.append(['NC', '-', 'dB'])
+    ws.append(['NR', '-', 'dB'])
+    ws.append(['RC II (-)', '-', 'dB'])
 
 
 def _write_profile_setup(ws, run, serial, trig_dt):
