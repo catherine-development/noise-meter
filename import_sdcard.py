@@ -83,7 +83,10 @@ def latest_date_on_pi(url, key=None):
         with urllib.request.urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read())
         sessions = data.get('sessions', [])
-        return sessions[-1]['d'] if sessions else None
+        # max(), not sessions[-1] or sessions[0] — don't couple to the API's
+        # current sort order (get_all_sessions_json() sorts descending, so
+        # sessions[-1] was silently returning the OLDEST date, not the latest).
+        return max(s['d'] for s in sessions) if sessions else None
     except Exception:
         return None
 
@@ -140,9 +143,12 @@ def main():
             print("ERROR: provide --key or set IMPORT_API_KEY env var", file=sys.stderr)
             sys.exit(1)
         for url in args.push:
-            # Auto-detect what's already on the Pi and skip those sessions
+            # Auto-detect what's already on the Pi and skip older sessions.
+            # >= not > : a same-day session may have gained new runs since
+            # the Pi's last push (e.g. two SD card imports on one day) —
+            # resending it is harmless since import_sessions() upserts.
             latest = latest_date_on_pi(url, key)
-            to_send = [s for s in sessions if latest is None or s['d'] > latest]
+            to_send = [s for s in sessions if latest is None or s['d'] >= latest]
             if not to_send:
                 print(f"\n{url}: already up to date (latest: {latest})")
                 continue
