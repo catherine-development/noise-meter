@@ -20,35 +20,13 @@ Usage:
     # Dry-run (print what would change, no writes):
     python3 backfill_glob.py MEAS118.zip --dry-run
 """
-import json, os, re, struct, sys, zipfile, sqlite3
-from nor140_format import decode_value
+import json, os, re, sys, zipfile, sqlite3
+from nor140_format import bcd, read_glob_scalars, read_glob_spectral_tables
 
 DB_PATH  = os.environ.get('NOISE_DB_PATH', '/home/flightdata/noise-meter/noise.db')
 _DATE_RE = re.compile(r'^\d{6}$')
 _PROJ_RE = re.compile(r'^PROJ', re.IGNORECASE)
 _EXCLUDE = {'000101'}
-
-# NOR140-B scalar metric offsets in the GLOB file (uint16 LE, decode = raw/128 - 20)
-_GLOB_SCALAR_OFFSETS = {
-    'laeq':   0x03cd, 'lceq':   0x03e7,
-    'lae':    0x03d1, 'lce':    0x03eb,
-    'laie':   0x03d3, 'lcie':   0x03ed,
-    'laieq':  0x03cf, 'lcieq':  0x03e9,
-    'lafmax': 0x03c1, 'lcfmax': 0x03db,
-    'lafmin': 0x03c7, 'lcfmin': 0x03e1,
-    'lasmax': 0x03c3, 'lcsmax': 0x03dd,
-    'lasmin': 0x03c9, 'lcsmin': 0x03e3,
-    'laimax': 0x03c5, 'lcimax': 0x03df,
-    'laimin': 0x03cb, 'lcimin': 0x03e5,
-    'la_l01': 0x0408, 'la_l1':  0x040a, 'la_l5':  0x040c,
-    'la_l10': 0x040e, 'la_l50': 0x0410, 'la_l90': 0x0412,
-    'la_l95': 0x0414, 'la_l99': 0x0416,
-    'lapeak': 0x03d5,
-    'lcpeak': 0x03ef,
-    'lc_l01': 0x0418, 'lc_l1':  0x041a, 'lc_l5':  0x041c,
-    'lc_l10': 0x041e, 'lc_l50': 0x0420, 'lc_l90': 0x0422,
-    'lc_l95': 0x0424, 'lc_l99': 0x0426,
-}
 
 # Columns to backfill (all added in the spectral tables migration, except laeq which
 # is used to correct avg_laeq where it was previously computed from PROF).
@@ -65,51 +43,24 @@ _SCALAR_COLS = [
     'lc_l10', 'lc_l50', 'lc_l90', 'lc_l95', 'lc_l99',
 ]
 
-# 18 Nortfr-labelled 1/3-octave spectral tables (36 bands each)
-_N_BANDS = 36
-_SPECTRAL_TABLES = [
-    ('spec_lfeq',    0x0428), ('spec_lffmax',  0x0470), ('spec_lffmin',  0x04b8),
-    ('spec_lfe',     0x0500), ('spec_lfsmax',  0x0548), ('spec_lfsmin',  0x0590),
-    ('spec_lfieq',   0x05d8), ('spec_lfimax',  0x0620), ('spec_lfimin',  0x0668),
-    ('spec_lfie',    0x06b0),
-    ('spec_lff_l01', 0x06f8), ('spec_lff_l1',  0x0764), ('spec_lff_l5',  0x07d0),
-    ('spec_lff_l10', 0x083c), ('spec_lff_l50', 0x08a8), ('spec_lff_l90', 0x0914),
-    ('spec_lff_l95', 0x0980), ('spec_lff_l99', 0x09ec),
-]
-
-
-def _bcd(b):
-    return (b >> 4) * 10 + (b & 0xF)
-
 
 def _glob_metrics(data):
     """Read manufacturer scalar metrics from GLOB binary. Returns dict or None."""
     try:
         o = 0x19
-        mo, dd = _bcd(data[o + 1]), _bcd(data[o + 2])
+        mo, dd = bcd(data[o + 1]), bcd(data[o + 2])
         if not (1 <= mo <= 12 and 1 <= dd <= 31):
             return None
     except (IndexError, ValueError):
         return None
-    m = {}
-    for key, off in _GLOB_SCALAR_OFFSETS.items():
-        if off + 1 < len(data):
-            m[key] = decode_value(struct.unpack_from('<H', data, off)[0], digits=2)
+    m = read_glob_scalars(data, digits=2)
     return m if m else None
 
 
 def _read_spectra(data):
     """Read all 18 spectral tables. Returns dict of col_name → JSON string (or None)."""
-    out = {}
-    for col, offset in _SPECTRAL_TABLES:
-        end = offset + _N_BANDS * 2
-        if len(data) >= end:
-            bands = [decode_value(struct.unpack_from('<H', data, offset + i * 2)[0], digits=2)
-                     for i in range(_N_BANDS)]
-            out[col] = json.dumps(bands)
-        else:
-            out[col] = None
-    return out
+    tables = read_glob_spectral_tables(data, digits=2)
+    return {col: (json.dumps(bands) if bands is not None else None) for col, bands in tables.items()}
 
 
 def _yymmdd(iso_date):

@@ -16,6 +16,7 @@ from datetime import datetime, timedelta
 from openpyxl import Workbook
 
 from nor140_format import FREQ_LABELS as _FREQ_LABELS
+from nor140_format import round_half_up
 
 # 18 spectral sheets: sheet index 0–17 (Nortfr order)
 _SPECTRAL_SHEETS = [
@@ -160,24 +161,21 @@ def _fmt_duration(seconds):
 
 
 def _rv(value):
-    """Round a dB value to 1 decimal, or return None."""
-    return round(value, 1) if value is not None else None
+    """Round a dB value to 1 decimal (half-up, matching instrument convention), or return None."""
+    return round_half_up(value, 1) if value is not None else None
 
 
 # ── Sheet writers ─────────────────────────────────────────────────────────────
 
-def _write_header(ws, n, duration_s, trig_dt, label=None, period_s=None):
-    """Write 8-row header block (rows 0-7).
+def _write_period_trigger_block(ws, n, duration_s, trig_dt, period_s=None):
+    """Write the 6 standard period/trigger/duration rows shared by every sheet type:
 
-    Row structure (value in col 1, format hint in col 2):
-      0  Period length       | period_dur | H:M:S.mS   (one period; = total for GLOBAL)
-      1  Total periods       | n
-      2  Before trigger      | 0
-      3  After trigger       | n
-      4  Trig time           | trig_hdr   | Y-Mo-D H:M:S.mS
-      5  Effective duration  | total_dur  | H:M:S.mS   (whole run)
-      6  (blank)
-      7  (blank) or [None, None, None, label] for spectral sheets
+      Period length       | period_dur | H:M:S.mS   (one period; = total for GLOBAL)
+      Total periods        | n
+      Before trigger        | 0
+      After trigger          | n
+      Trig time            | trig_hdr   | Y-Mo-D H:M:S.mS
+      Effective duration    | total_dur  | H:M:S.mS   (whole run)
 
     period_s: duration of one period in seconds (defaults to duration_s).
               Set to 1 for PROFILE sheets where each row = 1 second.
@@ -193,6 +191,12 @@ def _write_header(ws, n, duration_s, trig_dt, label=None, period_s=None):
     ws.append(['Number of periods after trigger', n])
     ws.append(['Trig time', trig_hdr, 'Y-Mo-D H:M:S.mS'])
     ws.append(['Measurement effective duration', total_dur, 'H:M:S.mS'])
+
+
+def _write_header(ws, n, duration_s, trig_dt, label=None, period_s=None):
+    """Write 8-row header block (rows 0-7): the period/trigger block plus a
+    blank row and a label row (or two blank rows if no label)."""
+    _write_period_trigger_block(ws, n, duration_s, trig_dt, period_s=period_s)
     ws.append([])
     if label is not None:
         ws.append([None, None, None, label])
@@ -243,94 +247,119 @@ def _write_prof_sheet(ws, label, prof_json, trig_dt):
 
 
 def _write_global_summary(ws, run, trig_dt, duration_s):
-    """Write GLOBAL Summary sheet.
+    """Write GLOBAL Summary sheet — verified cell-for-cell against the Nortfr
+    reference workbook (NOR140_6899108_260812_0009_GLOBAL.xlsx):
 
-    Structure (no standard header block):
-      Row 0: ['Period:', 'Time:', 'Duration:', None, None,
-               <38 scalar headers>, <5 groups × 36 freq headers>]
-      Row 1-2: blank
-      Row 3: [0, datetime, None, None, None,
-               <38 scalar vals>, <5 groups × 36 band vals>]
+      Row 1: ['Period:', 'Time:', 'Duration:', None, None, <38 scalar headers>,
+              <group label in the FIRST of its 36 cols, None for the other 35>] x5 groups
+      Row 2: blank
+      Row 3: blank under Period/Time/Duration/scalars, then <36 freq labels> x5 groups
+      Row 4: [0, datetime, None, None, None, <38 scalar vals>, <36 band vals> x5 groups]
+      Row 5-6: blank
+      Row 7-9: NC / NR / RC II room-acoustics ratings
 
-    Column count: 5 + 38 + 180 = 223, matching Nortfr GLOBAL Summary.
-    Note: spectral header prefix format (e.g. 'Lfeq 6.3 Hz') needs visual
-    verification against the Nortfr reference once available.
+    Column count: 5 + 38 + 180 = 223, matching Nortfr.
+
+    NC/NR/RC ratings (rows 7-9) are room-acoustics curve fits Nortfr computes
+    from the spectrum; this app doesn't implement that curve-fitting, and the
+    reference workbook itself shows '-' for all three on this (outdoor,
+    non-room) measurement, so that's what's written here. A genuinely
+    room-acoustics measurement would need real NC/NR/RC computation to match.
     """
     scalar_headers = [name for name, _ in _SUMMARY_SCALARS]
-    spec_headers = [
-        f'{group} {freq}'
-        for group, _ in _SUMMARY_SPECTRAL
-        for freq in _FREQ_LABELS
-    ]
-    ws.append(['Period:', 'Time:', 'Duration:', None, None] + scalar_headers + spec_headers)
+    row1 = ['Period:', 'Time:', 'Duration:', None, None] + scalar_headers
+    for group, _ in _SUMMARY_SPECTRAL:
+        row1.append(group)
+        row1.extend([None] * (len(_FREQ_LABELS) - 1))
+    ws.append(row1)
+
     ws.append([])
-    ws.append([])
+
+    row3 = [None] * (5 + len(_SUMMARY_SCALARS))
+    for _ in _SUMMARY_SPECTRAL:
+        row3.extend(_FREQ_LABELS)
+    ws.append(row3)
+
     scalar_vals = [_rv(run.get(col)) for _, col in _SUMMARY_SCALARS]
-    spec_vals = [
-        _rv(band)
-        for _, col in _SUMMARY_SPECTRAL
-        for band in (json.loads(run[col]) if isinstance(run.get(col), str) else (run.get(col) or [None] * 36))
-    ]
+    spec_vals = []
+    for _, col in _SUMMARY_SPECTRAL:
+        raw = run.get(col)
+        bands = json.loads(raw) if isinstance(raw, str) else (raw or [None] * len(_FREQ_LABELS))
+        spec_vals.extend(_rv(v) for v in bands)
     ws.append([0, _fmt_dt(trig_dt), None, None, None] + scalar_vals + spec_vals)
+
+    ws.append([])
+    ws.append([])
+    ws.append(['NC', '-', 'dB'])
+    ws.append(['NR', '-', 'dB'])
+    ws.append(['RC II (-)', '-', 'dB'])
+
+
+def _write_setup(ws, run, serial, report_type, trig_dt, n, duration_s, period_s=None):
+    """Write a Setup sheet (GLOBAL or PROFILE), matching Nortfr's 14-row layout:
+
+      (blank)
+      File version
+      Filename            e.g. NOR140_<serial>_<date>_<run>.NBF (NOR140_<serial>_<date>_<run>_<TYPE>)
+      Report type
+      Bandwidth
+      Frequency range
+      <6-row period/trigger block — same structure as every other sheet>
+      Full scale
+      Sensitivity
+    """
+    date_str = trig_dt.strftime('%y%m%d')
+    run_num = run.get('run_number', 1)
+    base = f'NOR140_{serial}_{date_str}_{run_num:04d}'
+    ws.append([])
+    ws.append(['File version', 'v1.0/6.1.1.51'])
+    ws.append(['Filename', f'{base}.NBF ({base}_{report_type})'])
+    ws.append(['Report type', report_type])
+    ws.append(['Bandwidth', '1/3 Octave'])
+    ws.append(['Frequency range', '6.3 Hz - 20.0 kHz'])
+    _write_period_trigger_block(ws, n, duration_s, trig_dt, period_s=period_s)
+    ws.append(['Full scale', 130, 'dB'])
+    ws.append(['Sensitivity', -26.9, 'dB'])
 
 
 def _write_global_setup(ws, run, serial, trig_dt, duration_s):
-    """Write GLOBAL Setup sheet."""
-    date_str = trig_dt.strftime('%y%m%d')
-    run_num = run.get('run_number', 1)
-    filename = f'NOR140_{serial}_{date_str}_{run_num:04d}.NBF'
-    end_dt = trig_dt + timedelta(seconds=duration_s)
-    dur_str = _fmt_duration(duration_s)
-    rows = [
-        ['File version', 'v1.0/6.1.1.51'],
-        ['Filename', f'{filename} ({_fmt_trig_header(trig_dt)} - {_fmt_trig_header(end_dt)})'],
-        ['Report type', 'GLOBAL'],
-        ['Bandwidth', '1/3 Octave'],
-        ['Frequency range', '6.3 Hz - 20.0 kHz'],
-        ['Period length', dur_str],
-        ['Total number of periods', 1],
-        [], [], [], [],
-        ['Full scale', 130, 'dB'],
-        ['Sensitivity', -26.9, 'dB'],
-    ]
-    for r in rows:
-        ws.append(r)
+    """Write GLOBAL Setup sheet (one period covering the whole run)."""
+    _write_setup(ws, run, serial, 'GLOBAL', trig_dt, n=1, duration_s=duration_s)
+
+
+def _profile_n(run):
+    prof_json = run.get('prof_laeq_json') or run.get('prof_lafspl_json')
+    return len(json.loads(prof_json)) if prof_json else (run.get('n_samples', 1) or 1)
 
 
 def _write_profile_summary(ws, run, trig_dt):
-    """Write PROFILE Summary sheet (same column structure as GLOBAL Summary)."""
-    prof_json = run.get('prof_laeq_json') or run.get('prof_lafspl_json')
-    n = len(json.loads(prof_json)) if prof_json else (run.get('n_samples', 1) or 1)
-    duration_s = n  # 1 s per measurement
-    scalar_headers = [name for name, _ in _SUMMARY_SCALARS]
-    ws.append(['Period:', 'Time:', 'Duration:', None, None] + scalar_headers)
+    """Write PROFILE Summary sheet: the full 1-second time series of all 5
+    PROF channels side by side, in reverse sheet order (LAFspl, LAeq, LAFmax,
+    LAE, LApeak) — verified against the Nortfr reference, NOT the GLOBAL-style
+    38-scalar layout and NOT a single-row snapshot.
+    """
+    channels = list(reversed(_PROF_SHEETS))
+    headers = [name for name, _ in channels]
+    ws.append(['Period:', 'Time:', 'Duration:', None, None] + headers)
     ws.append([])
     ws.append([])
-    scalar_vals = [_rv(run.get(col)) for _, col in _SUMMARY_SCALARS]
-    ws.append([0, _fmt_dt(trig_dt), None, None, None] + scalar_vals)
+    series = []
+    n = 0
+    for _, col in channels:
+        raw = run.get(col)
+        vals = json.loads(raw) if isinstance(raw, str) else (raw or [])
+        series.append(vals)
+        n = max(n, len(vals))
+    for i in range(n):
+        t = trig_dt + timedelta(seconds=i)
+        row_vals = [_rv(s[i]) if i < len(s) else None for s in series]
+        ws.append([i, _fmt_dt(t), None, None, None] + row_vals)
 
 
 def _write_profile_setup(ws, run, serial, trig_dt):
-    """Write PROFILE Setup sheet."""
-    prof_json = run.get('prof_laeq_json') or run.get('prof_lafspl_json')
-    n = len(json.loads(prof_json)) if prof_json else (run.get('n_samples', 1) or 1)
-    duration_s = n  # 1 s per measurement
-    date_str = trig_dt.strftime('%y%m%d')
-    run_num = run.get('run_number', 1)
-    filename = f'NOR140_{serial}_{date_str}_{run_num:04d}.NBF'
-    end_dt = trig_dt + timedelta(seconds=duration_s)
-    rows = [
-        ['File version', 'v1.0/6.1.1.51'],
-        ['Filename', f'{filename} ({_fmt_trig_header(trig_dt)} - {_fmt_trig_header(end_dt)})'],
-        ['Report type', 'PROFILE'],
-        ['Period length', _fmt_duration(1)],  # PROF data is always 1-second
-        ['Total number of periods', n],
-        [], [], [], [],
-        ['Full scale', 130, 'dB'],
-        ['Sensitivity', -26.9, 'dB'],
-    ]
-    for r in rows:
-        ws.append(r)
+    """Write PROFILE Setup sheet (one period per second, for the run's full duration)."""
+    n = _profile_n(run)
+    _write_setup(ws, run, serial, 'PROFILE', trig_dt, n=n, duration_s=n, period_s=1)
 
 
 # ── Public API ────────────────────────────────────────────────────────────────

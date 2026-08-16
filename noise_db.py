@@ -2,6 +2,8 @@ import os
 import json
 import sqlite3
 
+from nor140_format import SPECTRAL_TABLES
+
 DB_PATH = os.environ.get('NOISE_DB_PATH', '/home/flightdata/noise-meter/noise.db')
 
 
@@ -428,6 +430,58 @@ def _wx(row):
             'tn': row['temp_min'],   'tx': row['temp_max'], 'pr': row['precip']}
 
 
+_PROF_COLS = [
+    'prof_lafspl_json', 'prof_laeq_json', 'prof_lafmax_json',
+    'prof_lae_json', 'prof_lapeak_json',
+]
+
+
+def _run_to_dict(r, full=False):
+    """Build the per-run/project dict shared by get_all_sessions_json(),
+    get_sessions_since(), and get_sessions_export_format().
+
+    full=True adds the spec_*/prof_* JSON arrays needed to regenerate a
+    NOR140 xlsx export without local SD-card backfill — used for peer sync
+    and the NOR140 import/export format, but not the (lightweight) session
+    browser payload, which already has everything it needs for charts via
+    the *_profile fields.
+    """
+    d = {
+        'run_number': r['run_number'],
+        'source_file': r['source_file'],
+        'start':   r['start_time'],
+        'n':       r['n_samples'],
+        'step':    r['step'],
+        'avg':     r['avg_laeq'],
+        'mn':      r['min_laeq'],
+        'mx':      r['max_laeq'],
+        'pmx':     r['max_lcpeak'],
+        'pmxi':    r['max_laimax'],
+        'laeq_profile':   json.loads(r['laeq_json']) if r['laeq_json'] else [],
+        'lafmax_profile': json.loads(r['lafmax_json']) if r['lafmax_json'] else None,
+        'laimax_profile': json.loads(r['laimax_json']) if r['laimax_json'] else None,
+        'lcpeak_profile': json.loads(r['lcpeak_json']) if r['lcpeak_json'] else [],
+        'lceq':   r['lceq'],   'lae':    r['lae'],    'lce':    r['lce'],
+        'lafmax': r['lafmax'], 'lcfmax': r['lcfmax'], 'lafmin': r['lafmin'], 'lcfmin': r['lcfmin'],
+        'lasmax': r['lasmax'], 'lcsmax': r['lcsmax'], 'lasmin': r['lasmin'], 'lcsmin': r['lcsmin'],
+        'laieq':  r['laieq'],  'lcieq':  r['lcieq'],
+        'laimax': r['laimax'], 'lcimax': r['lcimax'], 'laimin': r['laimin'], 'lcimin': r['lcimin'],
+        'laie':   r['laie'],   'lcie':   r['lcie'],
+        'la_l01': r['la_l01'], 'la_l1':  r['la_l1'],  'la_l5':  r['la_l5'],
+        'la_l10': r['la_l10'], 'la_l50': r['la_l50'], 'la_l90': r['la_l90'],
+        'la_l95': r['la_l95'], 'la_l99': r['la_l99'],
+        'lc_l01': r['lc_l01'], 'lc_l1':  r['lc_l1'],  'lc_l5':  r['lc_l5'],
+        'lc_l10': r['lc_l10'], 'lc_l50': r['lc_l50'], 'lc_l90': r['lc_l90'],
+        'lc_l95': r['lc_l95'], 'lc_l99': r['lc_l99'],
+    }
+    if full:
+        for col, _ in SPECTRAL_TABLES:
+            d[col] = json.loads(r[col]) if r[col] else None
+        for col in _PROF_COLS:
+            d[col] = json.loads(r[col]) if r[col] else None
+    return d
+
+
 def get_all_sessions_json():
     conn = get_db()
     sessions = conn.execute(
@@ -468,28 +522,7 @@ def get_all_sessions_json():
             'wx':      _wx(sess),
             'assmnts': sess_assessments.get(sess['date'], []),
             'projects': [{
-                'start':   r['start_time'],
-                'n':       r['n_samples'],
-                'step':    r['step'],
-                'avg':     r['avg_laeq'],
-                'mn':      r['min_laeq'],
-                'mx':      r['max_laeq'],
-                'pmx':     r['max_lcpeak'],
-                'pmxi':    r['max_laimax'],
-                'laeq_profile':   json.loads(r['laeq_json']),
-                'lafmax_profile': json.loads(r['lafmax_json']) if r['lafmax_json'] else None,
-                'laimax_profile': json.loads(r['laimax_json']) if r['laimax_json'] else None,
-                'lcpeak_profile': json.loads(r['lcpeak_json']),
-                'lceq':   r['lceq'],   'lae':    r['lae'],    'lce':    r['lce'],
-                'lafmax': r['lafmax'], 'lcfmax': r['lcfmax'], 'lafmin': r['lafmin'], 'lcfmin': r['lcfmin'],
-                'lasmax': r['lasmax'], 'lcsmax': r['lcsmax'], 'lasmin': r['lasmin'], 'lcsmin': r['lcsmin'],
-                'laieq':  r['laieq'],  'lcieq':  r['lcieq'],
-                'laimax': r['laimax'], 'lcimax': r['lcimax'], 'laimin': r['laimin'], 'lcimin': r['lcimin'],
-                'laie':   r['laie'],   'lcie':   r['lcie'],
-                'la_l01': r['la_l01'], 'la_l1':  r['la_l1'],  'la_l5':  r['la_l5'],
-                'la_l10': r['la_l10'], 'la_l50': r['la_l50'], 'la_l90': r['la_l90'],
-                'la_l95': r['la_l95'], 'la_l99': r['la_l99'],
-                'lc_l10': r['lc_l10'], 'lc_l50': r['lc_l50'], 'lc_l90': r['lc_l90'],
+                **_run_to_dict(r, full=False),
                 'loc_tag': r['location_tag'],
                 'assess':  r['assess_locs'],
             } for r in runs],
@@ -675,32 +708,7 @@ def get_sessions_since(since):
             'lng':   sess['lng'],
             'notes': sess['notes'],
             'wx':    _wx(sess),
-            'projects': [{
-                'run_number': r['run_number'],
-                'source_file': r['source_file'],
-                'start':   r['start_time'],
-                'n':       r['n_samples'],
-                'step':    r['step'],
-                'avg':     r['avg_laeq'],
-                'mn':      r['min_laeq'],
-                'mx':      r['max_laeq'],
-                'pmx':     r['max_lcpeak'],
-                'pmxi':    r['max_laimax'],
-                'laeq_profile':   json.loads(r['laeq_json']),
-                'lafmax_profile': json.loads(r['lafmax_json']) if r['lafmax_json'] else None,
-                'laimax_profile': json.loads(r['laimax_json']) if r['laimax_json'] else None,
-                'lcpeak_profile': json.loads(r['lcpeak_json']),
-                'lceq':   r['lceq'],   'lae':    r['lae'],    'lce':    r['lce'],
-                'lafmax': r['lafmax'], 'lcfmax': r['lcfmax'], 'lafmin': r['lafmin'], 'lcfmin': r['lcfmin'],
-                'lasmax': r['lasmax'], 'lcsmax': r['lcsmax'], 'lasmin': r['lasmin'], 'lcsmin': r['lcsmin'],
-                'laieq':  r['laieq'],  'lcieq':  r['lcieq'],
-                'laimax': r['laimax'], 'lcimax': r['lcimax'], 'laimin': r['laimin'], 'lcimin': r['lcimin'],
-                'laie':   r['laie'],   'lcie':   r['lcie'],
-                'la_l01': r['la_l01'], 'la_l1':  r['la_l1'],  'la_l5':  r['la_l5'],
-                'la_l10': r['la_l10'], 'la_l50': r['la_l50'], 'la_l90': r['la_l90'],
-                'la_l95': r['la_l95'], 'la_l99': r['la_l99'],
-                'lc_l10': r['lc_l10'], 'lc_l50': r['lc_l50'], 'lc_l90': r['lc_l90'],
-            } for r in runs],
+            'projects': [_run_to_dict(r, full=True) for r in runs],
         })
     conn.close()
     return result
@@ -784,34 +792,7 @@ def get_sessions_export_format(dates=None):
         runs = conn.execute(
             'SELECT * FROM runs WHERE session_id=? ORDER BY run_number', (sess['id'],)
         ).fetchall()
-        projects = []
-        for r in runs:
-            projects.append({
-                'run_number': r['run_number'],
-                'source_file': r['source_file'],
-                'start': r['start_time'],
-                'n': r['n_samples'],
-                'step': r['step'],
-                'avg': r['avg_laeq'],
-                'mn': r['min_laeq'],
-                'mx': r['max_laeq'],
-                'pmx': r['max_lcpeak'],
-                'pmxi': r['max_laimax'],
-                'laeq_profile':   json.loads(r['laeq_json'])   if r['laeq_json']   else [],
-                'lafmax_profile': json.loads(r['lafmax_json'])  if r['lafmax_json'] else [],
-                'laimax_profile': json.loads(r['laimax_json'])  if r['laimax_json'] else [],
-                'lcpeak_profile': json.loads(r['lcpeak_json'])  if r['lcpeak_json'] else [],
-                'lceq':   r['lceq'],   'lae':    r['lae'],    'lce':    r['lce'],
-                'lafmax': r['lafmax'], 'lcfmax': r['lcfmax'], 'lafmin': r['lafmin'], 'lcfmin': r['lcfmin'],
-                'lasmax': r['lasmax'], 'lcsmax': r['lcsmax'], 'lasmin': r['lasmin'], 'lcsmin': r['lcsmin'],
-                'laieq':  r['laieq'],  'lcieq':  r['lcieq'],
-                'laimax': r['laimax'], 'lcimax': r['lcimax'], 'laimin': r['laimin'], 'lcimin': r['lcimin'],
-                'laie':   r['laie'],   'lcie':   r['lcie'],
-                'la_l01': r['la_l01'], 'la_l1':  r['la_l1'],  'la_l5':  r['la_l5'],
-                'la_l10': r['la_l10'], 'la_l50': r['la_l50'], 'la_l90': r['la_l90'],
-                'la_l95': r['la_l95'], 'la_l99': r['la_l99'],
-                'lc_l10': r['lc_l10'], 'lc_l50': r['lc_l50'], 'lc_l90': r['lc_l90'],
-            })
+        projects = [_run_to_dict(r, full=True) for r in runs]
         laeqs = [p['avg'] for p in projects if p['avg'] is not None]
         result.append({
             'd': sess['date'],

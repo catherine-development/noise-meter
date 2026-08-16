@@ -14,88 +14,44 @@ import zipfile
 import io
 import re
 
-FLOOR_DB = 20     # NOR140 lower measurement limit — values below this are instrument noise floor
-CAP_LAEQ = 130
-CAP_PEAK = 145
-_DB_SCALE = 128.0
-_DB_OFFSET = 20.0
+from nor140_format import (
+    FLOOR_DB, CAP_LAEQ, CAP_PEAK,
+    GLOB_SCALAR_OFFSETS, SPECTRAL_TABLES,
+    bcd, decode_raw, round_half_up, read_prof_records,
+)
+
 _THIRD_OCTAVE_FREQS = (
     6.3, 8.0, 10.0, 12.5, 16.0, 20.0, 25.0, 31.5, 40.0, 50.0, 63.0, 80.0,
     100.0, 125.0, 160.0, 200.0, 250.0, 315.0, 400.0, 500.0, 630.0, 800.0,
     1000.0, 1250.0, 1600.0, 2000.0, 2500.0, 3150.0, 4000.0, 5000.0,
     6300.0, 8000.0, 10000.0, 12500.0, 16000.0, 20000.0,
 )
-# All 18 Nortfr-labelled spectral tables in 2653-byte GLOB files.
-# Each is 36 consecutive uint16 LE values decoded as raw/128 - 20.
-# (key, glob_offset, output_a_key, output_c_key)
-_GLOB_SPECTRA = (
-    ('lfeq',   0x0428, 'laeq',   'lceq'),
-    ('lffmax', 0x0470, 'lafmax', 'lcfmax'),
-    ('lffmin', 0x04b8, 'lafmin', 'lcfmin'),
-    ('lfe',    0x0500, 'lae',    'lce'),
-    ('lfsmax', 0x0548, 'lasmax', 'lcsmax'),
-    ('lfsmin', 0x0590, 'lasmin', 'lcsmin'),
-    ('lfieq',  0x05d8, 'laieq',  'lcieq'),
-    ('lfimax', 0x0620, 'laimax', 'lcimax'),
-    ('lfimin', 0x0668, 'laimin', 'lcimin'),
-    ('lfie',   0x06b0, 'laie',   'lcie'),
-    ('lf_l01', 0x06f8, 'la_l01', 'lc_l01'),
-    ('lf_l1',  0x0764, 'la_l1',  'lc_l1'),
-    ('lf_l5',  0x07d0, 'la_l5',  'lc_l5'),
-    ('lf_l10', 0x083c, 'la_l10', 'lc_l10'),
-    ('lf_l50', 0x08a8, 'la_l50', 'lc_l50'),
-    ('lf_l90', 0x0914, 'la_l90', 'lc_l90'),
-    ('lf_l95', 0x0980, 'la_l95', 'lc_l95'),
-    ('lf_l99', 0x09ec, 'la_l99', 'lc_l99'),
-)
-_GLOB_SCALARS = {
-    'lafmax': 0x03c1,
-    'lasmax': 0x03c3,
-    'laimax': 0x03c5,
-    'lafmin': 0x03c7,
-    'lasmin': 0x03c9,
-    'laimin': 0x03cb,
-    'laeq': 0x03cd,
-    'laieq': 0x03cf,
-    'lae': 0x03d1,
-    'laie': 0x03d3,
-    'lapeak': 0x03d5,
-    'lcfmax': 0x03db,
-    'lcsmax': 0x03dd,
-    'lcimax': 0x03df,
-    'lcfmin': 0x03e1,
-    'lcsmin': 0x03e3,
-    'lcimin': 0x03e5,
-    'lceq': 0x03e7,
-    'lcieq': 0x03e9,
-    'lce': 0x03eb,
-    'lcie': 0x03ed,
-    'lcpeak': 0x03ef,
-    'la_l01': 0x0408,
-    'la_l1': 0x040a,
-    'la_l5': 0x040c,
-    'la_l10': 0x040e,
-    'la_l50': 0x0410,
-    'la_l90': 0x0412,
-    'la_l95': 0x0414,
-    'la_l99': 0x0416,
-    'lc_l01': 0x0418,
-    'lc_l1': 0x041a,
-    'lc_l5': 0x041c,
-    'lc_l10': 0x041e,
-    'lc_l50': 0x0420,
-    'lc_l90': 0x0422,
-    'lc_l95': 0x0424,
-    'lc_l99': 0x0426,
+# Maps each spectral table's canonical DB column to the A/C-weighted scalar
+# key pair used for the informational *_from_spectrum energy sums below.
+_SPECTRAL_KEY_PAIRS = {
+    'spec_lfeq':    ('laeq',   'lceq'),
+    'spec_lffmax':  ('lafmax', 'lcfmax'),
+    'spec_lffmin':  ('lafmin', 'lcfmin'),
+    'spec_lfe':     ('lae',    'lce'),
+    'spec_lfsmax':  ('lasmax', 'lcsmax'),
+    'spec_lfsmin':  ('lasmin', 'lcsmin'),
+    'spec_lfieq':   ('laieq',  'lcieq'),
+    'spec_lfimax':  ('laimax', 'lcimax'),
+    'spec_lfimin':  ('laimin', 'lcimin'),
+    'spec_lfie':    ('laie',   'lcie'),
+    'spec_lff_l01': ('la_l01', 'lc_l01'),
+    'spec_lff_l1':  ('la_l1',  'lc_l1'),
+    'spec_lff_l5':  ('la_l5',  'lc_l5'),
+    'spec_lff_l10': ('la_l10', 'lc_l10'),
+    'spec_lff_l50': ('la_l50', 'lc_l50'),
+    'spec_lff_l90': ('la_l90', 'lc_l90'),
+    'spec_lff_l95': ('la_l95', 'lc_l95'),
+    'spec_lff_l99': ('la_l99', 'lc_l99'),
 }
 EXCLUDE  = {'000101'}  # factory test date
 
 _DATE_RE = re.compile(r'^\d{6}$')
 _PROJ_RE = re.compile(r'^PROJ', re.IGNORECASE)
-
-
-def bcd(b):
-    return (b >> 4) * 10 + (b & 0xF)
 
 
 def _freq_weight_a(freq_hz):
@@ -124,16 +80,12 @@ def _spectrum_total(levels, weight_fn):
     )
 
 
-def _decode_level(raw):
-    return raw / _DB_SCALE - _DB_OFFSET
-
-
 def _read_glob_spectrum(data, offset):
     end = offset + len(_THIRD_OCTAVE_FREQS) * 2
     if len(data) < end:
         return None
     levels = [
-        _decode_level(struct.unpack_from('<H', data, offset + i * 2)[0])
+        decode_raw(struct.unpack_from('<H', data, offset + i * 2)[0])
         for i in range(len(_THIRD_OCTAVE_FREQS))
     ]
     if not all(-20.0 <= v <= CAP_LAEQ for v in levels):
@@ -143,9 +95,9 @@ def _read_glob_spectrum(data, offset):
 
 def _read_glob_scalars(data):
     metrics = {}
-    for key, offset in _GLOB_SCALARS.items():
+    for key, offset in GLOB_SCALAR_OFFSETS.items():
         if offset + 1 < len(data):
-            metrics[key] = _decode_level(struct.unpack_from('<H', data, offset)[0])
+            metrics[key] = decode_raw(struct.unpack_from('<H', data, offset)[0])
     return metrics
 
 
@@ -156,24 +108,20 @@ def _read_glob(data):
     date = f"20{yy:02d}-{mo:02d}-{dd:02d}"
     start = f"{hh:02d}:{mm:02d}:{ss:02d}"
     metrics = _read_glob_scalars(data)
-    for key, offset, key_a, key_c in _GLOB_SPECTRA:
+    for col, offset in SPECTRAL_TABLES:
         spec = _read_glob_spectrum(data, offset)
         if spec is not None:
+            key_a, key_c = _SPECTRAL_KEY_PAIRS[col]
             metrics[f'{key_a}_from_spectrum'] = _spectrum_total(spec, _freq_weight_a)
             metrics[f'{key_c}_from_spectrum'] = _spectrum_total(spec, _freq_weight_c)
-            metrics[f'spec_{key}'] = spec
+            metrics[col] = [round_half_up(v, 2) for v in spec]
     return date, start, metrics
 
 
 def _read_prof(data):
     """Return list of [LAFspl, LAeq,1s, LAFmax,1s, LAE,1s, LApeak,1s] per second.
     NOR140 profile levels decode as uint16_le / 128 - 20."""
-    if len(data) < 13:
-        return []
-    return [
-        [_decode_level(struct.unpack_from('<H', data, off + i * 2)[0]) for i in range(5)]
-        for off in range(3, len(data) - 9, 10)
-    ]
+    return [[decode_raw(raw) for raw in rec] for rec in read_prof_records(data)]
 
 
 def _clamp(v, lo, hi):
@@ -188,9 +136,7 @@ def _energy_avg(values):
     return 10 * math.log10(sum(10 ** (v / 10) for v in values) / len(values))
 
 
-def _round_db(value, digits=1):
-    scale = 10 ** digits
-    return math.floor(value * scale + 0.5) / scale
+_round_db = round_half_up
 
 
 def _parse_session_files(glob_data, prof_data):
@@ -271,7 +217,7 @@ def _parse_session_files(glob_data, prof_data):
         'lc_l95': _gm('lc_l95'),
         'lc_l99': _gm('lc_l99'),
         # 1/3-octave spectral arrays (36 floats each; None for 1069-byte GLOBs)
-        **{f'spec_{key}': glob_metrics.get(f'spec_{key}') for key, *_ in _GLOB_SPECTRA},
+        **{col: glob_metrics.get(col) for col, _ in SPECTRAL_TABLES},
         # Full 1-second PROF time series
         'prof_lafspl_json': [_round_db(v, 1) for v in lafspl_raw],
         'prof_laeq_json':   [_round_db(v, 1) for v in laeq_raw],

@@ -9,23 +9,13 @@ Usage:
     python3 backfill_prof.py /path/to/MEAS118.zip
     python3 backfill_prof.py /path/to/MEAS118.zip --dry-run
 """
-import json, os, re, struct, sys, zipfile, sqlite3
-from nor140_format import decode_value, FLOOR_DB, CAP_LAEQ, CAP_PEAK
+import json, os, re, sys, zipfile, sqlite3
+from nor140_format import decode_value, FLOOR_DB, CAP_LAEQ, CAP_PEAK, read_prof_records
 
 DB_PATH  = os.environ.get('NOISE_DB_PATH', '/home/flightdata/noise-meter/noise.db')
 _DATE_RE = re.compile(r'^\d{6}$')
 _PROJ_RE = re.compile(r'^PROJ', re.IGNORECASE)
 EXCLUDE  = {'000101'}
-
-
-def _read_prof(data):
-    """Return list of 5 raw uint16 values per second (un-decoded)."""
-    if len(data) < 13:
-        return []
-    return [
-        [struct.unpack_from('<H', data, off + i * 2)[0] for i in range(5)]
-        for off in range(3, len(data) - 9, 10)
-    ]
 
 
 def _yymmdd(iso_date):
@@ -105,7 +95,7 @@ def main():
             print(f'  NOT FOUND  {row["date"]}  {proj_folder}')
             continue
 
-        recs = _read_prof(prof_data)
+        recs = read_prof_records(prof_data)
         if not recs:
             parse_fail += 1
             print(f'  PARSE FAIL {row["date"]}  {proj_folder}  (len={len(prof_data)})')
