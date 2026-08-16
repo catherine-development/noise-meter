@@ -23,6 +23,7 @@ done
 # Files to deploy (add any new files here)
 FILES=(
     noise_app.py
+    reports.py
     config.py
     webauth.py
     peer_client.py
