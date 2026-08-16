@@ -24,6 +24,7 @@ done
 FILES=(
     noise_app.py
     reports.py
+    assessments.py
     config.py
     webauth.py
     peer_client.py

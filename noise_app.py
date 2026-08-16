@@ -16,7 +16,7 @@ from datetime import timedelta
 from config import PI_NAME, IMPORT_KEY, UPLOAD_PASS
 
 from flask import (Flask, render_template, request, jsonify, redirect,
-                   url_for, abort, flash, session as flask_session, make_response)
+                   url_for, flash, session as flask_session, make_response)
 
 from noise_db import (init_db, import_sessions, get_all_sessions_json,
                       get_sessions_since, get_existing_dates, get_existing_run_starts,
@@ -27,19 +27,12 @@ from noise_db import (init_db, import_sessions, get_all_sessions_json,
                       get_setting, set_setting, get_full_run_row)
 from sync_db import (get_import_log, get_full_sync_payload,
                      apply_full_sync, apply_sync_event)
-from assessments_db import (create_assessment, list_assessments, get_assessment,
-                            update_assessment, delete_assessment,
-                            add_assessment_location, get_assessment_location,
-                            update_assessment_location, delete_assessment_location,
-                            assign_runs, unassign_run, update_assessment_run,
-                            get_assessment_run, get_assessment_runs_by_pairs,
-                            get_assessment_detail, get_all_runs_for_assessment,
-                            prepare_assessment_report_data)
 from noise_parser import parse_zip, parse_files
 from webauth import (AUTH_AVAILABLE, login_required, require_api_key,
                      login_or_api_key, check_upload_auth)
 from peer_client import push_to_peer, sync_event_to_peer, startup_sync_from_peer
 import reports
+import assessments
 
 if AUTH_AVAILABLE:
     # webauth put the flight tracker's directory on sys.path when it imported
@@ -53,6 +46,7 @@ app.secret_key = os.environ.get('SECRET_KEY', os.urandom(24))
 app.permanent_session_lifetime = timedelta(days=7)
 
 app.register_blueprint(reports.bp)
+app.register_blueprint(assessments.bp)
 
 
 def _fetch_weather_for_session(date, lat, lng):
@@ -564,175 +558,6 @@ def fetch_weather_route(date):
 @login_required
 def api_existing_dates():
     return jsonify(sorted(get_existing_dates()))
-
-
-@app.route('/assessments')
-@login_required
-def assessments_page():
-    return render_template('assessments.html', pi_name=PI_NAME)
-
-
-@app.route('/api/assessments', methods=['GET'])
-@login_required
-def api_get_assessments():
-    return jsonify(list_assessments())
-
-
-@app.route('/api/assessments', methods=['POST'])
-@login_required
-def api_create_assessment():
-    data = request.json or {}
-    aid = create_assessment(
-        name=data.get('name', 'Untitled'),
-        purpose=data.get('purpose', ''),
-        standard=data.get('standard', 'noise_act'),
-        address=data.get('address', ''),
-        postcode=data.get('postcode', ''),
-        lat=data.get('lat'),
-        lng=data.get('lng'),
-        client_ref=data.get('client_ref', ''),
-        notes=data.get('notes', ''),
-    )
-    sync_event_to_peer('assessment', 'upsert', get_assessment(aid))
-    return jsonify({'id': aid})
-
-
-@app.route('/api/assessments/<int:aid>', methods=['GET'])
-@login_required
-def api_get_assessment(aid):
-    detail = get_assessment_detail(aid)
-    if not detail:
-        abort(404)
-    runs = get_all_runs_for_assessment(aid)
-    return jsonify({'assessment': detail, 'runs': runs})
-
-
-@app.route('/api/assessments/<int:aid>', methods=['PUT'])
-@login_required
-def api_update_assessment(aid):
-    data = request.json or {}
-    update_assessment(
-        aid,
-        name=data.get('name', ''),
-        purpose=data.get('purpose', ''),
-        standard=data.get('standard', 'noise_act'),
-        address=data.get('address', ''),
-        postcode=data.get('postcode', ''),
-        lat=data.get('lat'),
-        lng=data.get('lng'),
-        client_ref=data.get('client_ref', ''),
-        notes=data.get('notes', ''),
-    )
-    sync_event_to_peer('assessment', 'upsert', get_assessment(aid))
-    return jsonify({'status': 'ok'})
-
-
-@app.route('/api/assessments/<int:aid>', methods=['DELETE'])
-@login_required
-def api_delete_assessment(aid):
-    delete_assessment(aid)
-    sync_event_to_peer('assessment', 'delete', {'id': aid})
-    return jsonify({'status': 'ok'})
-
-
-@app.route('/api/assessments/<int:aid>/locations', methods=['POST'])
-@login_required
-def api_add_location(aid):
-    data = request.json or {}
-    loc_id = add_assessment_location(
-        assessment_id=aid,
-        label=data.get('label', ''),
-        description=data.get('description', ''),
-        lat=data.get('lat'),
-        lng=data.get('lng'),
-        notes=data.get('notes', ''),
-    )
-    sync_event_to_peer('assessment_location', 'upsert', get_assessment_location(loc_id))
-    return jsonify({'id': loc_id})
-
-
-@app.route('/api/assessments/<int:aid>/locations/<int:loc_id>', methods=['PUT'])
-@login_required
-def api_update_location(aid, loc_id):
-    data = request.json or {}
-    update_assessment_location(
-        loc_id,
-        label=data.get('label', ''),
-        description=data.get('description', ''),
-        lat=data.get('lat'),
-        lng=data.get('lng'),
-        notes=data.get('notes', ''),
-    )
-    sync_event_to_peer('assessment_location', 'upsert', get_assessment_location(loc_id))
-    return jsonify({'status': 'ok'})
-
-
-@app.route('/api/assessments/<int:aid>/locations/<int:loc_id>', methods=['DELETE'])
-@login_required
-def api_delete_location(aid, loc_id):
-    delete_assessment_location(loc_id)
-    sync_event_to_peer('assessment_location', 'delete', {'id': loc_id})
-    return jsonify({'status': 'ok'})
-
-
-@app.route('/api/assessments/<int:aid>/assign', methods=['POST'])
-@login_required
-def api_assign_runs(aid):
-    data = request.json or {}
-    location_id = data.get('location_id')
-    runs = data.get('runs', [])
-    pairs = [(r['date'], r['run_number']) for r in runs]
-    assign_runs(aid, location_id, pairs)
-    for row in get_assessment_runs_by_pairs(aid, pairs):
-        sync_event_to_peer('assessment_run', 'upsert', row)
-    return jsonify({'status': 'ok', 'assigned': len(pairs)})
-
-
-@app.route('/api/assessment-runs/<int:ar_id>', methods=['DELETE'])
-@login_required
-def api_unassign_run(ar_id):
-    unassign_run(ar_id)
-    sync_event_to_peer('assessment_run', 'delete', {'id': ar_id})
-    return jsonify({'status': 'ok'})
-
-
-@app.route('/api/assessment-runs/<int:ar_id>', methods=['PUT'])
-@login_required
-def api_update_ar(ar_id):
-    data = request.json or {}
-    update_assessment_run(ar_id, data.get('conditions', ''), data.get('notes', ''))
-    sync_event_to_peer('assessment_run', 'upsert', get_assessment_run(ar_id))
-    return jsonify({'status': 'ok'})
-
-
-@app.route('/export/assessment/<int:aid>.csv')
-@login_required
-def export_assessment_csv(aid):
-    data = prepare_assessment_report_data(aid)
-    if not data:
-        abort(404)
-    output = io.StringIO()
-    w = csv.writer(output)
-    w.writerow(['sub_location', 'description', 'date', 'start_time', 'duration_s',
-                'time_period', 'avg_laeq_db', 'min_laeq_db', 'max_laeq_db',
-                'la10_db', 'la90_db', 'max_lcpeak_db', 'max_laimax_db',
-                'conditions', 'notes'])
-    for loc in data['locations']:
-        for r in loc['runs']:
-            w.writerow([
-                loc['label'], loc['description'] or '', r['date'], r['start_time'],
-                r['duration_s'], r['time_period'],
-                r.get('avg_laeq', ''), r.get('min_laeq', ''), r.get('max_laeq', ''),
-                r.get('la10', ''), r.get('la90', ''),
-                r.get('max_lcpeak', ''), r.get('max_laimax', ''),
-                r.get('conditions', '') or '', r.get('notes', '') or '',
-            ])
-    aname = data['assessment']['name'].replace(' ', '_').replace('"', '').replace('\r', '').replace('\n', '')[:40]
-    return app.response_class(
-        output.getvalue(),
-        mimetype='text/csv',
-        headers={'Content-Disposition': f'attachment; filename="assessment_{aname}.csv"'},
-    )
 
 
 if __name__ == '__main__':
