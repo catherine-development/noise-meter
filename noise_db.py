@@ -257,12 +257,22 @@ def init_db():
 
 
 def import_sessions(sessions_data, metadata=None):
+    """Import sessions. Per-session metadata/weather (as sent by
+    get_sessions_since() for peer sync) takes precedence when present;
+    the `metadata` kwarg is the fallback used by the single-session manual
+    upload form, which has no per-session metadata of its own."""
     meta = metadata or {}
     conn = get_db()
     imported = 0
     for sess in sessions_data:
         date = sess['d']
         projects = sess.get('projects', [])
+        recorder_name  = sess.get('name', meta.get('recorder_name')) or None
+        location_label = sess.get('loc',  meta.get('location_label')) or None
+        postcode       = sess.get('post', meta.get('postcode')) or None
+        lat            = sess.get('lat',  meta.get('lat'))
+        lng            = sess.get('lng',  meta.get('lng'))
+        notes          = sess.get('notes', meta.get('notes')) or None
         conn.execute(
             'INSERT INTO sessions '
             '  (date, run_count, avg_laeq, max_laeq, recorder_name, location_label, postcode, lat, lng, notes) '
@@ -279,13 +289,19 @@ def import_sessions(sessions_data, metadata=None):
             '  notes=COALESCE(excluded.notes, sessions.notes), '
             '  imported_at=datetime(\'now\')',
             (date, len(projects), sess.get('avg', 0), sess.get('mx', 0),
-             meta.get('recorder_name') or None,
-             meta.get('location_label') or None,
-             meta.get('postcode') or None,
-             meta.get('lat') or None,
-             meta.get('lng') or None,
-             meta.get('notes') or None)
+             recorder_name, location_label, postcode, lat, lng, notes)
         )
+        wx = sess.get('wx')
+        if wx:
+            conn.execute(
+                'INSERT INTO weather (date, wind_speed, wind_dir, temp_min, temp_max, precip, hourly_json) '
+                'VALUES (?,?,?,?,?,?,?) '
+                'ON CONFLICT(date) DO UPDATE SET '
+                '  wind_speed=excluded.wind_speed, wind_dir=excluded.wind_dir, '
+                '  temp_min=excluded.temp_min,     temp_max=excluded.temp_max, '
+                '  precip=excluded.precip',
+                (date, wx.get('ws'), wx.get('wd'), wx.get('tn'), wx.get('tx'), wx.get('pr'), None)
+            )
         sess_id = conn.execute('SELECT id FROM sessions WHERE date=?', (date,)).fetchone()['id']
         for i, proj in enumerate(projects, 1):
             _g = proj.get
@@ -760,14 +776,22 @@ def get_full_run_row(date, run_number):
     return result
 
 
-def get_session_prof_laeq(date, run_numbers=None):
-    """Return the pooled list of 1-second LAeq values across the given runs
+def get_session_prof_lafspl(date, run_numbers=None):
+    """Return the pooled list of 1-second LAFspl values across the given runs
     (or all runs, if run_numbers is None) of a session.
 
     Used for computing a true LA10/LA90 percentile of the combined measurement
     distribution when reporting across multiple runs — pooling actual samples
     is correct where averaging each run's own percentile is not (percentiles
     don't compose linearly across sub-samples of different sizes).
+
+    Uses PROF field 0 (LAFspl, Fast-time-weighted SPL), not field 1 (LAeq,1s
+    energy average) — LA10/LA90 statistical descriptors are, by convention and
+    per the NOR140 handoff notes, derived from the Fast-weighted instantaneous
+    level, not the per-second energy average. Note this still won't exactly
+    reproduce the meter's own LA10/LA90 (computed from its internal sub-period
+    detector state), only approximate it closely — same caveat the handoff
+    notes make for LAFmin vs min(PROF field 0).
     """
     conn = get_db()
     sess = conn.execute('SELECT id FROM sessions WHERE date=?', (date,)).fetchone()
@@ -777,18 +801,18 @@ def get_session_prof_laeq(date, run_numbers=None):
     if run_numbers:
         ph = ','.join('?' * len(run_numbers))
         rows = conn.execute(
-            f'SELECT prof_laeq_json FROM runs WHERE session_id=? AND run_number IN ({ph})',
+            f'SELECT prof_lafspl_json FROM runs WHERE session_id=? AND run_number IN ({ph})',
             (sess['id'], *run_numbers)
         ).fetchall()
     else:
         rows = conn.execute(
-            'SELECT prof_laeq_json FROM runs WHERE session_id=?', (sess['id'],)
+            'SELECT prof_lafspl_json FROM runs WHERE session_id=?', (sess['id'],)
         ).fetchall()
     conn.close()
     pooled = []
     for r in rows:
-        if r['prof_laeq_json']:
-            pooled.extend(json.loads(r['prof_laeq_json']))
+        if r['prof_lafspl_json']:
+            pooled.extend(json.loads(r['prof_lafspl_json']))
     return pooled
 
 
@@ -804,7 +828,11 @@ def update_run_location_tag(date, run_number, tag):
 
 
 def delete_session(date):
+    """Delete a session and its runs (cascaded via FK) plus its assessment
+    assignments — assessment_runs.session_date is a plain text column, not a
+    declared foreign key, so it can't cascade automatically."""
     conn = get_db()
+    conn.execute('DELETE FROM assessment_runs WHERE session_date=?', (date,))
     conn.execute('DELETE FROM sessions WHERE date=?', (date,))
     conn.commit()
     conn.close()

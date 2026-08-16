@@ -47,7 +47,7 @@ from noise_db import (init_db, import_sessions, get_all_sessions_json,
                       get_assessment_runs_by_pairs,
                       get_sessions_export_format,
                       get_setting, set_setting,
-                      get_full_run_row, get_session_prof_laeq)
+                      get_full_run_row, get_session_prof_lafspl)
 from noise_parser import parse_zip, parse_files
 
 # Shared auth module from flight tracker
@@ -209,6 +209,22 @@ def require_api_key(f):
     return decorated
 
 
+def login_or_api_key(f):
+    """Allow either a valid browser session or a valid X-Import-Key header —
+    for endpoints normal logged-in page JS calls, that also need to be
+    reachable non-interactively (e.g. import_sdcard.py checking what's
+    already on a Pi before pushing new sessions)."""
+    @functools.wraps(f)
+    def decorated(*args, **kwargs):
+        key = (request.headers.get('X-Import-Key') or
+               request.form.get('api_key', '') or
+               request.args.get('api_key', ''))
+        if IMPORT_KEY and key == IMPORT_KEY:
+            return f(*args, **kwargs)
+        return login_required(f)(*args, **kwargs)
+    return decorated
+
+
 def check_upload_auth():
     """Check upload password (from form or header). Returns True if authorised."""
     if not UPLOAD_PASS:
@@ -292,7 +308,7 @@ def index():
 
 
 @app.route('/api/data.json')
-@login_required
+@login_or_api_key
 def api_data():
     return jsonify(get_all_sessions_json())
 
@@ -775,13 +791,16 @@ def _build_session_data_block(sess, run_rows, all_laeq, total_duration_s):
         ), 1)
     else:
         session_leq = _energy_avg_db(all_laeq) if all_laeq else None
-    # LA10/LA90: true percentile of every run's pooled 1-second LAeq samples —
-    # not an average of each run's own percentile, since percentiles don't
-    # compose linearly across sub-samples of different sizes. Falls back to
-    # PROF-expanded percentiles only for older sessions without full 1s data.
-    pooled_laeq = get_session_prof_laeq(sess['d'], [r['run'] for r in run_rows])
-    if pooled_laeq:
-        s = sorted(pooled_laeq)
+    # LA10/LA90: true percentile of every run's pooled 1-second LAFspl samples
+    # (Fast-weighted SPL — the statistical-descriptor convention, matching the
+    # meter's own LAF percentiles), not an average of each run's own percentile
+    # (percentiles don't compose linearly across sub-samples of different
+    # sizes), and not LAeq,1s (a different, energy-averaged quantity). Falls
+    # back to PROF-expanded percentiles only for older sessions without full
+    # 1s data.
+    pooled_lafspl = get_session_prof_lafspl(sess['d'], [r['run'] for r in run_rows])
+    if pooled_lafspl:
+        s = sorted(pooled_lafspl)
         session_la90 = _percentile(s, 10)
         session_la10 = _percentile(s, 90)
     else:

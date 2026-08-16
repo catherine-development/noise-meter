@@ -68,10 +68,19 @@ def parse_all(sd_root=None, since=None):
     return parse_files(pairs)
 
 
-def latest_date_on_pi(url):
-    """Ask the Pi what its most recent session date is."""
+def latest_date_on_pi(url, key=None):
+    """Ask the Pi what its most recent session date is.
+    /api/data.json requires either a browser session or an API key — send
+    the import key so this works non-interactively. Also needs a normal
+    User-Agent: Cloudflare's edge bot-protection blocks urllib's default
+    ("Python-urllib/3.x") with a 1010 error before the request reaches the app.
+    """
     try:
-        with urllib.request.urlopen(f"{url.rstrip('/')}/api/data.json", timeout=10) as resp:
+        req = urllib.request.Request(
+            f"{url.rstrip('/')}/api/data.json",
+            headers={'X-Import-Key': key or IMPORT_KEY, 'User-Agent': 'noise-meter-sync/1.0'},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read())
         sessions = data.get('sessions', [])
         return sessions[-1]['d'] if sessions else None
@@ -132,7 +141,7 @@ def main():
             sys.exit(1)
         for url in args.push:
             # Auto-detect what's already on the Pi and skip those sessions
-            latest = latest_date_on_pi(url)
+            latest = latest_date_on_pi(url, key)
             to_send = [s for s in sessions if latest is None or s['d'] > latest]
             if not to_send:
                 print(f"\n{url}: already up to date (latest: {latest})")
