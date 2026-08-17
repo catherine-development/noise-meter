@@ -412,32 +412,6 @@ def import_sessions(sessions_data, metadata=None):
     return imported
 
 
-def run_end_time(start_time, n_samples):
-    """Fallback wall-clock end as 'HH:MM:SS', for rows with no stored end_time.
-
-    The meter stores its own end time (nor140_format.END_TIME_OFFSET) and that
-    should be used whenever present — this arithmetic is wrong for any run that
-    was paused or stopped mid-period.
-
-    Uses the period count, not duration_s. The two differ for a paused run — the
-    meter keeps writing periods while paused, so 2025-07-12 run 11 spans 323
-    seconds of clock time but records a 300 s effective duration. "When did it
-    finish" means the former.
-
-    Each period covers one second, so a run of n periods starting at t ends at
-    t + n (the last period starts at t + n - 1 and runs for a second). Wraps past
-    midnight; the caller decides whether to flag the day rollover.
-    """
-    if not start_time or not n_samples:
-        return None
-    try:
-        h, m, sec = (int(x) for x in str(start_time).split(':')[:3])
-    except (ValueError, TypeError):
-        return None
-    total = (h * 3600 + m * 60 + sec + int(n_samples)) % 86400
-    return '%02d:%02d:%02d' % (total // 3600, (total % 3600) // 60, total % 60)
-
-
 def _wx(row):
     if row['wind_speed'] is None:
         return None
@@ -465,9 +439,13 @@ def _run_to_dict(r, full=False):
         'run_number': r['run_number'],
         'source_file': r['source_file'],
         'start':   r['start_time'],
-        # Prefer the meter's own end time; fall back for rows imported before
-        # the column existed.
-        'end':     r['end_time'] or run_end_time(r['start_time'], r['n_samples']),
+        # The meter's own end time, or nothing. There is deliberately no
+        # arithmetic fallback: start + n_samples is wrong for any run that was
+        # paused or stopped mid-period, and a plausible-looking wrong time in
+        # evidence is worse than a blank. Both fields are exported because peer
+        # sync reads 'end_time' while the templates read 'end'.
+        'end':      r['end_time'],
+        'end_time': r['end_time'],
         'n':       r['n_samples'],
         'step':    r['step'],
         'duration_s': r['duration_s'],

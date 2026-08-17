@@ -905,8 +905,9 @@ nor `start + duration` reproduces it:
 
 | Case | Files | Why |
 | --- | --- | --- |
-| elapsed = record count | 387 | the ordinary run |
-| elapsed = count − 1 | 135 | the end is stamped at the last period's *start* |
+| elapsed = record count | 385 | the ordinary run |
+| elapsed = count − 1 | 137 | the end is stamped at the last period's *start* |
+| zero-record aborted run | 3 | 1 s elapsed, no profile written |
 | unset (`00:00:00`) | 2 | see the cross-check below |
 
 So the stored value is not reproducible by a single formula — it is the record

@@ -136,7 +136,17 @@ body{background:var(--bg);color:var(--text);font-family:var(--font-ui);font-size
 .modal-overlay.open{display:flex}
 .modal-box{background:var(--surface);border:1px solid var(--border);border-radius:8px;width:100%;max-width:1080px;max-height:92vh;overflow-y:auto;box-shadow:0 12px 60px rgba(0,0,0,.35)}
 .modal-hdr{display:flex;align-items:center;justify-content:space-between;padding:13px 18px;border-bottom:1px solid var(--border);position:sticky;top:0;background:var(--surface);z-index:1}
-.modal-title{font-size:15px;font-weight:600;letter-spacing:-.01em}
+.modal-hdr-main{min-width:0}
+.modal-hdr-actions{display:flex;align-items:center;gap:8px;flex-shrink:0}
+/* Below 600px the wrapped title pushed the fixed action group past the modal
+   edge, clipping Generate report and hiding the close button. The actions drop
+   to their own row instead, with close kept hard right. */
+@media(max-width:600px){
+  .modal-hdr{flex-wrap:wrap;gap:8px;padding:12px 14px}
+  .modal-hdr-actions{width:100%;flex-wrap:wrap;justify-content:flex-start}
+  .modal-hdr-actions .modal-close{margin-left:auto}
+}
+.modal-title{font-size:15px;font-weight:600;letter-spacing:-.01em;overflow-wrap:anywhere}
 .modal-sub{font-size:11px;color:var(--text3);margin-top:2px}
 .modal-close{background:none;border:1px solid var(--border);border-radius:4px;width:28px;height:28px;cursor:pointer;color:var(--text2);font-size:14px;display:flex;align-items:center;justify-content:center;flex-shrink:0;line-height:1}
 .modal-close:hover{background:var(--panel)}
@@ -354,7 +364,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--font-ui);font-size
           <button class="modal-meta-edit-btn" onclick="openModalMetaEdit()">Edit metadata</button>
         </div>
       </div>
-      <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
+      <div class="modal-hdr-actions">
         <button id="modalExportBtn" class="sess-export-btn">Export CSV</button>
         <button id="modalReportBtn" class="sess-export-btn">Generate report</button>
         <button id="modalCloseBtn" class="modal-close" aria-label="Close">&#x2715;</button>

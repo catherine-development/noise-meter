@@ -11,17 +11,15 @@ created by noise_db._migrate(), which remains the single schema authority.
 """
 import json
 
-from noise_db import get_db, run_end_time
+from noise_db import get_db
 
 
 def _with_end(row):
-    """Ensure the run row carries an end time.
+    """Ensure the run row carries an end_time key (the meter's value, or None).
 
-    The meter stores its own (runs.end_time); only fall back to arithmetic for
-    rows imported before that column existed.
+    No arithmetic fallback — see _run_to_dict in noise_db.
     """
-    if not row.get('end_time'):
-        row['end_time'] = run_end_time(row.get('start_time'), row.get('n_samples'))
+    row.setdefault('end_time', None)
     return row
 
 
@@ -332,7 +330,7 @@ def prepare_assessment_report_data(aid):
             runs_data.append({
                 'date': r['session_date'],
                 'start_time': r['start_time'],
-                'end_time': r['end_time'] or run_end_time(r['start_time'], r['n_samples']),
+                'end_time': r['end_time'],
                 'duration_s': r['n_samples'],
                 'time_period': _time_period(r['start_time'], assessment['standard']),
                 'avg_laeq': round(r['avg_laeq'], 1) if r['avg_laeq'] is not None else None,

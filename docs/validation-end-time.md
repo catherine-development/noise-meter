@@ -1,15 +1,21 @@
 # Validation brief — run end times, and the 8-byte PROF record
 
-**Scope:** commits `7dd0181`, `b7e5ad3`, `2467772` on `master`.
-**Author:** Catherine Ives-Yim, 2026-08-17.
+**Scope:** `7dd0181`, `b7e5ad3`, `2467772`, `18af8f8` and the review-response
+commit that follows them on `master`.
+**Author:** Catherine Ives-Yim, 2026-08-17. **Revision 2**, after external review.
 **Purpose:** give a reviewer everything needed to falsify the claims below
 without taking any of them on trust.
 
 The work started as a display change — show each run's end time as well as its
-start. It turned up a latent parser defect, and one of my own claims was wrong
-and had to be retracted. Both are covered here, and the retracted claim is left
-visible rather than tidied away, because the way it was caught is the most
-useful thing in this document.
+start. It turned up a latent parser defect, a peer-sync data loss, and two of my
+own claims that were wrong. All are covered here, and the retractions are left
+visible rather than tidied away, because how they were caught is the most useful
+thing in this document.
+
+**Revision 2 changes:** five findings from review are resolved (§7). The
+arithmetic fallback has been **removed entirely**, which changes the behaviour
+described in C4. Corpus counts in §3 were wrong and are corrected. C7 is now
+verified by measurement rather than by grep.
 
 ---
 
@@ -22,7 +28,7 @@ needs a venv:
 python3 -m venv /tmp/nm-venv && /tmp/nm-venv/bin/pip install -q flask && /tmp/nm-venv/bin/python3 test_modules.py
 ```
 
-Expected: `All 174 checks passed.` The suite needs `MEAS118/` extracted in the
+Expected: `All 185 checks passed.` The suite needs `MEAS118/` extracted in the
 repo root (527 GLOB/PROF pairs, ~3 MB zipped, not committed — see `.gitignore`).
 
 ---
@@ -31,15 +37,15 @@ repo root (527 GLOB/PROF pairs, ~3 MB zipped, not committed — see `.gitignore`
 
 | # | Claim | Confidence | Where it could still be wrong |
 | --- | --- | --- | --- |
-| C1 | The 1069-byte GLOB variant has 4-channel, 8-byte PROF records | High | Channel *identity* rests on matching GLOB scalars, not on a Nortfr export |
-| C2 | `0x22` is the measurement end time | High | No Nortfr reference has been checked for an end-time row — see §5 |
-| C3 | `prof_record_size()` picks the right size for all 527 files | High | The tie-break is empirical, not documented by Norsonic |
-| C4 | The 300 s end-time guard separates good from unset | Medium | Threshold from one archive; a genuine outlier would be silently rejected |
+| C1 | The 1069-byte GLOB variant has 4-channel, 8-byte PROF records | **High** | ch0/ch1 ordering — now corroborated across all 54, see §2 |
+| C2 | `0x22` is the measurement end time | **High** | Nortfr has no end-time row to check against; corroborated indirectly |
+| C3 | `prof_record_size()` classifies correctly | High | Two signals now, and it fails closed rather than guessing |
+| C4 | A wrong end time is never displayed | **High** | True by construction since the fallback was removed |
 | C5 | Two files have an *unset* end time | Medium | "Unset" is inference; could be an aborted run or a clock fault |
 | C6 | The backfill was purely additive | High | Directly observable — see §4 |
-| C7 | End times display at all six sites | High | Verified by grep + API, **not** by loading a page in a browser |
+| C7 | End times display correctly at all six sites | High | Modal measured at 360 px; other five sites still grep + API only |
 
-Weakest links first: **C5**, **C4**, then the untested part of **C2** in §5.
+Weakest link is now **C5**, and it is inconsequential — see §3.
 
 ---
 
@@ -94,27 +100,26 @@ Expected: (a) all 54 of the 1069-byte group divide by 8, only 8 of them by 10;
 (b) `n@8` = 895 = elapsed, duration 894; (c) ch1 Leq = 80.28 = GLOB LAeq, ch2
 max = 90.12 = GLOB LAFmax, ch3 max = 102.83 = GLOB LApeak.
 
-**What would falsify it.** A 1069-byte file whose 8-byte decode does *not*
-reproduce its GLOB scalars. Or a Nortfr export of any 1069-byte run — we have
-none, which is the real gap. **If you can get one reference export for a
-2025-08-23/24/31 run, that settles C1 outright and is the single most valuable
-thing you could add.**
+**ch0/ch1 — resolved on review.** Revision 1 called this the weakest point in
+the brief: ch0 and ch1 have energy averages equal to two decimals, so I had
+separated them only by analogy with the 10-byte layout, and warned that no check
+in the suite would catch a swap. The review closed it with a test I had missed —
+comparing ch0 against the **GLOB LAF percentile scalars**, which are an
+independent discriminator that does not rely on the energy average:
 
-**Honest limit — the weakest point in this whole brief.** Channel *order* is
-inferred from scalar agreement. LAFmax and LApeak are pinned hard: exact to the
-hundredth, and they are distinguishable maxima. **ch0 vs ch1 is not.** Both have
-an energy average of ~80.28, and I separated them only by analogy with the
-10-byte layout.
+* ch0 matches the LAF percentiles better than ch1 in **all 54** files
+* ch1's energy average matches GLOB LAeq in 52 of 54, mean error ~0.003 dB
+* ch2 max reproduces LAFmax exactly in all 54
+* ch3 max reproduces LApeak exactly in all 54
 
-That analogy has a wrinkle the reviewer should chase. In the Nortfr-verified
-10-byte run 9, ch0 max (80.49) is *below* ch1 max (81.02). In the 8-byte file,
-ch0 max (88.88) is *above* ch1 max (85.05) — the relationship inverts. That may
-be nothing more than different signal content, but it is the one place where the
-8-byte layout does not behave like the 10-byte one, and it is precisely the pair
-I could not pin independently. If ch0 and ch1 are in fact swapped, the stored
-LAFSPL and LAeq series would be exchanged for all 54 files, and **no check in
-the suite would catch it** — the energy averages are equal to two decimals, so
-the LAeq assertion in `test_modules.py` passes either way.
+`test_modules.py` now asserts all four across every 8-byte file rather than the
+single example it used before, including the percentile discriminator — the only
+one that separates ch0 from ch1, and so the only thing standing between a
+channel swap and silence.
+
+**What would still falsify it.** A 1069-byte file whose 8-byte decode does not
+reproduce its GLOB scalars. A Nortfr export of any 2025-08-23/24/31 run remains
+the one piece of external evidence we lack, though it now matters much less.
 
 **Blast radius.** No 1069-byte run has ever been in a live database. Both Pis
 hold 11 runs, all 2026-08-12/13, all 2653-byte. So the defect was latent in the
@@ -139,25 +144,36 @@ print(' '.join('%02d'%bcd(b) for b in d[0x18:0x25]))"
 ```
 
 Expected `01 26 08 12 23 27 36 26 08 12 23 42 36` — start 2026-08-12 23:27:36,
-end 23:42:36. Run 9 is one of the seven Nortfr-verified runs and is a 900 s run
-starting at 23:27:36, so `23:42:36` is independently corroborated.
+end 23:42:36.
 
-**Was it worth storing rather than deriving?** Partly. My commit message for
-`7dd0181` overstates this, and the corrected table is:
+**External corroboration.** Revision 1 flagged as an open gap that no Nortfr
+export had been checked for an end-time row. The review checked: **Nortfr does
+not expose one.** But its final profile timestamps agree with the decoded
+boundary, or with the final one-second period immediately before it, and the
+corpus contains a correctly decoded cross-midnight run. So C2 is corroborated
+indirectly and the gap is closed as far as it can be.
+
+**Was it worth storing rather than deriving?** Partly, and my commit message for
+`7dd0181` overstated it. The corrected distribution:
 
 | Case | Files |
 | --- | --- |
-| elapsed = record count | 387 |
-| elapsed = count − 1 | 135 |
-| unset | 2 |
+| elapsed = record count | 385 |
+| elapsed = count − 1 | 137 |
+| zero-record aborted run (1 s elapsed) | 3 |
+| unset / zeroed | 2 |
 
-So after the C1 fix it is always the record count or one less. That is *nearly*
-derivable — you would just have to guess which, per run, with nothing in the file
-to say. Storing it removes the guess, and reading it is what exposed C1. But
-"not derivable" as originally written was too strong.
+Revision 1 of this table said 387 / 135 / 2. It was counted before the
+record-size fix and ignored the zero-record runs entirely — a reviewer recount
+gave the figures above, which are what the current code produces.
 
-**C4 — the guard.** `read_end_time()` cross-checks implied elapsed against the
-duration at `0x03bd`, rejecting beyond 300 s.
+So after the C1 fix the value is always the record count or one less. That is
+*nearly* derivable — you would have to guess which, per run, with nothing in the
+file to say. Storing it removes the guess, and reading it is what exposed C1.
+But "not derivable" as originally written was too strong.
+
+**C4 — the guard, and a retraction.** `read_end_time()` cross-checks implied
+elapsed against the duration at `0x03bd`, rejecting beyond 300 s:
 
 ```bash
 /tmp/nm-venv/bin/python3 -c "
@@ -170,20 +186,27 @@ print(len(bad),'of',len(f)); [print(' ',g) for g in bad]"
 
 Expected: exactly 2 — `230830/PROJ0001` and `250711/PROJ0011`.
 
-**Where 300 came from.** Every other file agrees with its duration within 23 s;
-the two rejects are out by 9,554 s and 46,474 s. So the gap is enormous and the
-threshold is anywhere in it. **But it is one archive.** A genuinely paused run
-that idled more than 300 s would be silently rejected and fall back to
-arithmetic. It degrades softly and never shows a wrong figure — but it degrades
-*silently*, which is a fair criticism. If you think it should log instead, say
-so; I would not argue.
+Revision 1 claimed this "never shows a wrong figure". **That was false**, and
+the review was right to call it out. A run legitimately paused for more than
+300 s would have been rejected, and the arithmetic fallback would then have
+displayed a confident, wrong time — the fallback cannot model a pause either.
+
+The fix is not a better threshold, because no threshold is safe in principle: a
+pause is unbounded. **The arithmetic fallback has been removed entirely.** The
+display now shows the meter's value or nothing. A rejected or absent end time
+renders blank, which for evidence going to a council is strictly better than a
+plausible-looking invention. `run_end_time()` is deleted, not merely unused.
+
+That makes the original claim true by construction, and it makes the 300 s
+threshold a fail-closed rule — when in doubt, show nothing — rather than a
+silent substitution.
 
 **C5 — are those two really unset?** Both read exactly `00:00:00`. I did not
 blacklist that value, because a run can legitimately end at midnight. The
 inference that they are unset rests on their being wildly inconsistent with
-their own durations. An alternative reading — an aborted run, or a meter clock
-reset — fits the evidence equally well. It does not change the handling either
-way, but the *word* "unset" in the docs is an inference, not an observation.
+their own durations; an aborted run or a clock reset fits equally well. With the
+fallback gone this is now inconsequential — either way the field is blank — so
+it is a wording issue in the docs, not a behavioural one.
 
 ---
 
@@ -207,34 +230,93 @@ three header columns moved.
 
 ---
 
-## 5. The gap I most want a second opinion on
+## 5. Peer sync — the highest-severity finding, found on review
 
-**No Nortfr export has been checked for an end-time row.** All seven reference
-pairs were compared cell-for-cell and pass, but I never asked whether the
-exporter emits a stop time that would validate `0x22` directly. If Nortfr does
-emit one, that is a direct check on C2 and it is sitting unused in files we
-already have. I should have looked before writing the docs. Worth ten minutes.
+`_run_to_dict()` exported the value under the key `end`, while
+`import_sessions()` read `end_time`. Every peer-synced run therefore stored
+`NULL` and fell back to arithmetic. Neither Pi had yet synced a run carrying an
+end time, so no live data was lost — but it would have been on the next sync.
 
-Second: **C7 was verified structurally, not visually.** I confirmed the markup
-is present in the deployed templates and that the API returns an end time for
-every run, but I did not load a page. A reviewer with a browser should check the
-run list, the run modal, the assessment run rows, the report run picker and a
-generated report — particularly that `start–end` does not overflow its container
-on narrow screens, which no check here covers.
+The fix exports **both** keys, deliberately:
+
+* `end` — for display.
+* `end_time` — the meter's own value, and the only field sync reads.
+
+They are separate because exporting only `end` would have been the wrong fix:
+before the fallback was removed, `end` could carry a *derived* value, and
+syncing that would have written an arithmetic estimate into the peer's
+`end_time` column, indistinguishable from meter data. Silently degrading real
+metadata to a guess is worse than the NULL it replaced.
+
+The regression test uses run 1 — 83 records but an 82 s duration — so any
+arithmetic reconstruction lands at 12:09:53, one second past the meter's
+12:09:52. Confirm the test actually bites by deleting the `'end_time'` line from
+`_run_to_dict` and re-running: expect `FAIL meter end time survives peer sync`.
 
 ---
 
-## 6. What the retracted claim should tell you
+## 6. C7 — the display
 
-I originally documented those 54 files as *logging at a 1.25 s period*, and
-committed that to `NOR140_handoff.md`. It was wrong. 1.25 is 10/8 — the ratio was
-an artefact of reading 8-byte records as 10-byte, not a property of the meter.
+Revision 1 admitted this was verified by grep and API rather than by loading a
+page. The review found a real bug there: at 360 px the modal's wrapped title
+pushed a `flex-shrink:0` action group past the modal edge, hiding the close
+button.
 
-I caught it only when writing this document, by asking what else could produce
-exactly 5/4. The lesson worth carrying into the review: a clean, tight,
-repeatable number across many files reads as strong evidence, and it was — but
-of the wrong proposition. Treat every "consistent across N files" claim above as
-open to the same failure, and ask what *else* would produce that consistency.
+Now measured rather than asserted. Chrome clamps headless windows to 500 px on
+macOS, so the modal is rendered inside a 360 px iframe, which gets its own
+viewport for media-query purposes, and the geometry is read back:
 
-Prime suspect by that standard is C1's ch0/ch1 ordering, which is the one place
-I am relying on analogy rather than an exact match.
+| | actions right | box right | close visible |
+| --- | --- | --- | --- |
+| before | 348 | 344 | **false** |
+| after | 329 | 344 | true |
+
+**Still not visually checked:** the other five sites — run list, session CSV,
+assessment run rows, report run picker, generated report table. They are simpler
+layouts, but that is an argument, not a measurement.
+
+---
+
+## 7. Review findings and disposition
+
+| # | Finding | Disposition |
+| --- | --- | --- |
+| 1 | Peer sync discards the meter end time | Fixed; regression test added and verified to fail without the fix (§5) |
+| 2 | 300 s guard can silently substitute a wrong estimate | Fixed by removing the fallback outright; claim retracted (§3) |
+| 3 | Mobile run modal overflows at 360 px | Fixed; measured before/after (§6) |
+| 4 | `prof_record_size()` could misclassify a future paused 8-byte run | Fixed: GLOB size now participates, and it returns `None` to skip rather than defaulting to 10 |
+| 5 | Corpus counts inaccurate | Corrected here and in `NOR140_handoff.md` (§3) |
+
+On finding 4, the classifier now takes two signals. The duration decides where
+it can; where it cannot — precisely the paused or truncated case — the GLOB
+variant decides. If neither resolves, it returns `None` and the parser skips the
+run rather than guessing. Check the case directly:
+
+```bash
+/tmp/nm-venv/bin/python3 -c "
+from nor140_format import prof_record_size
+print('paused 8-byte, variant known:', prof_record_size(7160, 3000, 1069))
+print('nothing can decide         :', prof_record_size(7160, 3000, None))"
+```
+
+Expected `8` then `None`.
+
+---
+
+## 8. What the retracted claims should tell you
+
+Two claims in revision 1 were wrong, and they failed in the same way.
+
+The first: 54 files were documented as *logging at a 1.25 s period*. 1.25 is
+10/8 — the ratio was an artefact of reading 8-byte records as 10-byte. I caught
+that one myself, by asking what else produces exactly 5/4.
+
+The second: the guard "never shows a wrong figure". I had reasoned about the
+threshold and not about the fallback behind it, so I checked the part I had
+built and missed the part I had inherited. The review caught it.
+
+Both were confident statements resting on a single unexamined assumption. Treat
+every "consistent across N files" claim here the same way, and ask what *else*
+would produce that consistency. The candidate that stood out on this pass — ch0/ch1 resting
+on analogy alone — is now pinned by an independent discriminator in the suite,
+so the next one will have to be found somewhere else.

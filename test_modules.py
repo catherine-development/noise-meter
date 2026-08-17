@@ -304,6 +304,59 @@ def main(meas_root):
             check(_r['prof_lae_json'] is None,
                   '4-channel layout stores no LAE series rather than faking one')
 
+        # One example is not enough to pin a channel layout, so assert it over
+        # every 8-byte file in the archive: ch2 must reproduce LAFmax and ch3
+        # LApeak exactly, and ch1's energy average must be the stored LAeq.
+        _short = []
+        for _g8 in _corpus:
+            _gd = open(_g8, 'rb').read()
+            if len(_gd) != 1069:
+                continue
+            _pf = _g8.replace('GLOB', 'PROF')
+            if not os.path.exists(_pf):
+                continue
+            _d, _rr = parser._parse_session_files(_gd, open(_pf, 'rb').read())
+            if _rr:
+                _short.append((_g8, _rr))
+        check(len(_short) == 54, 'all 54 short-format runs parse', str(len(_short)))
+        _bad_max = [g for g, r in _short
+                    if r['lafmax'] is None or r['prof_lafmax_json'] is None
+                    or abs(max(r['prof_lafmax_json']) - r['lafmax']) > 0.005]
+        check(not _bad_max, 'ch2 max == GLOB LAFmax in all 54', str(_bad_max[:2]))
+        _bad_peak = [g for g, r in _short
+                     if r['lapeak'] is None
+                     or abs(max(r['prof_lapeak_json']) - r['lapeak']) > 0.005]
+        check(not _bad_peak, 'ch3 max == GLOB LApeak in all 54', str(_bad_peak[:2]))
+        _bad_eq = [g for g, r in _short
+                   if abs(parser._energy_avg(r['prof_laeq_json']) - r['avg']) > 0.05]
+        check(len(_bad_eq) <= 2,
+              'ch1 energy average == GLOB LAeq in at least 52 of 54',
+              f'{len(_bad_eq)} outliers')
+        _no_lae = [g for g, r in _short if r['prof_lae_json'] is not None]
+        check(not _no_lae, 'no 8-byte run fabricates an LAE series')
+
+        # ch0 vs ch1 cannot be told apart by energy average — they agree to two
+        # decimals. The GLOB LAF percentiles are the independent discriminator:
+        # they describe the LAFspl distribution, so ch0 must track them more
+        # closely than ch1 does. Without this, a ch0/ch1 swap would pass silently.
+        def _pct(series, frac):
+            sv = sorted(series, reverse=True)
+            return sv[max(0, int(len(sv) * frac) - 1)]
+
+        _wrong = []
+        for _g8, _rr in _short:
+            _c0, _c1 = _rr['prof_lafspl_json'], _rr['prof_laeq_json']
+            _ref = [_rr['la_l10'], _rr['la_l50'], _rr['la_l90']]
+            if any(v is None for v in _ref):
+                continue
+            _e0 = sum(abs(_pct(_c0, f) - v) for f, v in zip((.1, .5, .9), _ref))
+            _e1 = sum(abs(_pct(_c1, f) - v) for f, v in zip((.1, .5, .9), _ref))
+            if _e0 >= _e1:
+                _wrong.append((_g8.split('MEAS118/')[-1], round(_e0, 2), round(_e1, 2)))
+        check(not _wrong,
+              'ch0 tracks the GLOB LAF percentiles better than ch1 in all 54',
+              str(_wrong[:2]))
+
         missing = [c for c, _ in SPECTRAL_TABLES if not run9.get(c)]
         check(not missing, 'all 18 spectral tables stored', f'missing: {missing}')
         for col, _ in SPECTRAL_TABLES:
@@ -429,6 +482,25 @@ def main(meas_root):
         check(b.db.get_session_prof_lafspl(SESSION_DATE, [9]) ==
               a.db.get_session_prof_lafspl(SESSION_DATE, [9]),
               'pooled LAFspl identical on both sides')
+
+        # The meter's end time must survive the hop. This regressed once because
+        # _run_to_dict exported it as 'end' while import_sessions read
+        # 'end_time', so the peer silently stored NULL. Run 1 is the case that
+        # exposes it: 83 records but an 82 s duration, so any arithmetic
+        # reconstruction lands a second late, at 12:09:53 rather than 12:09:52.
+        arun1 = a.db.get_full_run_row(SESSION_DATE, 1)
+        prun1 = b.db.get_full_run_row(SESSION_DATE, 1)
+        check(arun1['end_time'] == '12:09:52', 'source run 1 end time',
+              str(arun1['end_time']))
+        check(prun1['end_time'] == arun1['end_time'],
+              'meter end time survives peer sync', str(prun1['end_time']))
+        check(prun1['n_samples'] == 83 and prun1['duration_s'] == 82,
+              'run 1 is the count-minus-one case that arithmetic gets wrong')
+        pdisp = next(pp for pp in psess['projects'] if pp['run_number'] == 1)
+        check(pdisp['end'] == '12:09:52', "peer displays the meter's end time",
+              str(pdisp.get('end')))
+        check(pdisp.get('end_time') == '12:09:52',
+              'peer re-exports end_time for onward sync')
 
         # ── 5. deletions replicate ────────────────────────────────────────────
         print('\n5. session deletions replicate to the peer')

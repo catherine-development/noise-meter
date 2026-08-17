@@ -223,20 +223,37 @@ PROF_RECORD_SIZE_4CH = 8
 PROF_CHANNELS_4CH = 4
 
 
-def prof_record_size(payload_len, duration_s):
-    """Bytes per PROF record — 10 (5 channels) or 8 (4 channels).
+# GLOB size identifies the variant, and so the PROF record layout. Only the
+# 1069-byte variant departs from the 5-channel default.
+GLOB_SIZE_RECORD_SIZE = {1069: PROF_RECORD_SIZE_4CH}
 
-    Picks the size whose implied record count matches the GLOB duration; a run
-    holds one record per second, give or take the final partial one. Falls back
-    to the 10-byte layout when no duration is available to arbitrate.
+
+def prof_record_size(payload_len, duration_s, glob_size=None):
+    """Bytes per PROF record — 10 (5 channels), 8 (4 channels), or None.
+
+    Two signals, because neither is sufficient alone. The duration decides it
+    where it can: a run holds one record per second, give or take the final
+    partial one, and that agrees only for the true size. Where it cannot — a
+    paused or truncated run, whose record count no longer tracks the clock —
+    the GLOB variant decides instead.
+
+    Returns None when the two disagree or neither resolves, so the caller skips
+    the run. Guessing here misaligns every record in the file, which is the
+    defect this function was written to fix; a skipped run is recoverable, a
+    silently misdecoded one is not.
     """
+    by_variant = GLOB_SIZE_RECORD_SIZE.get(glob_size, PROF_RECORD_SIZE) if glob_size else None
+
     if duration_s:
         for size in (PROF_RECORD_SIZE, PROF_RECORD_SIZE_4CH):
             if payload_len % size:
                 continue
             if abs(payload_len // size - duration_s) <= 2:
                 return size
-    return PROF_RECORD_SIZE
+
+    if by_variant and payload_len % by_variant == 0:
+        return by_variant
+    return None
 
 
 def read_prof_records(data, record_size=None):

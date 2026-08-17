@@ -160,7 +160,10 @@ def _parse_session_files(glob_data, prof_data):
     # the size cannot be read from the PROF file itself — it is resolved against
     # the GLOB duration. Reading an 8-byte file as 10 misaligns every record.
     rec_size = prof_record_size(max(len(prof_data) - PROF_RECORD_OFFSET, 0),
-                                glob_metrics.get('duration_s'))
+                                glob_metrics.get('duration_s'), len(glob_data))
+    if rec_size is None:
+        # Unclassifiable layout — skip rather than misdecode. See prof_record_size.
+        return date, None
     recs = _read_prof(prof_data, rec_size)
     if not recs:
         return date, None
