@@ -143,7 +143,9 @@ def api_assign_runs(aid):
     data = request.json or {}
     location_id = data.get('location_id')
     runs = data.get('runs', [])
-    pairs = [(r['date'], r['run_number']) for r in runs]
+    # Carry source_file when the client sends it: the run number it was
+    # rendered with may already be stale by the time this posts.
+    pairs = [(r['date'], r['run_number'], r.get('source_file')) for r in runs]
     assign_runs(aid, location_id, pairs)
     for row in get_assessment_runs_by_pairs(aid, pairs):
         sync_event_to_peer('assessment_run', 'upsert', row)

@@ -173,13 +173,49 @@ def _migrate(conn):
             -- recovering a previously unparseable run shifts every later number
             -- on that date, silently re-pointing assessment links. source_file
             -- is the stable key and is preferred wherever both are present.
-            run_number      INTEGER NOT NULL,
+            run_number      INTEGER,
             source_file     TEXT,
             conditions      TEXT,
-            notes           TEXT,
-            UNIQUE(assessment_id, session_date, run_number)
+            notes           TEXT
         );
+        -- The stable identity. Partial, because legacy rows may still carry a
+        -- NULL source_file and must not collide with one another.
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_assessment_runs_stable
+            ON assessment_runs(assessment_id, session_date, source_file)
+            WHERE source_file IS NOT NULL;
     ''')
+
+    ar_sql = (conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='assessment_runs'"
+    ).fetchone() or [''])[0] or ''
+    if 'UNIQUE(assessment_id, session_date, run_number)' in ar_sql:
+        # Rebuild to drop the positional UNIQUE. Reads prefer source_file, so
+        # leaving run_number as the arbiter of writes let an upsert rebind a
+        # link to a different measurement once numbering shifted.
+        conn.execute('PRAGMA foreign_keys=off')
+        conn.executescript('''
+            CREATE TABLE assessment_runs_new (
+                id              INTEGER PRIMARY KEY,
+                assessment_id   INTEGER NOT NULL REFERENCES assessments(id) ON DELETE CASCADE,
+                location_id     INTEGER REFERENCES assessment_locations(id) ON DELETE SET NULL,
+                session_date    TEXT NOT NULL,
+                run_number      INTEGER,
+                source_file     TEXT,
+                conditions      TEXT,
+                notes           TEXT
+            );
+            INSERT INTO assessment_runs_new
+                (id, assessment_id, location_id, session_date, run_number,
+                 source_file, conditions, notes)
+            SELECT id, assessment_id, location_id, session_date, run_number,
+                   source_file, conditions, notes FROM assessment_runs;
+            DROP TABLE assessment_runs;
+            ALTER TABLE assessment_runs_new RENAME TO assessment_runs;
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_assessment_runs_stable
+                ON assessment_runs(assessment_id, session_date, source_file)
+                WHERE source_file IS NOT NULL;
+        ''')
+        conn.execute('PRAGMA foreign_keys=on')
 
     ar_cols = {row[1] for row in conn.execute('PRAGMA table_info(assessment_runs)').fetchall()}
     if 'source_file' not in ar_cols:
@@ -521,10 +557,16 @@ def get_all_sessions_json():
     for sess in sessions:
         runs = conn.execute(
             'SELECT r.*, '
-            "  GROUP_CONCAT(COALESCE(al.label,'?'), ',') AS assess_locs "
+            # COALESCE alone turned the LEFT JOIN's NULL into '?', so every run
+            # came back marked as assessed. The CASE keeps '?' for its intended
+            # meaning — linked but with no location — and yields NULL otherwise.
+            "  GROUP_CONCAT(CASE WHEN ar.id IS NOT NULL "
+            "                    THEN COALESCE(al.label,'?') END, ',') AS assess_locs "
             'FROM runs r '
             'LEFT JOIN assessment_runs ar '
-            '  ON ar.session_date=? AND ar.run_number=r.run_number '
+            '  ON ar.session_date=? AND ('
+            '    ar.source_file=r.source_file'
+            '    OR (ar.source_file IS NULL AND ar.run_number=r.run_number)) '
             'LEFT JOIN assessment_locations al ON al.id=ar.location_id '
             'WHERE r.session_id=? '
             'GROUP BY r.id ORDER BY r.run_number',
@@ -782,6 +824,42 @@ def get_session_tombstones():
         'SELECT date, deleted_at FROM deleted_sessions ORDER BY date').fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def audit_assessment_run_keys():
+    """Report every assessment_run whose stable key is missing or ambiguous.
+
+    Run before tightening the constraints: a link with no source_file, or one
+    that no longer resolves to a run, cannot be migrated automatically and has
+    to be looked at. Returns a dict of lists, empty when the table is clean.
+    """
+    conn = get_db()
+    rows = [dict(r) for r in conn.execute('''
+        SELECT ar.id, ar.assessment_id, ar.session_date, ar.run_number,
+               ar.source_file, a.name AS assessment_name
+        FROM assessment_runs ar
+        LEFT JOIN assessments a ON a.id = ar.assessment_id
+        ORDER BY ar.session_date, ar.run_number
+    ''').fetchall()]
+
+    report = {'null_source_file': [], 'unmatched': [], 'duplicate': []}
+    seen = {}
+    for r in rows:
+        if not r['source_file']:
+            report['null_source_file'].append(r)
+            continue
+        hit = conn.execute(
+            'SELECT 1 FROM runs rn JOIN sessions se ON se.id = rn.session_id '
+            'WHERE se.date=? AND rn.source_file=?',
+            (r['session_date'], r['source_file'])).fetchone()
+        if not hit:
+            report['unmatched'].append(r)
+        key = (r['assessment_id'], r['session_date'], r['source_file'])
+        if key in seen:
+            report['duplicate'].append(r)
+        seen[key] = r['id']
+    conn.close()
+    return report
 
 
 def recompute_session_aggregates(dates=None):

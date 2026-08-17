@@ -581,12 +581,86 @@ def main(meas_root):
         check(kept == ar_src, "an old peer's payload does not erase source_file",
               str(kept))
 
+        # The two write failures the read-side fix alone did not prevent: with
+        # the upsert still keyed on run_number, re-assigning the same physical
+        # run at its new number inserted a duplicate, and assigning whatever had
+        # taken the old number silently rebound the link.
+        a.assess.assign_runs(aid, lid, [(SESSION_DATE, 6)])
+        rows = a.sql('SELECT run_number, source_file FROM assessment_runs')
+        check(len(rows) == 1, 're-assigning the same run at its new number is not a duplicate',
+              str([(r['run_number'], r['source_file']) for r in rows]))
+        check(rows[0]['source_file'] == ar_src, 'and still points at the same measurement')
+        check(rows[0]['run_number'] == 6, 'with run_number refreshed to the new position',
+              str(rows[0]['run_number']))
+
+        a.assess.assign_runs(aid, lid, [(SESSION_DATE, 5)])
+        srcs = sorted(r['source_file'] for r in
+                      a.sql('SELECT source_file FROM assessment_runs'))
+        check(ar_src in srcs, 'assigning the old number does not rebind the original link',
+              str(srcs))
+        check(len(srcs) == 2, 'it creates a separate link for the other measurement',
+              str(srcs))
+
+        # The picker must mark the run that is actually linked, not whichever
+        # run inherited the number — that is what led users into the above.
+        pool = a.assess.get_all_runs_for_assessment(aid)
+        marked = {r['source_file'] for r in pool
+                  if r['ar_id'] and r['session_date'] == SESSION_DATE}
+        check(ar_src in marked, 'picker marks the linked measurement', str(sorted(marked)))
+
+        # The session card and the assessment detail must not disagree.
+        card = [x for x in a.db.get_all_sessions_json()['sessions']
+                if x['d'] == SESSION_DATE][0]
+        labelled = {p['run_number'] for p in card['projects'] if p.get('assess')}
+        detail_nums = {r['run_number'] for r in
+                       a.assess.get_assessment_detail(aid)['locations'][0]['runs']}
+        check(labelled == detail_nums,
+              'session card and assessment detail agree on which runs are linked',
+              f'card {sorted(labelled)} vs detail {sorted(detail_nums)}')
+
         a.assess.delete_assessment(aid)
         a.exec('DELETE FROM runs WHERE source_file=?', 'PROJ9999')
         a.exec('UPDATE runs SET run_number = run_number + 1000 '
                'WHERE session_id=? AND run_number >= 4', sid)
         a.exec('UPDATE runs SET run_number = run_number - 1001 '
                'WHERE session_id=? AND run_number >= 1000', sid)
+
+        # ── 4c. migration audit on hostile inputs ─────────────────────────────
+        print('\n4c. migration audit flags links it cannot safely migrate')
+        aid3 = a.assess.create_assessment('Audit test')
+        lid3 = a.assess.add_assessment_location(aid3, 'L')
+        a.assess.assign_runs(aid3, lid3, [(SESSION_DATE, 2)])
+        clean = a.db.audit_assessment_run_keys()
+        check(not any(clean.values()), 'a healthy table audits clean',
+              str({k: len(v) for k, v in clean.items()}))
+
+        # A link whose stable key names a run that is not there — what an
+        # already-shifted database looks like after a naive backfill.
+        a.exec("UPDATE assessment_runs SET source_file='PROJ8888' "
+               'WHERE assessment_id=?', aid3)
+        rep = a.db.audit_assessment_run_keys()
+        check(len(rep['unmatched']) == 1, 'audit reports an unresolvable stable key',
+              str(len(rep['unmatched'])))
+
+        # A legacy row that never received one.
+        a.exec('UPDATE assessment_runs SET source_file=NULL WHERE assessment_id=?', aid3)
+        rep = a.db.audit_assessment_run_keys()
+        check(len(rep['null_source_file']) == 1, 'audit reports a missing stable key',
+              str(len(rep['null_source_file'])))
+        # ...and such a row must still be assignable without creating a second.
+        a.assess.assign_runs(aid3, lid3, [(SESSION_DATE, 2)])
+        n_legacy = len(a.sql('SELECT id FROM assessment_runs WHERE assessment_id=?', aid3))
+        check(n_legacy == 1, 'a legacy NULL-key link is updated, not duplicated',
+              str(n_legacy))
+        a.assess.delete_assessment(aid3)
+
+        # The positional UNIQUE must be gone, replaced by the stable one.
+        ddl = a.sql("SELECT sql FROM sqlite_master WHERE name='assessment_runs'")[0]['sql']
+        check('UNIQUE(assessment_id, session_date, run_number)' not in ddl,
+              'the positional UNIQUE is dropped')
+        idx = a.sql("SELECT name FROM sqlite_master WHERE type='index' "
+                    "AND name='idx_assessment_runs_stable'")
+        check(len(idx) == 1, 'the stable partial unique index exists')
 
         # ── 5. deletions replicate ────────────────────────────────────────────
         print('\n5. session deletions replicate to the peer')

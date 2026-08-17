@@ -141,19 +141,65 @@ def delete_assessment_location(loc_id):
 
 
 def assign_runs(assessment_id, location_id, run_pairs):
+    """Link runs to a location. run_pairs items are (date, run_number) or
+    (date, run_number, source_file).
+
+    The upsert targets source_file, not run_number. Keying writes on the
+    position while reads followed source_file let two things go wrong once
+    numbering shifted: re-assigning the same physical run at its new number
+    inserted a duplicate, and assigning whatever had taken the old number
+    silently rebound the existing link to a different measurement.
+    """
     conn = get_db()
-    for date, run_num in run_pairs:
-        conn.execute(
-            'INSERT INTO assessment_runs '
-            '  (assessment_id, location_id, session_date, run_number, source_file) '
-            'VALUES (?,?,?,?,('
-            '   SELECT r.source_file FROM runs r JOIN sessions s ON s.id=r.session_id'
-            '   WHERE s.date=? AND r.run_number=?)) '
-            'ON CONFLICT(assessment_id, session_date, run_number) '
-            'DO UPDATE SET location_id=excluded.location_id, '
-            '  source_file=COALESCE(excluded.source_file, assessment_runs.source_file)',
-            (assessment_id, location_id, date, run_num, date, run_num)
-        )
+    for pair in run_pairs:
+        date, run_num = pair[0], pair[1]
+        source_file = pair[2] if len(pair) > 2 else None
+        if not source_file:
+            row = conn.execute(
+                'SELECT r.source_file FROM runs r JOIN sessions s ON s.id=r.session_id '
+                'WHERE s.date=? AND r.run_number=?', (date, run_num)).fetchone()
+            source_file = row['source_file'] if row else None
+
+        if source_file:
+            # Adopt a legacy row for the same position rather than inserting
+            # beside it: it has no stable key, so it cannot conflict, and the
+            # link would silently become two.
+            legacy = conn.execute(
+                'SELECT id FROM assessment_runs WHERE assessment_id=? AND session_date=? '
+                'AND run_number=? AND source_file IS NULL',
+                (assessment_id, date, run_num)).fetchone()
+            if legacy:
+                conn.execute(
+                    'UPDATE assessment_runs SET source_file=?, location_id=? WHERE id=?',
+                    (source_file, location_id, legacy['id']))
+                continue
+            conn.execute(
+                'INSERT INTO assessment_runs '
+                '  (assessment_id, location_id, session_date, run_number, source_file) '
+                'VALUES (?,?,?,?,?) '
+                # The index is partial, so the conflict target has to repeat
+                # its WHERE clause for SQLite to match it.
+                'ON CONFLICT(assessment_id, session_date, source_file) '
+                '  WHERE source_file IS NOT NULL '
+                'DO UPDATE SET location_id=excluded.location_id, '
+                '  run_number=excluded.run_number',
+                (assessment_id, location_id, date, run_num, source_file)
+            )
+        else:
+            # No stable key available (a run that never carried a source_file).
+            # Fall back to the positional key, and do not create a second row.
+            existing = conn.execute(
+                'SELECT id FROM assessment_runs WHERE assessment_id=? AND session_date=? '
+                'AND run_number=? AND source_file IS NULL',
+                (assessment_id, date, run_num)).fetchone()
+            if existing:
+                conn.execute('UPDATE assessment_runs SET location_id=? WHERE id=?',
+                             (location_id, existing['id']))
+            else:
+                conn.execute(
+                    'INSERT INTO assessment_runs '
+                    '  (assessment_id, location_id, session_date, run_number) '
+                    'VALUES (?,?,?,?)', (assessment_id, location_id, date, run_num))
     conn.commit()
     conn.close()
 
@@ -254,7 +300,8 @@ def get_all_runs_for_assessment(assessment_id):
     conn = get_db()
     rows = conn.execute('''
         SELECT s.date as session_date, s.location_label as session_loc,
-               r.id as run_db_id, r.run_number, r.start_time, r.end_time, r.n_samples, r.step,
+               r.id as run_db_id, r.run_number, r.source_file, r.start_time, r.end_time,
+               r.n_samples, r.step,
                r.avg_laeq, r.max_laeq, r.max_lcpeak, r.max_laimax, r.location_tag
         FROM runs r
         JOIN sessions s ON r.session_id = s.id
@@ -262,10 +309,16 @@ def get_all_runs_for_assessment(assessment_id):
     ''').fetchall()
 
     ar_rows = conn.execute(
-        'SELECT id as ar_id, session_date, run_number, location_id '
+        'SELECT id as ar_id, session_date, run_number, source_file, location_id '
         'FROM assessment_runs WHERE assessment_id=?', (assessment_id,)
     ).fetchall()
-    assigned = {(ar['session_date'], ar['run_number']): dict(ar) for ar in ar_rows}
+    # Keyed on source_file so the pool marks the run that is actually linked.
+    # Keyed on run_number it marked whichever run had inherited the number,
+    # which is what walked users into re-assigning the wrong measurement.
+    assigned = {(ar['session_date'], ar['source_file']): dict(ar)
+                for ar in ar_rows if ar['source_file']}
+    assigned_legacy = {(ar['session_date'], ar['run_number']): dict(ar)
+                       for ar in ar_rows if not ar['source_file']}
 
     loc_rows = conn.execute(
         'SELECT id, label FROM assessment_locations WHERE assessment_id=?',
@@ -278,8 +331,8 @@ def get_all_runs_for_assessment(assessment_id):
     result = []
     for r in rows:
         row = _with_end(dict(r))
-        key = (r['session_date'], r['run_number'])
-        ar = assigned.get(key)
+        ar = (assigned.get((r['session_date'], r['source_file']))
+              or assigned_legacy.get((r['session_date'], r['run_number'])))
         row['ar_id'] = ar['ar_id'] if ar else None
         row['assigned_location_id'] = ar['location_id'] if ar else None
         row['assigned_location_label'] = (

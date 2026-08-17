@@ -636,11 +636,12 @@ function clearActiveLoc() {
 async function doAssignOne(key) {
   if (!S.activeLoc) return;
   const locId = S.activeLoc;
-  const [date, rn] = key.split('|');
+  const [date, rn, srcFile] = key.split('|');
   await fetch(`/api/assessments/${S.currentId}/assign`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ location_id: locId, runs: [{ date, run_number: parseInt(rn) }] }),
+    body: JSON.stringify({ location_id: locId,
+        runs: [{ date, run_number: parseInt(rn), source_file: srcFile || null }] }),
   });
   S.activeLoc = locId;
   await reloadCurrent();
