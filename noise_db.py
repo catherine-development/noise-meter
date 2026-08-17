@@ -168,12 +168,34 @@ def _migrate(conn):
             assessment_id   INTEGER NOT NULL REFERENCES assessments(id) ON DELETE CASCADE,
             location_id     INTEGER REFERENCES assessment_locations(id) ON DELETE SET NULL,
             session_date    TEXT NOT NULL,
+            -- Positional index of the run within its session. Kept for peer
+            -- compatibility and as a fallback, but it is NOT a stable identity:
+            -- recovering a previously unparseable run shifts every later number
+            -- on that date, silently re-pointing assessment links. source_file
+            -- is the stable key and is preferred wherever both are present.
             run_number      INTEGER NOT NULL,
+            source_file     TEXT,
             conditions      TEXT,
             notes           TEXT,
             UNIQUE(assessment_id, session_date, run_number)
         );
     ''')
+
+    ar_cols = {row[1] for row in conn.execute('PRAGMA table_info(assessment_runs)').fetchall()}
+    if 'source_file' not in ar_cols:
+        conn.execute('ALTER TABLE assessment_runs ADD COLUMN source_file TEXT')
+        # Backfill through the run_number join, which is still correct at this
+        # point: the numbers only go stale once a re-import shifts them, and
+        # this runs before any such import can.
+        conn.execute('''
+            UPDATE assessment_runs SET source_file = (
+                SELECT r.source_file FROM runs r
+                JOIN sessions s ON s.id = r.session_id
+                WHERE s.date = assessment_runs.session_date
+                  AND r.run_number = assessment_runs.run_number
+            ) WHERE source_file IS NULL
+        ''')
+
     conn.commit()
 
 

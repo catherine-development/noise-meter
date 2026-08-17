@@ -144,10 +144,15 @@ def assign_runs(assessment_id, location_id, run_pairs):
     conn = get_db()
     for date, run_num in run_pairs:
         conn.execute(
-            'INSERT INTO assessment_runs (assessment_id, location_id, session_date, run_number) '
-            'VALUES (?,?,?,?) ON CONFLICT(assessment_id, session_date, run_number) '
-            'DO UPDATE SET location_id=excluded.location_id',
-            (assessment_id, location_id, date, run_num)
+            'INSERT INTO assessment_runs '
+            '  (assessment_id, location_id, session_date, run_number, source_file) '
+            'VALUES (?,?,?,?,('
+            '   SELECT r.source_file FROM runs r JOIN sessions s ON s.id=r.session_id'
+            '   WHERE s.date=? AND r.run_number=?)) '
+            'ON CONFLICT(assessment_id, session_date, run_number) '
+            'DO UPDATE SET location_id=excluded.location_id, '
+            '  source_file=COALESCE(excluded.source_file, assessment_runs.source_file)',
+            (assessment_id, location_id, date, run_num, date, run_num)
         )
     conn.commit()
     conn.close()
@@ -215,7 +220,9 @@ def get_assessment_detail(aid):
                    r.location_tag, ar.session_date
             FROM assessment_runs ar
             JOIN sessions s ON s.date = ar.session_date
-            JOIN runs r ON r.session_id = s.id AND r.run_number = ar.run_number
+            JOIN runs r ON r.session_id = s.id AND (
+                 r.source_file = ar.source_file
+                 OR (ar.source_file IS NULL AND r.run_number = ar.run_number))
             WHERE ar.assessment_id=? AND ar.location_id=?
             ORDER BY ar.session_date, r.start_time
         ''', (aid, loc['id'])).fetchall()
@@ -231,7 +238,9 @@ def get_assessment_detail(aid):
                r.location_tag, ar.session_date
         FROM assessment_runs ar
         JOIN sessions s ON s.date = ar.session_date
-        JOIN runs r ON r.session_id = s.id AND r.run_number = ar.run_number
+        JOIN runs r ON r.session_id = s.id AND (
+                 r.source_file = ar.source_file
+                 OR (ar.source_file IS NULL AND r.run_number = ar.run_number))
         WHERE ar.assessment_id=? AND ar.location_id IS NULL
         ORDER BY ar.session_date, r.start_time
     ''', (aid,)).fetchall()
@@ -302,7 +311,9 @@ def prepare_assessment_report_data(aid):
                    r.la_l10, r.la_l50, r.la_l90, r.laeq_json, ar.session_date
             FROM assessment_runs ar
             JOIN sessions s ON s.date = ar.session_date
-            JOIN runs r ON r.session_id = s.id AND r.run_number = ar.run_number
+            JOIN runs r ON r.session_id = s.id AND (
+                 r.source_file = ar.source_file
+                 OR (ar.source_file IS NULL AND r.run_number = ar.run_number))
             WHERE ar.assessment_id=? AND ar.location_id=?
             ORDER BY ar.session_date, r.start_time
         ''', (aid, loc['id'])).fetchall()

@@ -104,12 +104,18 @@ def apply_full_sync(payload):
                 sort_order=excluded.sort_order, notes=excluded.notes
         ''', loc)
     for ar in payload.get('assessment_runs', []):
+        # A peer on the older schema sends no source_file. Default it so the
+        # named parameter binds, and let COALESCE keep any value we already
+        # hold — an old peer's silence must not erase the stable key.
+        ar = dict(ar)
+        ar.setdefault('source_file', None)
         conn.execute('''
             INSERT INTO assessment_runs
-                (id,assessment_id,location_id,session_date,run_number,conditions,notes)
-            VALUES (:id,:assessment_id,:location_id,:session_date,:run_number,:conditions,:notes)
+                (id,assessment_id,location_id,session_date,run_number,source_file,conditions,notes)
+            VALUES (:id,:assessment_id,:location_id,:session_date,:run_number,:source_file,:conditions,:notes)
             ON CONFLICT(id) DO UPDATE SET
                 location_id=excluded.location_id,
+                source_file=COALESCE(excluded.source_file, assessment_runs.source_file),
                 conditions=excluded.conditions, notes=excluded.notes
         ''', ar)
     for sm in payload.get('sessions_meta', []):
@@ -177,12 +183,15 @@ def apply_sync_event(entity, action, data):
             conn.execute('DELETE FROM assessment_locations WHERE id=?', (data['id'],))
     elif entity == 'assessment_run':
         if action == 'upsert':
+            data = dict(data)
+            data.setdefault('source_file', None)   # older peer — see above
             conn.execute('''
                 INSERT INTO assessment_runs
-                    (id,assessment_id,location_id,session_date,run_number,conditions,notes)
-                VALUES (:id,:assessment_id,:location_id,:session_date,:run_number,:conditions,:notes)
+                    (id,assessment_id,location_id,session_date,run_number,source_file,conditions,notes)
+                VALUES (:id,:assessment_id,:location_id,:session_date,:run_number,:source_file,:conditions,:notes)
                 ON CONFLICT(id) DO UPDATE SET
                     location_id=excluded.location_id,
+                    source_file=COALESCE(excluded.source_file, assessment_runs.source_file),
                     conditions=excluded.conditions, notes=excluded.notes
             ''', data)
         elif action == 'delete':

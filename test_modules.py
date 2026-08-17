@@ -535,6 +535,59 @@ def main(meas_root):
         check(pdisp.get('end_time') == '12:09:52',
               'peer re-exports end_time for onward sync')
 
+        # ── 4b. assessment links survive a run-number shift ───────────────────
+        print('\n4b. assessment links are keyed on the stable run identity')
+        aid = a.assess.create_assessment('Shift test', standard='bs4142')
+        lid = a.assess.add_assessment_location(aid, 'Boundary')
+        a.assess.assign_runs(aid, lid, [(SESSION_DATE, 5)])
+        before = a.assess.get_assessment_detail(aid)['locations'][0]['runs'][0]
+        check(before['run_number'] == 5, 'link created against run 5')
+        pinned_start = before['start_time']
+        ar_src = a.sql('SELECT source_file FROM assessment_runs')[0]['source_file']
+        check(ar_src is not None, 'link stored the stable source_file', str(ar_src))
+
+        # Simulate what a re-import does when a previously unparseable run is
+        # recovered: an extra run appears earlier in the session and every later
+        # run shifts up one. Keyed on run_number alone, the link would silently
+        # follow the number onto a different measurement.
+        sid = a.sql('SELECT id FROM sessions WHERE date=?', SESSION_DATE)[0]['id']
+        # Two steps: a single +1 pass collides with UNIQUE(session_id, run_number)
+        # as SQLite rewrites row by row.
+        a.exec('UPDATE runs SET run_number = run_number + 1000 '
+               'WHERE session_id=? AND run_number >= 3', sid)
+        a.exec('UPDATE runs SET run_number = run_number - 999 '
+               'WHERE session_id=? AND run_number >= 1000', sid)
+        a.exec("INSERT INTO runs (session_id, run_number, source_file, start_time, "
+               "n_samples, step, avg_laeq) VALUES (?,3,'PROJ9999','20:00:00',60,1,50.0)", sid)
+
+        after = a.assess.get_assessment_detail(aid)['locations'][0]['runs'][0]
+        check(after['start_time'] == pinned_start,
+              'link still resolves to the same physical run after the shift',
+              f"{pinned_start} -> {after['start_time']}")
+        check(after['run_number'] == 6,
+              'and follows it to its new position', str(after['run_number']))
+        moved = a.sql('SELECT start_time FROM runs WHERE session_id=? AND run_number=5',
+                      sid)[0]['start_time']
+        check(moved != pinned_start,
+              'run 5 is now a different measurement — what the old key would have returned',
+              f'{moved} vs {pinned_start}')
+
+        # A peer on the older schema sends no source_file; that must not erase ours.
+        a.sync.apply_sync_event('assessment_run', 'upsert', {
+            'id': a.sql('SELECT id FROM assessment_runs')[0]['id'],
+            'assessment_id': aid, 'location_id': lid, 'session_date': SESSION_DATE,
+            'run_number': 6, 'conditions': 'dry', 'notes': ''})
+        kept = a.sql('SELECT source_file FROM assessment_runs')[0]['source_file']
+        check(kept == ar_src, "an old peer's payload does not erase source_file",
+              str(kept))
+
+        a.assess.delete_assessment(aid)
+        a.exec('DELETE FROM runs WHERE source_file=?', 'PROJ9999')
+        a.exec('UPDATE runs SET run_number = run_number + 1000 '
+               'WHERE session_id=? AND run_number >= 4', sid)
+        a.exec('UPDATE runs SET run_number = run_number - 1001 '
+               'WHERE session_id=? AND run_number >= 1000', sid)
+
         # ── 5. deletions replicate ────────────────────────────────────────────
         print('\n5. session deletions replicate to the peer')
         baid = b.assess.create_assessment('Peer side', standard='bs4142')
