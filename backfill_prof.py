@@ -101,11 +101,13 @@ def main():
             print(f'  PARSE FAIL {row["date"]}  {proj_folder}  (len={len(prof_data)})')
             continue
 
-        lafspl = [decode_value(r[0], digits=1, clamp_min=FLOOR_DB, clamp_max=CAP_LAEQ) for r in recs]
-        laeq   = [decode_value(r[1], digits=1, clamp_min=FLOOR_DB, clamp_max=CAP_LAEQ) for r in recs]
-        lafmax = [decode_value(r[2], digits=1, clamp_min=FLOOR_DB, clamp_max=CAP_LAEQ) for r in recs]
-        lae    = [decode_value(r[3], digits=1, clamp_min=FLOOR_DB, clamp_max=CAP_LAEQ) for r in recs]
-        lapeak = [decode_value(r[4], digits=1, clamp_min=FLOOR_DB, clamp_max=CAP_PEAK)  for r in recs]
+        # 2 decimals, matching noise_parser: rounding to 1 here would discard the
+        # precision the xlsx exporter needs, putting ~5% of values 0.1 dB low.
+        lafspl = [decode_value(r[0], digits=2, clamp_min=FLOOR_DB, clamp_max=CAP_LAEQ) for r in recs]
+        laeq   = [decode_value(r[1], digits=2, clamp_min=FLOOR_DB, clamp_max=CAP_LAEQ) for r in recs]
+        lafmax = [decode_value(r[2], digits=2, clamp_min=FLOOR_DB, clamp_max=CAP_LAEQ) for r in recs]
+        lae    = [decode_value(r[3], digits=2, clamp_min=FLOOR_DB, clamp_max=CAP_LAEQ) for r in recs]
+        lapeak = [decode_value(r[4], digits=2, clamp_min=FLOOR_DB, clamp_max=CAP_PEAK)  for r in recs]
 
         if dry_run:
             print(f'  WOULD UPDATE  {row["date"]}  {proj_folder}  n={len(recs)}')

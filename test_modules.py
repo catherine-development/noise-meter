@@ -345,6 +345,56 @@ def main(meas_root):
         check(not c.has_session('2026-07-01'), 'purged date removed on catch-up')
         check(not c.has_session(SESSION_DATE), 'deleted session removed on catch-up')
 
+        # ── 7. NOR140 xlsx parity with the Nortfr reference export ────────────
+        print('\n7. xlsx export matches the Nortfr reference for run 9')
+        ref_dir = os.path.expanduser('~/Downloads/nortfr')
+        ref_g = os.path.join(ref_dir, 'NOR140_6899108_260812_0009_GLOBAL.xlsx')
+        ref_p = os.path.join(ref_dir, 'NOR140_6899108_260812_0009_PROFILE.xlsx')
+        if not (os.path.exists(ref_g) and os.path.exists(ref_p)):
+            print('  SKIP — Nortfr reference workbooks not present')
+        else:
+            from openpyxl import load_workbook
+            from nor140_exporter import build_global_xlsx, build_profile_xlsx
+            import io
+            src = Side(os.path.join(tmp, 'xlsx.db'))
+            src.db.import_sessions(sessions)
+            src.db.set_setting('instrument_serial', '6899108')
+            run = src.db.get_full_run_row(SESSION_DATE, 9)
+
+            def cells(src_obj):
+                wb = load_workbook(io.BytesIO(src_obj) if isinstance(src_obj, bytes) else src_obj,
+                                   data_only=True)
+                out = {ws.title: [list(r) for r in ws.iter_rows(values_only=True)]
+                       for ws in wb.worksheets}
+                wb.close()
+                return out
+
+            for label, built, ref_path in (
+                    ('GLOBAL', build_global_xlsx(run, '6899108'), ref_g),
+                    ('PROFILE', build_profile_xlsx(run, '6899108'), ref_p)):
+                gen, ref = cells(built), cells(ref_path)
+                check(list(gen) == list(ref), f'{label}: sheet names and order match')
+                diffs = 0
+                for name in ref:
+                    g, r_ = gen.get(name, []), ref[name]
+                    for i in range(max(len(g), len(r_))):
+                        gr = g[i] if i < len(g) else []
+                        rr = r_[i] if i < len(r_) else []
+                        for j in range(max(len(gr), len(rr))):
+                            gv = gr[j] if j < len(gr) else None
+                            rv = rr[j] if j < len(rr) else None
+                            if gv == rv:
+                                continue
+                            if (isinstance(gv, float) and isinstance(rv, float)
+                                    and abs(gv - rv) < 1e-9):
+                                continue
+                            diffs += 1
+                # Exact parity. PROFILE used to differ on 222 values because the
+                # 1-second series were stored at 1 decimal and rounded twice; if
+                # that regresses, this is the check that catches it.
+                check(diffs == 0, f'{label}: every cell matches Nortfr exactly',
+                      f'{diffs} differing cells')
+
         print(f'\nAll {_checks} checks passed.')
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

@@ -907,7 +907,8 @@ Two standalone scripts populate historical data for existing runs without re-imp
 - **`backfill_glob.py`** — decodes all 18 spectral tables from `GLOB*.DAT` files in the ZIP and writes them to the `spec_*` columns. Sentinel: `spec_lfeq IS NULL`.
 - **`backfill_prof.py`** — decodes the 5-channel 1-second time series from `PROF*.DAT` files and writes them to the `prof_*_json` columns. Sentinel: `prof_lafspl_json IS NULL`.
 
-Both use the same decode: `uint16_LE / 128 - 20`, and round to 1 decimal place before JSON-encoding.
+Both use the same decode: `uint16_LE / 128 - 20`, and round to **2** decimal places before
+JSON-encoding. Do not reduce this to 1 — see the resolved double-rounding note below.
 
 ### Sanity checks run (2026-08-15)
 
@@ -917,11 +918,56 @@ Three-point verification against Nortfr reference for 2026-08-12:
 2. **Spectral integrity**: A-weighted energy sum of `spec_lfeq` matches stored `avg_laeq` to ±0.03 dB for all 10 August-12 runs. ✓
 3. **Nortfr reference parity (run 9)**: LAeq=70.8, LApeak=97.4, LCpeak=98.6, LA10=74.8, LA50=67.1, LA90=57.1, LCeq=78.7. All match. ✓
 
-### Known 0.1 dB decode discrepancy in PROF values
+### RESOLVED (2026-08-17): the 0.1 dB PROF discrepancy was our own double rounding
 
-When comparing generated PROFILE xlsx against the Nortfr reference, approximately 5% of 1-second values differ by exactly 0.1 dB (ours is 0.1 dB lower). This is a systematic rounding difference at the decode/storage stage, not in the xlsx writer. The xlsx writer correctly outputs what is stored in the database.
+**Status: fixed. PROFILE xlsx now matches the Nortfr reference exactly, 0 differing cells.**
 
-Root cause: the NOR140 hardware apparently uses a rounding convention that, in some edge cases, rounds 0.05 up where Python's `round()` rounds to even. The effect is ≤0.1 dB on affected values and does not affect the global scalar values (which come from GLOB offsets directly, not the PROF decode).
+This section previously recorded the cause as a NOR140 hardware rounding convention,
+"rounds 0.05 up where Python's `round()` rounds to even". That was wrong on both
+counts, and is corrected here because it would mislead anyone re-deriving the format:
+
+- The code never used Python's `round()`. `nor140_format.round_half_up()` has always
+  been half-up, so banker's rounding was never in play.
+- It was not a hardware quirk at all. It was **double rounding in our own storage.**
+
+Actual cause: `noise_parser.py` stored the PROF series at **1 decimal**, while it stored
+the GLOB scalars and spectra at **2**. `nor140_exporter._rv()` then rounds to 1 decimal
+on the way out. So GLOBAL took a two-stage path (exact → 2 dp → 1 dp) and matched
+Nortfr perfectly, while PROFILE had already lost the intermediate precision and could
+only be single-rounded — putting ~5% of values 0.1 dB low.
+
+Nortfr evidently applies the same two-stage rounding. Worked example, first sample of
+run 9:
+
+```text
+raw word 12857  ->  12857/128 - 20  =  80.4453125 dB exact
+  single stage:  round_half_up(80.4453125, 1)                 = 80.4   (was stored)
+  two stage:     round_half_up(round_half_up(…, 2), 1)
+                 80.4453125 -> 80.45 -> 80.5                  = 80.5   (Nortfr)
+```
+
+Confirmed by three independent lines of evidence:
+
+1. Applying the two-stage rounding to all 4,500 raw values of run 9 reproduces the
+   entire Nortfr PROFILE workbook with **zero** differences, against 222 under single
+   rounding.
+2. The affected rate is **4.933%** (222/4500), against a predicted **5.000%** — double
+   rounding promotes exactly those values whose fraction falls in `[0.045, 0.050)`,
+   which is 5% of each 0.1 dB step.
+3. The code asymmetry predicts the result asymmetry exactly: 2 dp storage → GLOBAL
+   matched; 1 dp storage → PROFILE did not.
+
+**Fix applied:** store the PROF series at 2 decimals in both `noise_parser.py` and
+`backfill_prof.py`. The exporter needed no change — feeding it 2 dp values *is* the
+two-stage path. Pinned by `test_modules.py`, which now asserts 0 differing cells
+against both reference workbooks.
+
+Worth knowing: single rounding was in fact marginally *more* accurate (mean error
+0.0469 dB against Nortfr's 0.0531 dB, closer in all 222 cases), since double rounding
+amplifies error. That was not the reason to change it. The reason is that storing only
+1 decimal discarded precision needed by everything derived from the profile — the
+pooled LA50 for run 9 came out 67.0, where the meter's own GLOB percentile says 67.1.
+At 2 dp it agrees. Vendor-exact export came along for free.
 
 ### xlsx exporter (`nor140_exporter.py`)
 

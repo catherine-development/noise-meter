@@ -218,12 +218,17 @@ def _parse_session_files(glob_data, prof_data):
         'lc_l99': _gm('lc_l99'),
         # 1/3-octave spectral arrays (36 floats each; None for 1069-byte GLOBs)
         **{col: glob_metrics.get(col) for col, _ in SPECTRAL_TABLES},
-        # Full 1-second PROF time series
-        'prof_lafspl_json': [_round_db(v, 1) for v in lafspl_raw],
-        'prof_laeq_json':   [_round_db(v, 1) for v in laeq_raw],
-        'prof_lafmax_json': [_round_db(v, 1) for v in lafmax_raw],
-        'prof_lae_json':    [_round_db(v, 1) for v in lae_raw],
-        'prof_lapeak_json': [_round_db(v, 1) for v in lapeak_raw],
+        # Full 1-second PROF time series, stored at 2 decimals to match the GLOB
+        # scalars above. Storing 1 decimal here used to discard the intermediate
+        # precision permanently: the exporter then rounded again, so ~5% of values
+        # came out 0.1 dB below Nortfr (the classic double-rounding band, fractions
+        # in [0.045, 0.050)). Keeping 2 decimals fixes the exported values and, more
+        # importantly, the percentiles pooled from these series.
+        'prof_lafspl_json': [_round_db(v, 2) for v in lafspl_raw],
+        'prof_laeq_json':   [_round_db(v, 2) for v in laeq_raw],
+        'prof_lafmax_json': [_round_db(v, 2) for v in lafmax_raw],
+        'prof_lae_json':    [_round_db(v, 2) for v in lae_raw],
+        'prof_lapeak_json': [_round_db(v, 2) for v in lapeak_raw],
         # PROF-derived values (profile graphs and fallback mins/maxes)
         'mn':     _round_db(glob_metrics.get('lafmin', min(laeq_raw)), 1),
         'mx':     _round_db(glob_metrics.get('lafmax', max(lafmax_raw)), 1),
