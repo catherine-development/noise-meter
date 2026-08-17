@@ -18,7 +18,7 @@ from flask import Blueprint, render_template, request, jsonify, abort
 
 from config import PI_NAME
 from webauth import login_required
-from noise_db import get_all_sessions_json, get_session_prof_lafspl
+from noise_db import get_all_sessions_json, get_session_prof_lafspl, get_run_prof_laeq
 from reports_db import (get_report_templates, get_report_template, save_report_template,
                         update_report_template, delete_report_template,
                         save_generated_report, get_generated_reports,
@@ -54,7 +54,7 @@ def _expand_run(proj):
     return las[:proj.get('n', len(las))]
 
 
-def _run_stats(proj):
+def _run_stats(proj, true_laeq=None):
     """Compute statistical suite for one run.
 
     Prefers GLOB-derived scalar metrics (instrument-computed, accurate) over profile-
@@ -74,7 +74,7 @@ def _run_stats(proj):
             'la90':  _percentile(s, 10),
             'lmax':  max(s),
             'lmin':  min(s),
-            'pct85': round(100 * sum(1 for v in las_full if v >= 85) / n, 1),
+            'pct85': None,   # set from true_laeq below
         })
     # Override with GLOB-derived scalars where available
     if proj.get('avg')    is not None: stats['leq']  = round(proj['avg'], 1)
@@ -83,6 +83,8 @@ def _run_stats(proj):
     if proj.get('la_l90') is not None: stats['la90'] = round(proj['la_l90'], 1)
     if proj.get('lafmax') is not None: stats['lmax'] = round(proj['lafmax'], 1)
     if proj.get('mn')     is not None: stats['lmin'] = round(proj['mn'], 1)
+    if true_laeq:
+        stats['pct85'] = round(100 * sum(1 for v in true_laeq if v >= 85) / len(true_laeq), 1)
     return stats
 
 
@@ -267,7 +269,7 @@ def _prepare_session_for_report(date, run_number=None):
     run_rows, all_laeq = [], []
     for i, proj in enumerate(projects, 1):
         rn = base_num if base_num is not None else i
-        st = _run_stats(proj)
+        st = _run_stats(proj, true_laeq=get_run_prof_laeq(date, rn))
         run_rows.append({'run': rn, 'start': proj['start'], **st})
         all_laeq.extend(_expand_run(proj))
     total_s = sum(p.get('n', 0) for p in projects)

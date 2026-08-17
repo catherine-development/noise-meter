@@ -298,6 +298,20 @@ def main(meas_root):
         check(a.reports._percentile([], 50) is None, 'empty input returns None')
         check(a.reports._percentile([42.0], 90) == 42.0, 'single value returns itself')
 
+        # pct85 must count the true 1-second series, not the expanded chart profile
+        # (whose windows each hold a maximum, overstating time above the threshold).
+        for rn in (5, 7):
+            true_series = json.loads(a.db.get_full_run_row(SESSION_DATE, rn)['prof_laeq_json'])
+            expected = round(100 * sum(1 for v in true_series if v >= 85) / len(true_series), 1)
+            proj = sess['projects'][rn - 1]
+            st = a.reports._run_stats(proj, true_laeq=a.db.get_run_prof_laeq(SESSION_DATE, rn))
+            check(st['pct85'] == expected,
+                  f'run {rn}: pct85 counts the true series', f"{st['pct85']} vs {expected}")
+            inflated = a.reports._expand_run(proj)
+            infl = round(100 * sum(1 for v in inflated if v >= 85) / len(inflated), 1)
+            check(infl >= st['pct85'],
+                  f'run {rn}: the old chart-profile count was higher ({infl} vs {st["pct85"]})')
+
         p9 = a.reports._percentile(sorted(a.db.get_session_prof_lafspl(SESSION_DATE, [9])), 90)
         p10 = a.reports._percentile(sorted(a.db.get_session_prof_lafspl(SESSION_DATE, [10])), 90)
         pooled_910 = a.reports._percentile(sorted(multi), 90)
@@ -514,6 +528,23 @@ def main(meas_root):
               'Planning: the old incorrect bedroom value is gone')
         check('rating level' in plan['prompt'],
               'Planning: BS 4142 rating level (not raw specific level) is required')
+
+        # The Noise Act permitted level depends on the underlying sound level and is
+        # assessed indoors; there is no single number to compare an external LAeq to.
+        lge = next(t for t in m.reports_db.DEFAULT_TEMPLATES
+                   if t['name'] == 'Local Government Enforcement')
+        check('35 dB LAeq indoors' not in lge['prompt'],
+              'LGE: the old fixed 35/45 dB Noise Act figures are gone')
+        check('underlying level' in lge['prompt'] and '34 dB LAeq' in lge['prompt'],
+              'LGE: permitted level stated as depending on the underlying level')
+        check('dwelling' in lge['prompt'], 'LGE: says it is assessed inside the dwelling')
+
+        # Workplace action values are a daily personal exposure, not a measured LAeq.
+        occ = next(t for t in m.reports_db.DEFAULT_TEMPLATES
+                   if t['name'] == 'Occupational Health')
+        check('LEP,d' in occ['prompt'], 'Occupational: uses LEP,d')
+        check('dB LAeq,8h /' not in occ['prompt'],
+              'Occupational: no longer calls the action values LAeq,8h')
 
         # ── 7. NOR140 xlsx parity with every Nortfr reference present ─────────
         print('\n7. xlsx export matches the Nortfr references')

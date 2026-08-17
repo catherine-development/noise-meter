@@ -678,6 +678,24 @@ def get_session_prof_lafspl(date, run_numbers=None):
     return pooled
 
 
+def get_run_prof_laeq(date, run_number):
+    """Return the full 1-second LAeq series for one run, or [] if not stored.
+
+    The session browser payload only carries the downsampled chart profile, which
+    holds the maximum of each window. Anything counting samples against a
+    threshold must read the real series instead — counting the expanded chart
+    profile overstated time above 85 dB by up to the downsample step.
+    """
+    conn = get_db()
+    row = conn.execute(
+        'SELECT r.prof_laeq_json FROM runs r JOIN sessions s ON r.session_id = s.id '
+        'WHERE s.date = ? AND r.run_number = ?', (date, run_number)).fetchone()
+    conn.close()
+    if not row or not row['prof_laeq_json']:
+        return []
+    return json.loads(row['prof_laeq_json'])
+
+
 def update_run_location_tag(date, run_number, tag):
     conn = get_db()
     conn.execute(
