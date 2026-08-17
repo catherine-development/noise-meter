@@ -1,3 +1,4 @@
+import math
 import os
 import json
 import sqlite3
@@ -719,6 +720,78 @@ def get_session_tombstones():
         'SELECT date, deleted_at FROM deleted_sessions ORDER BY date').fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def recompute_session_aggregates(dates=None):
+    """Rebuild sessions.avg_laeq / max_laeq / run_count from the runs they own.
+
+    The backfill scripts correct run-level values (backfill_glob.py rewrites
+    runs.avg_laeq with the GLOB-derived LAeq) but historically left the session
+    row untouched, so a session could sit ~8 dB high — the old 0x0422 LAeq bug
+    preserved at session level long after the runs were fixed.
+
+    Deliberately uses the same formula as noise_parser.parse_zip(), an
+    equal-weight energy average of the per-run LAeq, so that a backfill and a
+    re-import of the same data produce identical session rows. (Reports compute
+    a duration-weighted session LAeq separately, which is the more correct
+    figure when runs differ in length; this column exists for the session list
+    and CSV export.)
+
+    Returns [(date, old_avg, new_avg)] for the sessions whose values changed.
+    """
+    conn = get_db()
+    if dates:
+        ph = ','.join('?' * len(dates))
+        sess = conn.execute(
+            f'SELECT id, date, avg_laeq, max_laeq, run_count FROM sessions '
+            f'WHERE date IN ({ph})', tuple(dates)).fetchall()
+    else:
+        sess = conn.execute(
+            'SELECT id, date, avg_laeq, max_laeq, run_count FROM sessions').fetchall()
+
+    changed = []
+    for s in sess:
+        runs = conn.execute(
+            'SELECT avg_laeq, max_laeq FROM runs WHERE session_id=?', (s['id'],)
+        ).fetchall()
+        if not runs:
+            continue
+        laeqs = [r['avg_laeq'] for r in runs if r['avg_laeq'] is not None]
+        maxes = [r['max_laeq'] for r in runs if r['max_laeq'] is not None]
+        if not laeqs:
+            continue
+        new_avg = round(10 * math.log10(
+            sum(10 ** (v / 10) for v in laeqs) / len(laeqs)), 2)
+        new_max = round(max(maxes), 1) if maxes else s['max_laeq']
+        if (s['avg_laeq'] != new_avg or s['max_laeq'] != new_max
+                or s['run_count'] != len(runs)):
+            conn.execute(
+                'UPDATE sessions SET avg_laeq=?, max_laeq=?, run_count=? WHERE id=?',
+                (new_avg, new_max, len(runs), s['id']))
+            changed.append((s['date'], s['avg_laeq'], new_avg))
+    conn.commit()
+    conn.close()
+    return changed
+
+
+def delete_orphaned_runs():
+    """Delete run rows whose session no longer exists.
+
+    These accumulate when sessions are deleted through a connection that did not
+    enable `PRAGMA foreign_keys`, so the ON DELETE CASCADE never fires. They are
+    unreachable — every read path inner-joins through sessions — but they carry
+    the full spectral and profile JSON, so they waste real space.
+
+    Returns the number of rows deleted.
+    """
+    conn = get_db()
+    cur = conn.execute(
+        'DELETE FROM runs WHERE session_id IS NULL '
+        'OR session_id NOT IN (SELECT id FROM sessions)')
+    n = cur.rowcount
+    conn.commit()
+    conn.close()
+    return n
 
 
 def get_sessions_export_format(dates=None):

@@ -22,6 +22,9 @@ Usage:
 """
 import json, os, re, sys, zipfile, sqlite3
 from nor140_format import bcd, read_glob_scalars, read_glob_spectral_tables
+# This script rewrites runs.avg_laeq, so the session row that aggregates it has
+# to be rebuilt afterwards or it keeps a stale value indefinitely.
+from noise_db import recompute_session_aggregates
 
 DB_PATH  = os.environ.get('NOISE_DB_PATH', '/home/flightdata/noise-meter/noise.db')
 _DATE_RE = re.compile(r'^\d{6}$')
@@ -123,6 +126,7 @@ def main():
         return
 
     updated = skipped = not_found = parse_fail = 0
+    touched_dates = set()
 
     for row in rows:
         date_folder  = _yymmdd(row['date'])
@@ -160,6 +164,7 @@ def main():
         set_clause = ', '.join(f'{c}=?' for c in set_cols)
         set_vals.append(row['id'])
 
+        touched_dates.add(row['date'])
         if dry_run:
             laeq_was  = row['avg_laeq']
             laeq_now  = metrics.get('laeq')
@@ -177,6 +182,18 @@ def main():
     conn.close()
     verb = 'Would update' if dry_run else 'Updated'
     print(f'\n{verb}: {updated}  |  Not in ZIP: {not_found}  |  Parse fail: {parse_fail}')
+
+    # Rebuild the session rows for every date whose runs changed. Without this the
+    # session keeps the LAeq computed at original import — for the 2026-08-12
+    # session that was 83.58 dB against a true 74.85 dB, the old 0x0422 bug
+    # surviving at session level long after the runs were corrected.
+    if dry_run:
+        print(f'Would recompute session aggregates for {len(touched_dates)} date(s).')
+    elif touched_dates:
+        changed = recompute_session_aggregates(sorted(touched_dates))
+        print(f'Session aggregates recomputed: {len(changed)} changed')
+        for date, old, new in changed:
+            print(f'  {date}  avg_laeq {old} → {new}')
     if not_found:
         print("(Not-in-ZIP runs may be from an older SD card not included in this ZIP.)")
 

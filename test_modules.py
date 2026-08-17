@@ -73,6 +73,16 @@ class Side:
         conn.commit()
         conn.close()
 
+    def exec_nofk(self, query, *params):
+        """Write with foreign keys OFF — how orphaned rows arise in the first place.
+        noise_db.get_db() always enables them, so an orphan cannot be created
+        through it; this reproduces the connection that caused the real ones."""
+        import sqlite3
+        conn = sqlite3.connect(self.db_path)
+        conn.execute(query, params)
+        conn.commit()
+        conn.close()
+
     def has_session(self, date):
         return bool(self.sql('SELECT 1 FROM sessions WHERE date=?', date))
 
@@ -344,6 +354,43 @@ def main(meas_root):
         c.sync.apply_full_sync(a.sync.get_full_sync_payload())
         check(not c.has_session('2026-07-01'), 'purged date removed on catch-up')
         check(not c.has_session(SESSION_DATE), 'deleted session removed on catch-up')
+
+        # ── 6b. session aggregates and orphan cleanup ─────────────────────────
+        print('\n6b. recompute_session_aggregates() and delete_orphaned_runs()')
+        m = Side(os.path.join(tmp, 'maint.db'))
+        m.db.import_sessions(sessions, metadata=META)
+        good = m.sql('SELECT avg_laeq, max_laeq, run_count FROM sessions WHERE date=?',
+                     SESSION_DATE)[0]
+        import_avg = good['avg_laeq']
+
+        # Reproduce the real defect: runs corrected, session left stale (the old
+        # 0x0422 LAeq bug survived at session level ~8 dB high).
+        m.exec('UPDATE sessions SET avg_laeq=83.58, max_laeq=1.0, run_count=99 WHERE date=?',
+               SESSION_DATE)
+        changed = m.db.recompute_session_aggregates([SESSION_DATE])
+        fixed = m.sql('SELECT avg_laeq, max_laeq, run_count FROM sessions WHERE date=?',
+                      SESSION_DATE)[0]
+        check(len(changed) == 1 and changed[0][0] == SESSION_DATE,
+              'recompute reports the changed session', str(changed))
+        check(fixed['avg_laeq'] == import_avg,
+              'recomputed avg_laeq equals what import produced',
+              f'{fixed["avg_laeq"]} vs {import_avg}')
+        check(fixed['max_laeq'] == good['max_laeq'], 'max_laeq restored')
+        check(fixed['run_count'] == good['run_count'], 'run_count restored')
+        check(m.db.recompute_session_aggregates([SESSION_DATE]) == [],
+              'recompute is idempotent — second pass changes nothing')
+
+        # Orphans: a run pointing at a session id that does not exist, plus one
+        # with a NULL session_id, must both go; attached runs must survive.
+        attached_before = n_of(m, 'runs', 'WHERE session_id IN (SELECT id FROM sessions)')
+        m.exec_nofk('INSERT INTO runs (session_id, run_number, avg_laeq) VALUES (999999, 1, 50.0)')
+        m.exec_nofk('INSERT INTO runs (session_id, run_number, avg_laeq) VALUES (NULL, 2, 51.0)')
+        check(n_of(m, 'runs') == attached_before + 2, 'two orphan rows planted')
+        removed = m.db.delete_orphaned_runs()
+        check(removed == 2, 'delete_orphaned_runs removed exactly the orphans', str(removed))
+        check(n_of(m, 'runs') == attached_before, 'attached runs untouched',
+              str(attached_before))
+        check(m.db.delete_orphaned_runs() == 0, 'idempotent — nothing left to remove')
 
         # ── 7. NOR140 xlsx parity with the Nortfr reference export ────────────
         print('\n7. xlsx export matches the Nortfr reference for run 9')
