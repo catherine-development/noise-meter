@@ -58,6 +58,7 @@ class Side:
         assert self.db.DB_PATH == db_path, self.db.DB_PATH
         self.sync = importlib.import_module('sync_db')
         self.assess = importlib.import_module('assessments_db')
+        self.reports_db = importlib.import_module('reports_db')
         self.reports = importlib.import_module('reports')
         self.db.init_db()
 
@@ -391,6 +392,30 @@ def main(meas_root):
         check(n_of(m, 'runs') == attached_before, 'attached runs untouched',
               str(attached_before))
         check(m.db.delete_orphaned_runs() == 0, 'idempotent — nothing left to remove')
+
+        # ── 6c. report template integrity ─────────────────────────────────────
+        print('\n6c. seed report templates are structurally valid')
+        SECTIONS = ('executive_summary', 'methodology', 'results_narrative',
+                    'compliance', 'conclusions', 'recommendations')
+        for t in m.reports_db.DEFAULT_TEMPLATES:
+            nm = t['name']
+            # Without this token the prompt reaches Claude with no measurement
+            # data in it and the report is confidently invented.
+            check('{{session_data}}' in t['prompt'],
+                  f'{nm}: has the {{{{session_data}}}} token')
+            missing = [k for k in SECTIONS if k not in t['prompt']]
+            check(not missing, f'{nm}: names all six report sections', str(missing))
+        check(sum(t['is_default'] for t in m.reports_db.DEFAULT_TEMPLATES) == 1,
+              'exactly one seed template is the default')
+        # BS 8233:2014 Table 4 — bedrooms are 30 dB LAeq,8h at night, not 35.
+        plan = next(t for t in m.reports_db.DEFAULT_TEMPLATES
+                    if t['name'] == 'Planning Noise Assessment')
+        check('30 dB LAeq,8h at night' in plan['prompt'],
+              'Planning: bedroom night guideline is 30 dB LAeq,8h')
+        check('bedrooms: 35 dB LAeq,8h night' not in plan['prompt'],
+              'Planning: the old incorrect bedroom value is gone')
+        check('rating level' in plan['prompt'],
+              'Planning: BS 4142 rating level (not raw specific level) is required')
 
         # ── 7. NOR140 xlsx parity with the Nortfr reference export ────────────
         print('\n7. xlsx export matches the Nortfr reference for run 9')
