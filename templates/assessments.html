@@ -506,7 +506,7 @@ function renderPool() {
       data-key="${key}"${canAdd ? ` onclick="doAssignOne('${key}')"` : ''}>
       <span class="ri-date">${fmtDate(r.session_date)}</span>
       <span class="ri-n">R${r.run_number}</span>
-      <span class="ri-time">${r.start_time.slice(0,5)}</span>
+      <span class="ri-time">${r.start_time.slice(0,5)}${r.end_time ? '–' + r.end_time.slice(0,5) : ''}</span>
       <span class="ri-dur">${fmtDur(r.n_samples, r.step)}</span>
       <span class="ri-avg">${r.avg_laeq != null ? r.avg_laeq.toFixed(1) : '—'} dB</span>
       <span class="ri-right">
@@ -536,7 +536,7 @@ function renderLocs() {
           const p = timePeriod(r.start_time, a.standard), pk = periodKey(p);
           return `<div class="loc-run-row">
             <span class="lrr-date">${fmtDate(r.session_date)}</span>
-            <span class="lrr-time">${r.start_time.slice(0,5)}</span>
+            <span class="lrr-time">${r.start_time.slice(0,5)}${r.end_time ? '–' + r.end_time.slice(0,5) : ''}</span>
             <span class="lrr-avg">${r.avg_laeq != null ? r.avg_laeq.toFixed(1) : '—'} dB</span>
             <span class="ppill pp-${pk}" style="flex-shrink:0">${esc(shortPeriod(p))}</span>
             <input type="text" class="lrr-cond" placeholder="conditions, notes…"

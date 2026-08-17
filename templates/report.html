@@ -269,7 +269,7 @@ tbody tr:hover{background:var(--bg)}
           {% for r in run_rows %}
           <tr>
             <td>{{ r.run }}</td>
-            <td>{{ r.start }}</td>
+            <td>{{ r.start }}{% if r.end %}–{{ r.end }}{% endif %}</td>
             <td>
               {% set m = (r.n // 60) %}{% set s_ = r.n % 60 %}
               {{ m ~ 'm ' if m else '' }}{{ s_ ~ 's' if s_ else '' }}

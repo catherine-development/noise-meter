@@ -35,6 +35,14 @@ DURATION_OFFSET = 0x03bd
 # -27.0, -27.4 seen) but its offset has not been found.
 FULL_SCALE_OFFSET = 0x004a
 
+# Measurement end time, three BCD bytes (hours, minutes, seconds), immediately
+# after the start timestamp block at 0x19. This is stored, not derivable: the
+# elapsed time it implies equals the period count in only 333 of 524 files, is
+# one second short in 135, and in 46 exceeds it by 179 s — a meter paused mid-run
+# keeps its clock going while writing no periods. Prefer it over any arithmetic
+# on start + n or start + duration, both of which are wrong for some runs.
+END_TIME_OFFSET = 0x22
+
 FREQ_LABELS = [
     '6.3 Hz',  '8.0 Hz',  '10 Hz',   '12.5 Hz', '16 Hz',   '20 Hz',
     '25 Hz',   '31.5 Hz', '40 Hz',   '50 Hz',   '63 Hz',   '80 Hz',
@@ -152,6 +160,41 @@ def read_duration_s(data):
     if m > 59 or s > 59 or h > 99:
         return None                      # not a plausible duration
     return h * 3600 + m * 60 + s
+
+
+# The field is occasionally left unset, reading 00:00:00. Rather than special-case
+# that value (a run really can end at midnight), the decoded time is cross-checked
+# against the meter's own duration. Across the 524-file corpus every genuine end
+# time implies an elapsed time within 23 s of the stored duration, while the two
+# unset ones are out by 9,554 s and 46,474 s — so this tolerance separates them
+# with two orders of magnitude to spare.
+_END_TIME_SLACK_S = 300
+
+
+def read_end_time(data):
+    """Return the stored measurement end time as 'HH:MM:SS', or None.
+
+    None means the field is absent or fails the duration cross-check above;
+    callers should fall back rather than treat it as a measurement of zero.
+    """
+    if len(data) < END_TIME_OFFSET + 3:
+        return None
+    h, m, s = (bcd(data[END_TIME_OFFSET + i]) for i in range(3))
+    if h > 23 or m > 59 or s > 59:
+        return None
+
+    duration = read_duration_s(data)
+    if duration:
+        try:
+            start = bcd(data[0x1c]) * 3600 + bcd(data[0x1d]) * 60 + bcd(data[0x1e])
+        except IndexError:
+            return None
+        # Modulo, so a run crossing midnight still measures correctly.
+        elapsed = ((h * 3600 + m * 60 + s) - start) % 86400
+        if elapsed + 1 < duration or elapsed - duration > _END_TIME_SLACK_S:
+            return None
+
+    return '%02d:%02d:%02d' % (h, m, s)
 
 
 def read_full_scale(data):

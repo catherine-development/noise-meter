@@ -119,6 +119,9 @@ def _migrate(conn):
         ('duration_s', 'INTEGER'),
         # Measurement range in dB (GLOB 0x004a); varies per measurement.
         ('full_scale', 'INTEGER'),
+        # Stored measurement end time (GLOB 0x22, BCD). Not derivable — see
+        # nor140_format.END_TIME_OFFSET.
+        ('end_time', 'TEXT'),
     ]
     for col, typ in _run_migrations:
         if col not in run_cols:
@@ -286,8 +289,8 @@ def import_sessions(sessions_data, metadata=None):
                 '   spec_lff_l01, spec_lff_l1, spec_lff_l5, spec_lff_l10, '
                 '   spec_lff_l50, spec_lff_l90, spec_lff_l95, spec_lff_l99, '
                 '   prof_lafspl_json, prof_laeq_json, prof_lafmax_json, '
-                '   prof_lae_json, prof_lapeak_json, duration_s, full_scale) '
-                'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) '
+                '   prof_lae_json, prof_lapeak_json, duration_s, full_scale, end_time) '
+                'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) '
                 'ON CONFLICT(session_id, run_number) DO UPDATE SET '
                 '  start_time=excluded.start_time, n_samples=excluded.n_samples, '
                 '  step=excluded.step, avg_laeq=excluded.avg_laeq, '
@@ -359,7 +362,8 @@ def import_sessions(sessions_data, metadata=None):
                 '  prof_lae_json=COALESCE(excluded.prof_lae_json,runs.prof_lae_json), '
                 '  prof_lapeak_json=COALESCE(excluded.prof_lapeak_json,runs.prof_lapeak_json), '
                 '  duration_s=COALESCE(excluded.duration_s,runs.duration_s), '
-                '  full_scale=COALESCE(excluded.full_scale,runs.full_scale)',
+                '  full_scale=COALESCE(excluded.full_scale,runs.full_scale), '
+                '  end_time=COALESCE(excluded.end_time,runs.end_time)',
                 (sess_id, i, proj['start'], proj['n'], proj.get('step', 1),
                  proj['avg'], proj['mn'], proj['mx'], proj['pmx'], _g('pmxi'),
                  json.dumps(_g('laeq_profile') or []),
@@ -400,12 +404,38 @@ def import_sessions(sessions_data, metadata=None):
                  json.dumps(_g('prof_lafmax_json'))  if _g('prof_lafmax_json') else None,
                  json.dumps(_g('prof_lae_json'))    if _g('prof_lae_json')    else None,
                  json.dumps(_g('prof_lapeak_json')) if _g('prof_lapeak_json') else None,
-                 _g('duration_s'), _g('full_scale'))
+                 _g('duration_s'), _g('full_scale'), _g('end_time'))
             )
         imported += 1
     conn.commit()
     conn.close()
     return imported
+
+
+def run_end_time(start_time, n_samples):
+    """Fallback wall-clock end as 'HH:MM:SS', for rows with no stored end_time.
+
+    The meter stores its own end time (nor140_format.END_TIME_OFFSET) and that
+    should be used whenever present — this arithmetic is wrong for any run that
+    was paused or stopped mid-period.
+
+    Uses the period count, not duration_s. The two differ for a paused run — the
+    meter keeps writing periods while paused, so 2025-07-12 run 11 spans 323
+    seconds of clock time but records a 300 s effective duration. "When did it
+    finish" means the former.
+
+    Each period covers one second, so a run of n periods starting at t ends at
+    t + n (the last period starts at t + n - 1 and runs for a second). Wraps past
+    midnight; the caller decides whether to flag the day rollover.
+    """
+    if not start_time or not n_samples:
+        return None
+    try:
+        h, m, sec = (int(x) for x in str(start_time).split(':')[:3])
+    except (ValueError, TypeError):
+        return None
+    total = (h * 3600 + m * 60 + sec + int(n_samples)) % 86400
+    return '%02d:%02d:%02d' % (total // 3600, (total % 3600) // 60, total % 60)
 
 
 def _wx(row):
@@ -435,6 +465,9 @@ def _run_to_dict(r, full=False):
         'run_number': r['run_number'],
         'source_file': r['source_file'],
         'start':   r['start_time'],
+        # Prefer the meter's own end time; fall back for rows imported before
+        # the column existed.
+        'end':     r['end_time'] or run_end_time(r['start_time'], r['n_samples']),
         'n':       r['n_samples'],
         'step':    r['step'],
         'duration_s': r['duration_s'],

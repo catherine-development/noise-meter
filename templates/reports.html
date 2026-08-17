@@ -298,11 +298,11 @@ function onSessionChange() {
       sess.runs.map(r => {
         const mins = Math.floor(r.dur / 60), secs = r.dur % 60;
         const dur = mins ? `${mins}m ${secs}s` : `${secs}s`;
-        return `<option value="${r.n}">Run ${r.n} — ${r.start} (${dur})</option>`;
+        return `<option value="${r.n}">Run ${r.n} — ${r.start}${r.end ? '–' + r.end : ''} (${dur})</option>`;
       }).join('');
   } else if (sess && sess.runs.length === 1) {
     const r = sess.runs[0];
-    runSel.innerHTML = `<option value="${r.n}">Run ${r.n} — ${r.start}</option>`;
+    runSel.innerHTML = `<option value="${r.n}">Run ${r.n} — ${r.start}${r.end ? '–' + r.end : ''}</option>`;
   } else {
     runSel.innerHTML = '<option value="">No runs</option>';
   }

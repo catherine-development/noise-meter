@@ -876,7 +876,7 @@ The run-9 export plus the screen-value cross-checks for runs 2, 4, 5, 6, 8, 9, a
 Seven Nortfr reference pairs (2026-08-12 runs 1/2/4/9, 2021-10-26 run 1,
 2025-07-12 runs 11/24) replaced the single run-9 comparison. All three tested
 2653-byte files — the normal case, 469 of 527 in the archive — now match cell
-for cell across three different years. Four new format facts came out of it.
+for cell across three different years. Five new format facts came out of it.
 
 ### `0x03bd` — effective measurement duration
 
@@ -893,6 +893,38 @@ conflate:
 | `Measurement effective duration` | elapsed measurement time | `0x03bd` |
 
 They are equal unless the run was cut short.
+
+### `0x22` — measurement end time
+
+Three BCD bytes (hours, minutes, seconds). The header holds two adjacent
+`YY MM DD hh mm ss` blocks: the start at `0x19` and the end at `0x1f`, so `0x22`
+is the end hour.
+
+This is stored, and it is **not derivable** — neither `start + PROF record count`
+nor `start + duration` reproduces it:
+
+| Case | Files | Why |
+| --- | --- | --- |
+| elapsed = record count | 333 | the ordinary 1 s run |
+| elapsed = count − 1 | 135 | the end is stamped at the last period's *start* |
+| elapsed ≈ 1.25 × count | 54 | the 1069-byte variant logs at a 1.25 s period |
+| unset (`00:00:00`) | 2 | see the cross-check below |
+
+The 1069-byte group is the one that matters: every file on 2025-08-23, -08-24 and
+-08-31 logs at 1.25 s, so deriving an end time from the record count would report
+those runs as ending 179 s early.
+
+The field is occasionally left unset, reading `00:00:00`. `read_end_time()` does
+not blacklist that value — a run can legitimately end at midnight — but instead
+cross-checks the implied elapsed time against the stored duration at `0x03bd`.
+Every genuine file in the 527-file archive agrees to within 23 s; the two unset
+ones are out by 9,554 s and 46,474 s, so the 300 s tolerance separates them with
+room to spare. When the check fails the decoder returns `None` and the app falls
+back to arithmetic.
+
+Because `runs.end_time` is written only on import, rows that predate the column
+stay `NULL` until `backfill_glob.py` runs — that script now writes the three
+header fields (`duration_s`, `full_scale`, `end_time`) as well as the scalars.
 
 ### `0x004a` — full scale (measurement range)
 

@@ -18,7 +18,7 @@ from nor140_format import (
     CAP_LAEQ, CAP_PEAK,
     GLOB_SCALAR_OFFSETS, SPECTRAL_TABLES,
     bcd, decode_raw, round_half_up, read_prof_records, read_duration_s,
-    read_full_scale,
+    read_full_scale, read_end_time,
 )
 
 _THIRD_OCTAVE_FREQS = (
@@ -111,6 +111,7 @@ def _read_glob(data):
     metrics = _read_glob_scalars(data)
     metrics['duration_s'] = read_duration_s(data)
     metrics['full_scale'] = read_full_scale(data)
+    metrics['end_time'] = read_end_time(data)
     for col, offset in SPECTRAL_TABLES:
         spec = _read_glob_spectrum(data, offset)
         if spec is not None:
@@ -185,6 +186,8 @@ def _parse_session_files(glob_data, prof_data):
         # was stopped mid-period; falls back to n for files without the field.
         'duration_s': glob_metrics.get('duration_s') or n,
         'full_scale': glob_metrics.get('full_scale'),
+        # Stored end time — see END_TIME_OFFSET; not derivable from n or duration.
+        'end_time': glob_metrics.get('end_time'),
         'step':   step,
         'avg':    leq,
         # GLOB-derived scalar broadband metrics

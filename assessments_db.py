@@ -11,7 +11,18 @@ created by noise_db._migrate(), which remains the single schema authority.
 """
 import json
 
-from noise_db import get_db
+from noise_db import get_db, run_end_time
+
+
+def _with_end(row):
+    """Ensure the run row carries an end time.
+
+    The meter stores its own (runs.end_time); only fall back to arithmetic for
+    rows imported before that column existed.
+    """
+    if not row.get('end_time'):
+        row['end_time'] = run_end_time(row.get('start_time'), row.get('n_samples'))
+    return row
 
 
 def _time_period(start_time, standard):
@@ -201,7 +212,7 @@ def get_assessment_detail(aid):
         loc_dict = dict(loc)
         assigned = conn.execute('''
             SELECT ar.id as ar_id, ar.conditions, ar.notes as run_notes,
-                   r.run_number, r.start_time, r.n_samples, r.step,
+                   r.run_number, r.start_time, r.end_time, r.n_samples, r.step,
                    r.avg_laeq, r.min_laeq, r.max_laeq, r.max_lcpeak, r.max_laimax,
                    r.location_tag, ar.session_date
             FROM assessment_runs ar
@@ -210,14 +221,14 @@ def get_assessment_detail(aid):
             WHERE ar.assessment_id=? AND ar.location_id=?
             ORDER BY ar.session_date, r.start_time
         ''', (aid, loc['id'])).fetchall()
-        loc_dict['runs'] = [dict(r) for r in assigned]
+        loc_dict['runs'] = [_with_end(dict(r)) for r in assigned]
         locations.append(loc_dict)
 
     assessment['locations'] = locations
 
     unlocated = conn.execute('''
         SELECT ar.id as ar_id, ar.conditions, ar.notes as run_notes,
-               r.run_number, r.start_time, r.n_samples, r.step,
+               r.run_number, r.start_time, r.end_time, r.n_samples, r.step,
                r.avg_laeq, r.min_laeq, r.max_laeq, r.max_lcpeak, r.max_laimax,
                r.location_tag, ar.session_date
         FROM assessment_runs ar
@@ -226,7 +237,7 @@ def get_assessment_detail(aid):
         WHERE ar.assessment_id=? AND ar.location_id IS NULL
         ORDER BY ar.session_date, r.start_time
     ''', (aid,)).fetchall()
-    assessment['unlocated_runs'] = [dict(r) for r in unlocated]
+    assessment['unlocated_runs'] = [_with_end(dict(r)) for r in unlocated]
 
     conn.close()
     return assessment
@@ -236,7 +247,7 @@ def get_all_runs_for_assessment(assessment_id):
     conn = get_db()
     rows = conn.execute('''
         SELECT s.date as session_date, s.location_label as session_loc,
-               r.id as run_db_id, r.run_number, r.start_time, r.n_samples, r.step,
+               r.id as run_db_id, r.run_number, r.start_time, r.end_time, r.n_samples, r.step,
                r.avg_laeq, r.max_laeq, r.max_lcpeak, r.max_laimax, r.location_tag
         FROM runs r
         JOIN sessions s ON r.session_id = s.id
@@ -259,7 +270,7 @@ def get_all_runs_for_assessment(assessment_id):
 
     result = []
     for r in rows:
-        row = dict(r)
+        row = _with_end(dict(r))
         key = (r['session_date'], r['run_number'])
         ar = assigned.get(key)
         row['ar_id'] = ar['ar_id'] if ar else None
@@ -288,7 +299,7 @@ def prepare_assessment_report_data(aid):
     for loc in locs:
         assigned = conn.execute('''
             SELECT ar.conditions, ar.notes as run_notes,
-                   r.run_number, r.start_time, r.n_samples, r.step,
+                   r.run_number, r.start_time, r.end_time, r.n_samples, r.step,
                    r.avg_laeq, r.min_laeq, r.max_laeq, r.max_lcpeak, r.max_laimax,
                    r.la_l10, r.la_l50, r.la_l90, r.laeq_json, ar.session_date
             FROM assessment_runs ar
@@ -321,6 +332,7 @@ def prepare_assessment_report_data(aid):
             runs_data.append({
                 'date': r['session_date'],
                 'start_time': r['start_time'],
+                'end_time': r['end_time'] or run_end_time(r['start_time'], r['n_samples']),
                 'duration_s': r['n_samples'],
                 'time_period': _time_period(r['start_time'], assessment['standard']),
                 'avg_laeq': round(r['avg_laeq'], 1) if r['avg_laeq'] is not None else None,

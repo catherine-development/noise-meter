@@ -148,7 +148,7 @@ def _build_session_data_block(sess, run_rows, all_laeq, total_duration_s):
     session_pmx  = max((r.get('pmx', 0) or 0 for r in run_rows), default=None)
 
     run_lines = [
-        f"  Run {r['run']} ({r['start']}, {r['n']} s): "
+        f"  Run {r['run']} ({r['start']}–{r.get('end') or '?'}, {r['n']} s): "
         f"LAeq {r.get('leq')} dB | LA10 {r.get('la10')} | LA50 {r.get('la50')} | "
         f"LA90 {r.get('la90')} | LAmax {r.get('lmax')} | LCpeak {r.get('pmx')} | "
         f"Time≥85dB {r.get('pct85')}%"
@@ -270,7 +270,8 @@ def _prepare_session_for_report(date, run_number=None):
     for i, proj in enumerate(projects, 1):
         rn = base_num if base_num is not None else i
         st = _run_stats(proj, true_laeq=get_run_prof_laeq(date, rn))
-        run_rows.append({'run': rn, 'start': proj['start'], **st})
+        run_rows.append({'run': rn, 'start': proj['start'],
+                         'end': proj.get('end'), **st})
         all_laeq.extend(_expand_run(proj))
     total_s = sum(p.get('n', 0) for p in projects)
     return sess, run_rows, all_laeq, total_s
@@ -283,7 +284,7 @@ def reports_page():
     sessions_with_runs = [
         {
             'd': s['d'],
-            'runs': [{'n': i + 1, 'start': p['start'], 'dur': p.get('n', 0)}
+            'runs': [{'n': i + 1, 'start': p['start'], 'end': p.get('end'), 'dur': p.get('n', 0)}
                      for i, p in enumerate(s.get('projects', []))],
         }
         for s in reversed(all_sessions)

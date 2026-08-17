@@ -257,6 +257,32 @@ def main(meas_root):
         close(run9['la_l90'],   57.1, 0.05, 'run 9 LA90  = 57.1 (Nortfr)')
         check(run9['n_samples'] == 900, 'run 9 is 900 s', str(run9['n_samples']))
 
+        # The meter's own end time (GLOB 0x22). Stored, not derived: for run 9 it
+        # happens to equal start + 900 s, but 250712/24 ends at 21:27:49 — which
+        # matches neither its 304 periods nor its 299 s duration, so any
+        # arithmetic on start time would report the wrong figure there.
+        check(run9['end_time'] == '23:42:36', 'run 9 end time = 23:42:36',
+              str(run9['end_time']))
+        missing_end = [p['start'] for p in sess['projects'] if not p.get('end')]
+        check(not missing_end, 'every run exposes an end time', str(missing_end))
+        r9 = next(p for p in sess['projects'] if p['start'] == run9['start_time'])
+        check(r9['end'] == '23:42:36', "run 9 'end' reaches the display layer",
+              str(r9.get('end')))
+
+        # The end-time field is sometimes left unset. The decoder cross-checks it
+        # against the stored duration rather than blacklisting 00:00:00, since a
+        # run can legitimately end at midnight.
+        import glob as _glob
+        from nor140_format import read_end_time
+        _corpus = sorted(_glob.glob(os.path.join(meas_root, '**', 'GLOB*.DAT'),
+                                   recursive=True))
+        _rejected = [g for g in _corpus
+                     if read_end_time(open(g, 'rb').read()) is None]
+        check(len(_rejected) == 2, 'end-time guard rejects exactly the 2 unset fields',
+              f'{len(_rejected)} of {len(_corpus)}')
+        check(all(d in r for d in ('230830', '250711') for r in [' '.join(_rejected)]),
+              'the rejected pair are the known 230830/250711 runs')
+
         missing = [c for c, _ in SPECTRAL_TABLES if not run9.get(c)]
         check(not missing, 'all 18 spectral tables stored', f'missing: {missing}')
         for col, _ in SPECTRAL_TABLES:

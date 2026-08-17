@@ -175,7 +175,7 @@ def export_assessment_csv(aid):
         abort(404)
     output = io.StringIO()
     w = csv.writer(output)
-    w.writerow(['sub_location', 'description', 'date', 'start_time', 'duration_s',
+    w.writerow(['sub_location', 'description', 'date', 'start_time', 'end_time', 'duration_s',
                 'time_period', 'avg_laeq_db', 'min_laeq_db', 'max_laeq_db',
                 'la10_db', 'la90_db', 'max_lcpeak_db', 'max_laimax_db',
                 'conditions', 'notes'])
@@ -183,7 +183,7 @@ def export_assessment_csv(aid):
         for r in loc['runs']:
             w.writerow([
                 loc['label'], loc['description'] or '', r['date'], r['start_time'],
-                r['duration_s'], r['time_period'],
+                r.get('end_time') or '', r['duration_s'], r['time_period'],
                 r.get('avg_laeq', ''), r.get('min_laeq', ''), r.get('max_laeq', ''),
                 r.get('la10', ''), r.get('la90', ''),
                 r.get('max_lcpeak', ''), r.get('max_laimax', ''),

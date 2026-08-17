@@ -729,7 +729,7 @@ function renderRunsGrid(container, projects, runNums) {
                    onblur="saveTag(this)" onkeydown="tagKeydown(event,this)">
             ${assessBadge}
           </div>
-          <span class="run-time">${proj.start}</span>
+          <span class="run-time">${proj.start}${proj.end ? '–' + proj.end : ''}</span>
         </div>
         <div class="run-stats">
           <div class="rs">LA<sub>eq</sub><span>${proj.avg.toFixed(1)}</span></div>
@@ -1092,9 +1092,9 @@ function downloadCsv(filename, rows) {
 function exportSessionRuns(date) {
   const sess = DATA.sessions.find(s => s.d === date);
   if (!sess || !sess.projects || !sess.projects.length) return;
-  const rows = [['run', 'start_time', 'n_samples', 'step_s', 'laeq_avg_db', 'laeq_min_db', 'laeq_max_db', 'lcpeak_max_db', 'duration_s']];
+  const rows = [['run', 'start_time', 'end_time', 'n_samples', 'step_s', 'laeq_avg_db', 'laeq_min_db', 'laeq_max_db', 'lcpeak_max_db', 'duration_s']];
   sess.projects.forEach((p, i) => {
-    rows.push([i + 1, p.start, p.n, p.step, p.avg.toFixed(2), p.mn, p.mx, p.pmx, p.n]);
+    rows.push([i + 1, p.start, p.end || '', p.n, p.step, p.avg.toFixed(2), p.mn, p.mx, p.pmx, p.n]);
   });
   downloadCsv('noise-' + date + '-runs.csv', rows);
 }
@@ -1433,7 +1433,7 @@ function openRunModal(proj, runNum, date) {
   if (proj.lafmax != null) stats.pmxf = proj.lafmax.toFixed(1);
   const sess = DATA.sessions.find(s => s.d === date);
   const tagLabel = proj.loc_tag ? `  ·  Location ${proj.loc_tag}` : '';
-  document.getElementById('modalTitle').textContent = `Run ${runIdx+1}${tagLabel}  ·  ${proj.start}`;
+  document.getElementById('modalTitle').textContent = `Run ${runIdx+1}${tagLabel}  ·  ${proj.start}${proj.end ? '–' + proj.end : ''}`;
   document.getElementById('modalSub').textContent =
     `${fmtDate(date)}  ·  ${fmtDuration(proj.n)}  ·  ${proj.n.toLocaleString()} samples${proj.step>1?' (downsampled 1/'+proj.step+'s)':''}`;
 

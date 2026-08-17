@@ -21,7 +21,8 @@ Usage:
     python3 backfill_glob.py MEAS118.zip --dry-run
 """
 import json, os, re, sys, zipfile, sqlite3
-from nor140_format import bcd, read_glob_scalars, read_glob_spectral_tables
+from nor140_format import (bcd, read_glob_scalars, read_glob_spectral_tables,
+                           read_duration_s, read_full_scale, read_end_time)
 # This script rewrites runs.avg_laeq, so the session row that aggregates it has
 # to be rebuilt afterwards or it keeps a stale value indefinitely.
 from noise_db import recompute_session_aggregates
@@ -148,6 +149,16 @@ def main():
 
         spectra = _read_spectra(glob_data)
 
+        # Header fields read straight from the GLOB. These are only written on
+        # fresh import, so rows that predate each column stay NULL until a
+        # backfill runs. end_time in particular is not derivable — see
+        # nor140_format.END_TIME_OFFSET.
+        header = {
+            'duration_s': read_duration_s(glob_data),
+            'full_scale': read_full_scale(glob_data),
+            'end_time':   read_end_time(glob_data),
+        }
+
         # Build the SET clause — scalar cols + spectral JSON cols + avg_laeq correction
         set_cols  = list(_SCALAR_COLS)
         set_vals  = [metrics.get(c) for c in _SCALAR_COLS]
@@ -155,6 +166,11 @@ def main():
         for col, val in spectra.items():
             set_cols.append(col)
             set_vals.append(val)
+
+        for col, val in header.items():
+            if val is not None:
+                set_cols.append(col)
+                set_vals.append(val)
 
         # Correct avg_laeq with GLOB-derived LAeq (more accurate than old PROF value)
         if metrics.get('laeq') is not None:
@@ -171,7 +187,8 @@ def main():
             la90      = metrics.get('la_l90')
             la10      = metrics.get('la_l10')
             print(f'  WOULD UPDATE  {row["date"]}  {proj_folder}  '
-                  f'LAeq {laeq_was}→{laeq_now}  LA90={la90}  LA10={la10}')
+                  f'LAeq {laeq_was}→{laeq_now}  LA90={la90}  LA10={la10}  '
+                  f'end={header["end_time"]}')
         else:
             conn.execute(f'UPDATE runs SET {set_clause} WHERE id=?', set_vals)
             updated += 1
