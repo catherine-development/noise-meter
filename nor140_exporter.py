@@ -141,6 +141,20 @@ def _dt(run):
     return datetime.fromisoformat(st.replace('Z', ''))
 
 
+def _run_num(run):
+    """The run's identifier for filenames: the PROJ folder number from the SD card.
+
+    NOT runs.run_number, which is a sequential index assigned at import. The two
+    diverge as soon as a date has gaps or rejected runs — 2025-07-12 has no
+    PROJ0020 or PROJ0023, so its PROJ0024 is run_number 22, and naming the export
+    _0022 does not match what Nortfr produces.
+    """
+    src = (run.get('source_file') or '').strip().upper()
+    if src.startswith('PROJ') and src[4:].isdigit():
+        return int(src[4:])
+    return run.get('run_number', 1) or 1
+
+
 def _fmt_dt(dt):
     """Format datetime for DATA rows: (2026-08-12 23:27:36.000)"""
     return dt.strftime('(%Y-%m-%d %H:%M:%S.000)')
@@ -148,7 +162,10 @@ def _fmt_dt(dt):
 
 def _fmt_trig_header(dt):
     """Format datetime for the Trig time HEADER cell: (2026/8/12 23:27:36.0)"""
-    return f'({dt.year}/{dt.month}/{dt.day} {dt.hour:02d}:{dt.minute:02d}:{dt.second:02d}.0)'
+    # Unpadded on every component, matching Nortfr: (2026/8/12 12:8:30.0).
+    # Padding the time here silently matched until a run started before 10
+    # past the hour.
+    return f'({dt.year}/{dt.month}/{dt.day} {dt.hour}:{dt.minute}:{dt.second}.0)'
 
 
 def _fmt_duration(seconds):
@@ -160,9 +177,22 @@ def _fmt_duration(seconds):
     return f'({h}:{m}:{s}.0)'
 
 
+_NO_DATA = '-'
+
+
 def _rv(value):
-    """Round a dB value to 1 decimal (half-up, matching instrument convention), or return None."""
-    return round_half_up(value, 1) if value is not None else None
+    """Round a dB value to 1 decimal (half-up, matching instrument convention).
+
+    A raw word of 0 decodes to exactly -20 dB, which the meter uses as a
+    "band not measured" sentinel — it appears in spectral tables for short or
+    quiet runs. Nortfr renders those cells as '-', not as -20, so emitting the
+    number would both look wrong and read as a real (absurd) level.
+    """
+    if value is None:
+        return None
+    if value <= -19.99:
+        return _NO_DATA
+    return round_half_up(value, 1)
 
 
 def _as_list(value):
@@ -213,32 +243,32 @@ def _write_header(ws, n, duration_s, trig_dt, label=None, period_s=None):
         ws.append([])
 
 
-def _write_spectral_sheet(ws, label, spec_json, trig_dt, duration_s):
+def _write_spectral_sheet(ws, label, spec_json, trig_dt, duration_s, period_s):
     """Write one spectral (36-band) sheet.
 
     Row 7: [None, None, None, label]
     Row 8: ['Period:', 'Time:', None, '6.3 Hz', '8.0 Hz', ...]
     Row 9: [0, datetime, None, val0, val1, ...]
     """
-    _write_header(ws, 1, duration_s, trig_dt, label=label)
+    _write_header(ws, 1, duration_s, trig_dt, label=label, period_s=period_s)
     ws.append(['Period:', 'Time:', None] + _FREQ_LABELS)
     vals = _as_list(spec_json)
     ws.append([0, _fmt_dt(trig_dt), None] + [_rv(v) for v in vals])
 
 
-def _write_scalar_sheet(ws, label, value, trig_dt, duration_s):
+def _write_scalar_sheet(ws, label, value, trig_dt, duration_s, period_s):
     """Write one scalar sheet.
 
     Row 7: (blank)
     Row 8: ['Period:', 'Time:', None, label]
     Row 9: [0, datetime, None, value]
     """
-    _write_header(ws, 1, duration_s, trig_dt, label=None)
+    _write_header(ws, 1, duration_s, trig_dt, label=None, period_s=period_s)
     ws.append(['Period:', 'Time:', None, label])
     ws.append([0, _fmt_dt(trig_dt), None, _rv(value)])
 
 
-def _write_prof_sheet(ws, label, prof_json, trig_dt):
+def _write_prof_sheet(ws, label, prof_json, trig_dt, duration_s):
     """Write one PROFILE 1-second time-series sheet.
 
     PROF data is always stored at 1-second resolution, so period = 1 s.
@@ -248,7 +278,7 @@ def _write_prof_sheet(ws, label, prof_json, trig_dt):
     """
     vals = _as_list(prof_json)
     n = len(vals)
-    _write_header(ws, n, n, trig_dt, label=None, period_s=1)  # one period = 1 s
+    _write_header(ws, n, duration_s, trig_dt, label=None, period_s=1)  # one period = 1 s
     ws.append(['Period:', 'Time:', None, label])
     for i, v in enumerate(vals):
         t = trig_dt + timedelta(seconds=i)
@@ -318,7 +348,7 @@ def _write_setup(ws, run, serial, report_type, trig_dt, n, duration_s, period_s=
       Sensitivity
     """
     date_str = trig_dt.strftime('%y%m%d')
-    run_num = run.get('run_number', 1)
+    run_num = _run_num(run)
     base = f'NOR140_{serial}_{date_str}_{run_num:04d}'
     ws.append([])
     ws.append(['File version', 'v1.0/6.1.1.51'])
@@ -327,13 +357,22 @@ def _write_setup(ws, run, serial, report_type, trig_dt, n, duration_s, period_s=
     ws.append(['Bandwidth', '1/3 Octave'])
     ws.append(['Frequency range', '6.3 Hz - 20.0 kHz'])
     _write_period_trigger_block(ws, n, duration_s, trig_dt, period_s=period_s)
-    ws.append(['Full scale', 130, 'dB'])
-    ws.append(['Sensitivity', -26.9, 'dB'])
+    # Full scale is a per-measurement range setting (90 / 100 / 130 dB seen in
+    # this archive), read from the GLOB. Sensitivity also varies (-26.9, -27.0,
+    # -27.4 seen) but its offset has not been located, so it stays a default and
+    # will differ from Nortfr on instruments calibrated to another value.
+    ws.append(['Full scale', run.get('full_scale') or 130, 'dB'])
+    ws.append(['Sensitivity', run.get('sensitivity_db') or -26.9, 'dB'])
 
 
-def _write_global_setup(ws, run, serial, trig_dt, duration_s):
-    """Write GLOBAL Setup sheet (one period covering the whole run)."""
-    _write_setup(ws, run, serial, 'GLOBAL', trig_dt, n=1, duration_s=duration_s)
+def _write_global_setup(ws, run, serial, trig_dt, duration_s, period_s):
+    """Write GLOBAL Setup sheet (one period covering the whole run).
+
+    period_s is the record count, duration_s the meter's stored duration; they
+    differ when a run was stopped mid-period.
+    """
+    _write_setup(ws, run, serial, 'GLOBAL', trig_dt, n=1, duration_s=duration_s,
+                 period_s=period_s)
 
 
 def _profile_n(run):
@@ -370,10 +409,10 @@ def _write_profile_summary(ws, run, trig_dt):
     ws.append(['RC II (-)', '-', 'dB'])
 
 
-def _write_profile_setup(ws, run, serial, trig_dt):
+def _write_profile_setup(ws, run, serial, trig_dt, duration_s):
     """Write PROFILE Setup sheet (one period per second, for the run's full duration)."""
     n = _profile_n(run)
-    _write_setup(ws, run, serial, 'PROFILE', trig_dt, n=n, duration_s=n, period_s=1)
+    _write_setup(ws, run, serial, 'PROFILE', trig_dt, n=n, duration_s=duration_s, period_s=1)
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -384,28 +423,31 @@ def build_global_xlsx(run, serial=''):
     n_samples = run.get('n_samples', 1) or 1
     # n_samples is the count of actual 1-second measurements; 'step' is a chart
     # downsampling factor and must NOT multiply the real measurement duration.
-    duration_s = n_samples
+    # Prefer the duration the meter stored: a run stopped mid-period writes a
+    # final partial record, so the record count can exceed the elapsed time
+    # (run 1 of 2026-08-12 has 83 records but ran 0:1:22).
+    duration_s = run.get('duration_s') or n_samples
 
     wb = Workbook()
     wb.remove(wb.active)
 
     for name, col in _SPECTRAL_SHEETS:
         ws = wb.create_sheet(name)
-        _write_spectral_sheet(ws, name, run.get(col) or '[]', trig_dt, duration_s)
+        _write_spectral_sheet(ws, name, run.get(col) or '[]', trig_dt, duration_s, n_samples)
 
     for name, col in _SCALAR_PCT_SHEETS:
         ws = wb.create_sheet(name)
-        _write_scalar_sheet(ws, name, run.get(col), trig_dt, duration_s)
+        _write_scalar_sheet(ws, name, run.get(col), trig_dt, duration_s, n_samples)
 
     for name, col in _SCALAR_BB_SHEETS:
         ws = wb.create_sheet(name)
-        _write_scalar_sheet(ws, name, run.get(col), trig_dt, duration_s)
+        _write_scalar_sheet(ws, name, run.get(col), trig_dt, duration_s, n_samples)
 
     ws = wb.create_sheet('Summary')
     _write_global_summary(ws, run, trig_dt, duration_s)
 
     ws = wb.create_sheet('Setup')
-    _write_global_setup(ws, run, serial, trig_dt, duration_s)
+    _write_global_setup(ws, run, serial, trig_dt, duration_s, n_samples)
 
     buf = io.BytesIO()
     wb.save(buf)
@@ -415,19 +457,22 @@ def build_global_xlsx(run, serial=''):
 def build_profile_xlsx(run, serial=''):
     """Build NOR140-style PROFILE xlsx. Returns bytes."""
     trig_dt = _dt(run)
+    # Prefer the meter's stored duration over the record count — see the note in
+    # build_global_xlsx.
+    duration_s = run.get('duration_s') or (run.get('n_samples', 1) or 1)
 
     wb = Workbook()
     wb.remove(wb.active)
 
     for name, col in _PROF_SHEETS:
         ws = wb.create_sheet(name)
-        _write_prof_sheet(ws, name, run.get(col) or '[]', trig_dt)
+        _write_prof_sheet(ws, name, run.get(col) or '[]', trig_dt, duration_s)
 
     ws = wb.create_sheet('Summary')
     _write_profile_summary(ws, run, trig_dt)
 
     ws = wb.create_sheet('Setup')
-    _write_profile_setup(ws, run, serial, trig_dt)
+    _write_profile_setup(ws, run, serial, trig_dt, duration_s)
 
     buf = io.BytesIO()
     wb.save(buf)
@@ -438,5 +483,5 @@ def export_filename(run, serial, report_type):
     """Return the canonical Nortfr filename for a run export."""
     trig_dt = _dt(run)
     date_str = trig_dt.strftime('%y%m%d')
-    run_num = run.get('run_number', 1)
+    run_num = _run_num(run)
     return f'NOR140_{serial}_{date_str}_{run_num:04d}_{report_type}.xlsx'

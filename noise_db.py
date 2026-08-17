@@ -113,6 +113,12 @@ def _migrate(conn):
         ('prof_lafspl_json', 'TEXT'), ('prof_laeq_json',   'TEXT'),
         ('prof_lafmax_json', 'TEXT'), ('prof_lae_json',    'TEXT'),
         ('prof_lapeak_json', 'TEXT'),
+        # Effective duration as stored by the meter (GLOB 0x03bd). Not always
+        # equal to n_samples: a run stopped mid-period writes a final partial
+        # record, so the count can exceed the elapsed time.
+        ('duration_s', 'INTEGER'),
+        # Measurement range in dB (GLOB 0x004a); varies per measurement.
+        ('full_scale', 'INTEGER'),
     ]
     for col, typ in _run_migrations:
         if col not in run_cols:
@@ -280,8 +286,8 @@ def import_sessions(sessions_data, metadata=None):
                 '   spec_lff_l01, spec_lff_l1, spec_lff_l5, spec_lff_l10, '
                 '   spec_lff_l50, spec_lff_l90, spec_lff_l95, spec_lff_l99, '
                 '   prof_lafspl_json, prof_laeq_json, prof_lafmax_json, '
-                '   prof_lae_json, prof_lapeak_json) '
-                'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) '
+                '   prof_lae_json, prof_lapeak_json, duration_s, full_scale) '
+                'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) '
                 'ON CONFLICT(session_id, run_number) DO UPDATE SET '
                 '  start_time=excluded.start_time, n_samples=excluded.n_samples, '
                 '  step=excluded.step, avg_laeq=excluded.avg_laeq, '
@@ -351,7 +357,9 @@ def import_sessions(sessions_data, metadata=None):
                 '  prof_laeq_json=COALESCE(excluded.prof_laeq_json,runs.prof_laeq_json), '
                 '  prof_lafmax_json=COALESCE(excluded.prof_lafmax_json,runs.prof_lafmax_json), '
                 '  prof_lae_json=COALESCE(excluded.prof_lae_json,runs.prof_lae_json), '
-                '  prof_lapeak_json=COALESCE(excluded.prof_lapeak_json,runs.prof_lapeak_json)',
+                '  prof_lapeak_json=COALESCE(excluded.prof_lapeak_json,runs.prof_lapeak_json), '
+                '  duration_s=COALESCE(excluded.duration_s,runs.duration_s), '
+                '  full_scale=COALESCE(excluded.full_scale,runs.full_scale)',
                 (sess_id, i, proj['start'], proj['n'], proj.get('step', 1),
                  proj['avg'], proj['mn'], proj['mx'], proj['pmx'], _g('pmxi'),
                  json.dumps(_g('laeq_profile') or []),
@@ -391,7 +399,8 @@ def import_sessions(sessions_data, metadata=None):
                  json.dumps(_g('prof_laeq_json'))   if _g('prof_laeq_json')   else None,
                  json.dumps(_g('prof_lafmax_json'))  if _g('prof_lafmax_json') else None,
                  json.dumps(_g('prof_lae_json'))    if _g('prof_lae_json')    else None,
-                 json.dumps(_g('prof_lapeak_json')) if _g('prof_lapeak_json') else None)
+                 json.dumps(_g('prof_lapeak_json')) if _g('prof_lapeak_json') else None,
+                 _g('duration_s'), _g('full_scale'))
             )
         imported += 1
     conn.commit()
@@ -428,6 +437,8 @@ def _run_to_dict(r, full=False):
         'start':   r['start_time'],
         'n':       r['n_samples'],
         'step':    r['step'],
+        'duration_s': r['duration_s'],
+        'full_scale': r['full_scale'],
         'avg':     r['avg_laeq'],
         'mn':      r['min_laeq'],
         'mx':      r['max_laeq'],

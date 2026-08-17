@@ -13,9 +13,27 @@ import math
 
 DB_SCALE  = 128.0
 DB_OFFSET = 20.0
-FLOOR_DB  = 20.0
 CAP_LAEQ  = 130.0
 CAP_PEAK  = 145.0
+
+# There is deliberately no lower clamp. A FLOOR_DB of 20.0 used to be applied to
+# every PROF value, but Nortfr reports levels below that (19.6, 19.8, 19.9 in run 1
+# of 2026-08-12) and real data in this archive reaches 17.43 dB across 78,888
+# samples in 100 runs. No word ever decodes to the -20 dB minimum either, so there
+# was no sentinel for the floor to catch — it was only removing quiet measurements.
+# The caps above stay: some files really do hold absurd values (386 dB).
+
+# Effective measurement duration, as three plain (non-BCD) bytes: hours, minutes,
+# seconds. This is NOT always the PROF record count — a run stopped mid-period
+# writes a final partial record, so run 1 of 2026-08-12 has 83 records but a
+# 0:1:22 duration. Nortfr reports the stored duration, so exports must too.
+DURATION_OFFSET = 0x03bd
+
+# Measurement range ('Full scale' in Nortfr's Setup sheet), one byte. Varies per
+# measurement: 90, 100 and 130 dB all appear in this archive, so it must be read
+# rather than assumed. Nortfr also reports a Sensitivity that varies (-26.9,
+# -27.0, -27.4 seen) but its offset has not been found.
+FULL_SCALE_OFFSET = 0x004a
 
 FREQ_LABELS = [
     '6.3 Hz',  '8.0 Hz',  '10 Hz',   '12.5 Hz', '16 Hz',   '20 Hz',
@@ -120,6 +138,28 @@ def read_glob_spectrum(data, offset, digits=None):
 def read_glob_spectral_tables(data, digits=None):
     """Decode all 18 spectral tables. Returns dict of spec_col -> list[36] (or None if truncated)."""
     return {col: read_glob_spectrum(data, offset, digits=digits) for col, offset in SPECTRAL_TABLES}
+
+
+def read_duration_s(data):
+    """Return the stored effective measurement duration in seconds, or None.
+
+    Three plain bytes at DURATION_OFFSET: hours, minutes, seconds. Prefer this
+    over counting PROF records — see the note on DURATION_OFFSET.
+    """
+    if len(data) < DURATION_OFFSET + 3:
+        return None
+    h, m, s = data[DURATION_OFFSET:DURATION_OFFSET + 3]
+    if m > 59 or s > 59 or h > 99:
+        return None                      # not a plausible duration
+    return h * 3600 + m * 60 + s
+
+
+def read_full_scale(data):
+    """Return the measurement range in dB, or None if implausible/absent."""
+    if len(data) <= FULL_SCALE_OFFSET:
+        return None
+    v = data[FULL_SCALE_OFFSET]
+    return v if 40 <= v <= 200 else None
 
 
 def read_prof_records(data):

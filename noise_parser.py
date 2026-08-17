@@ -15,9 +15,10 @@ import io
 import re
 
 from nor140_format import (
-    FLOOR_DB, CAP_LAEQ, CAP_PEAK,
+    CAP_LAEQ, CAP_PEAK,
     GLOB_SCALAR_OFFSETS, SPECTRAL_TABLES,
-    bcd, decode_raw, round_half_up, read_prof_records,
+    bcd, decode_raw, round_half_up, read_prof_records, read_duration_s,
+    read_full_scale,
 )
 
 _THIRD_OCTAVE_FREQS = (
@@ -108,6 +109,8 @@ def _read_glob(data):
     date = f"20{yy:02d}-{mo:02d}-{dd:02d}"
     start = f"{hh:02d}:{mm:02d}:{ss:02d}"
     metrics = _read_glob_scalars(data)
+    metrics['duration_s'] = read_duration_s(data)
+    metrics['full_scale'] = read_full_scale(data)
     for col, offset in SPECTRAL_TABLES:
         spec = _read_glob_spectrum(data, offset)
         if spec is not None:
@@ -153,11 +156,13 @@ def _parse_session_files(glob_data, prof_data):
     if max(r[1] for r in recs) > 140:  # corrupted record — check before clamping
         return date, None
 
-    lafspl_raw = [_clamp(r[0], FLOOR_DB, CAP_LAEQ) for r in recs]
-    laeq_raw   = [_clamp(r[1], FLOOR_DB, CAP_LAEQ) for r in recs]
-    lafmax_raw = [_clamp(r[2], FLOOR_DB, CAP_LAEQ) for r in recs]
-    lae_raw    = [_clamp(r[3], FLOOR_DB, CAP_LAEQ) for r in recs]
-    lapeak_raw = [_clamp(r[4], FLOOR_DB, CAP_PEAK)  for r in recs]
+    # Capped above only. A lower clamp at 20 dB used to raise every quieter
+    # reading to exactly 20.0, which Nortfr does not do — see nor140_format.
+    lafspl_raw = [min(r[0], CAP_LAEQ) for r in recs]
+    laeq_raw   = [min(r[1], CAP_LAEQ) for r in recs]
+    lafmax_raw = [min(r[2], CAP_LAEQ) for r in recs]
+    lae_raw    = [min(r[3], CAP_LAEQ) for r in recs]
+    lapeak_raw = [min(r[4], CAP_PEAK) for r in recs]
 
     n      = len(recs)
     step   = 1 if n <= 120 else 2 if n <= 300 else 5 if n <= 900 else 10
@@ -176,6 +181,10 @@ def _parse_session_files(glob_data, prof_data):
     return date, {
         'start':  start,
         'n':      n,
+        # Effective duration as stored by the meter. Differs from n when a run
+        # was stopped mid-period; falls back to n for files without the field.
+        'duration_s': glob_metrics.get('duration_s') or n,
+        'full_scale': glob_metrics.get('full_scale'),
         'step':   step,
         'avg':    leq,
         # GLOB-derived scalar broadband metrics
