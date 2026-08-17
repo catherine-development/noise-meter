@@ -824,7 +824,7 @@ mean = (L₁ + L₂ + … + Lₙ) / n           <span class="cmt">arithmetic mea
       <div class="trap">
         <span class="trap-tag">Trap 05</span>
         <h3>Trusting a level reconstructed from the chart data</h3>
-        <p>The chart profile is downsampled by taking the maximum of each window, so expanding it back gives a series biased high. It is correct for chart <em>shape</em> and misleading as a level. Always prefer the instrument's own scalar results, or the full one-second series, over anything derived from the display profile. The "time above 85 dB" figure is computed this way and should be read as indicative only.</p>
+        <p>The chart profile is downsampled by taking the maximum of each window, so expanding it back gives a series biased high. It is correct for chart <em>shape</em> and misleading as a level. Always prefer the instrument's own scalar results, or the full one-second series, over anything derived from the display profile. The "time above 85 dB" figure used to be computed this way, and read up to three times high as a result; it now counts the full one-second record.</p>
       </div>
 
       <div class="note warn">
@@ -896,7 +896,7 @@ mean = (L₁ + L₂ + … + Lₙ) / n           <span class="cmt">arithmetic mea
       <p class="sub">Different claims in this guide rest on very different strengths of evidence. Knowing which is which matters more than a flat list of references.</p>
 
       <h3>Tier 1 — measured here, and reproducible</h3>
-      <p>Everything about the binary format, the decode, the value counts, and the run-9 figures was verified directly against the project's own data: the SD-card files, the meter's screen readings, and the Norsonic Nortfr export. These are the strongest claims in the document because you can re-run them — <code>python3 test_modules.py</code> checks them against the reference dataset, including cell-exact parity with both Nortfr workbooks. The corpus statistics — 527 GLOB files, the 94% detector ordering, and the 4.933% of one-second values that <em>used to</em> differ from Nortfr by 0.1 dB before that was traced and corrected — come from scanning the archive itself.</p>
+      <p>Everything about the binary format, the decode, the value counts, and the run-9 figures was verified directly against the project's own data: the SD-card files, the meter's screen readings, and the Norsonic Nortfr export. These are the strongest claims in the document because you can re-run them — <code>python3 test_modules.py</code> checks them against the reference dataset, including cell-exact parity with the Nortfr workbooks for seven measurements spanning 2021, 2025 and 2026. The corpus statistics — 527 GLOB files, the 94% detector ordering, and the 4.933% of one-second values that <em>used to</em> differ from Nortfr by 0.1 dB before that was traced and corrected — come from scanning the archive itself.</p>
 
       <h3>Tier 2 — checked against public authoritative guidance</h3>
       <p>The regulatory figures and method descriptions were checked against free, official material, listed below. This is good evidence, but see the limitations.</p>
@@ -951,7 +951,7 @@ mean = (L₁ + L₂ + … + Lₙ) / n           <span class="cmt">arithmetic mea
     </section>
 
     <footer>
-      <p>Values throughout are from the project's own reference dataset for 2026-08-12, cross-checked against the meter screen and the Norsonic Nortfr export. As of 2026-08-17 the generated GLOBAL and PROFILE workbooks match that Nortfr export in <em>every cell</em> — all 38 scalars, 648 spectral values and 4,500 one-second samples — so a difference against a vendor export is now a signal worth investigating rather than an expected artifact. Binary offsets, decode derivation and the open questions about unusual file variants are documented in <code>NOR140_handoff.md</code>.</p>
+      <p>Values throughout are from the project's own reference dataset for 2026-08-12, cross-checked against the meter screen and the Norsonic Nortfr export. As of 2026-08-17 the generated GLOBAL and PROFILE workbooks match the Nortfr exports in <em>every cell</em>, for seven measurements across three years — all 38 scalars, 648 spectral values and 4,500 one-second samples each — so a difference against a vendor export is now a signal worth investigating rather than an expected artifact. Binary offsets, decode derivation and the open questions about unusual file variants are documented in <code>NOR140_handoff.md</code>.</p>
     </footer>
   </main>
 </div>

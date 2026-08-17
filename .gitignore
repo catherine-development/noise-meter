@@ -1,1 +1,9 @@
 .env
+.DS_Store
+__pycache__/
+*.pyc
+
+# SD-card archives and their extraction — large binary reference data, kept
+# locally for the test suite rather than committed.
+MEAS118/
+*.zip

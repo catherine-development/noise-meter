@@ -871,6 +871,97 @@ Export both Global and Profile views if possible.
 
 The run-9 export plus the screen-value cross-checks for runs 2, 4, 5, 6, 8, 9, and 10 are enough to implement normal 2653-byte `GLOB`/`PROF` measurement exports with high confidence. More exports are only useful for metadata, `.NBF` generation, or unusual file-size/setup edge cases.
 
+## Format fields found by the 2026-08-17 reference expansion
+
+Seven Nortfr reference pairs (2026-08-12 runs 1/2/4/9, 2021-10-26 run 1,
+2025-07-12 runs 11/24) replaced the single run-9 comparison. All three tested
+2653-byte files — the normal case, 469 of 527 in the archive — now match cell
+for cell across three different years. Four new format facts came out of it.
+
+### `0x03bd` — effective measurement duration
+
+Three plain (non-BCD) bytes: hours, minutes, seconds. **Not** the PROF record
+count. A run stopped mid-period writes a final partial record, so 2026-08-12
+run 1 holds 83 records but ran `0:1:22`. Nortfr reports the stored value.
+
+Note also that Nortfr's GLOBAL sheets distinguish two things the exporter used to
+conflate:
+
+| Row | Meaning | Source |
+| --- | --- | --- |
+| `Period length` | the whole run as one period | PROF record count |
+| `Measurement effective duration` | elapsed measurement time | `0x03bd` |
+
+They are equal unless the run was cut short.
+
+### `0x004a` — full scale (measurement range)
+
+One byte. Varies per measurement: **90, 100 and 130 dB** all occur in this
+archive, so it cannot be assumed. Nortfr prints it in the `Setup` sheet.
+
+### `-20 dB` is a no-data sentinel in the spectra
+
+A raw word of `0` decodes to exactly `-20.0`, which the meter uses for "band not
+measured". It appears in spectral tables for short or quiet runs, and Nortfr
+renders those cells as `-`, not as a number.
+
+There is **no** such sentinel in the PROF series — no PROF word in the entire
+archive is 0 — which is why removing the old 20 dB floor (below) and adding this
+are both correct.
+
+### The old `FLOOR_DB = 20.0` clamp was wrong
+
+Every PROF value used to be raised to at least 20.0 dB. Nortfr reports levels
+below that (19.6 / 19.8 / 19.9 in 2026-08-12 run 1), and real data in this
+archive reaches **17.43 dB across 78,888 samples in 100 runs**. The floor was
+removing quiet measurements and guarding nothing. The upper caps stay — some
+files really do hold 386 dB.
+
+### The 2668-byte GLOB variant: a pause/marker block
+
+Four files in the archive are 2668 bytes rather than 2653. The scalar and
+spectral offsets are unchanged — spectrum-derived totals agree with the stored
+scalars to the same ±0.09 dB as normal files — so the extra 15 bytes are
+appended, not inserted.
+
+Nortfr emits one extra `Summary` column for these, holding either the string
+`Pause` or the code `4`, on a contiguous run of periods:
+
+| File | periods | marked | last marked | uint16 at tail+3 | marker |
+| --- | --- | --- | --- | --- | --- |
+| 2025-07-12 run 11 | 323 | 277–298 | 298 | 298 | `Pause` |
+| 2025-07-12 run 24 | 304 | 299–303 | 303 | 303 | `Pause` |
+| 2026-08-12 run 4 | 900 | 544–899 | 899 | 899 | `4` |
+| 2021-10-26 run 1 | 397 | 379–396 | 396 | 396 | `4` |
+
+**Decoded so far:** the uint16 at tail offset 3 is the last marked period, in all
+four. Byte 0 is a small count (1/1/2/1). The 2025-07-12 run 24 tail additionally
+carries what looks like a BCD timestamp (`25 07 12 21 16 17`).
+
+**Not decoded:** the start of the marked region, and why some files label it
+`Pause` and others `4`. Paused periods appear to be excluded from the effective
+duration for the `Pause` files (run 24: 304 records, 5 marked, 299 s) but not for
+the `4` files (run 4: 900 records, 356 marked, 900 s), so the two marker types
+behave differently. More examples of the variant would be needed.
+
+### Run numbering: `run_number` is not the PROJ number
+
+`runs.run_number` is a sequential index assigned at import. The PROJ folder
+number is the instrument's identifier and the one Nortfr uses in filenames. They
+diverge on any date with gaps — 2025-07-12 has no `PROJ0020` or `PROJ0023`, so
+its `PROJ0024` is `run_number` 22.
+
+Use `source_file` whenever pairing to instrument-side data or naming an export.
+Note the latent risk: `assessment_runs` is keyed on `(session_date, run_number)`,
+so if a re-import ever recovers a previously-rejected run on a date with gaps,
+every later number shifts and existing assignments would silently re-point.
+
+### Still hard-coded
+
+`Sensitivity` in the `Setup` sheet. It varies per measurement (-26.9 / -27.0 /
+-27.4 observed) but its offset has not been found; searches over uint16/int16 at
+several scalings, float32, and byte pairs across five files all failed.
+
 ## Implementation status (as of 2026-08-15)
 
 The format investigation above has been translated into working app code. The following has been built and deployed to both Pis.

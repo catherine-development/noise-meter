@@ -257,11 +257,11 @@
       <p>This makes the chart a reliable guide to <em>when</em> things happened and how the noise behaved over time, and it will not hide a brief loud event. It is not the right place to read a level from: because each point is a local maximum, the trace sits above the true average. Quote levels from the tabulated figures, which come straight from the instrument.</p>
     </div>
 
-    <h3>Display windows reaching 85 dB</h3>
-    <p>This counts the five-second chart windows whose loudest reading reaches 85 dB. Because a single qualifying second makes the whole window count, it can <strong>materially overstate</strong> the actual proportion of time above the threshold — in one measurement from the reference dataset it reported 3.9% where the true figure from the full record was 1.33%, close to three times over.</p>
+    <h3>Time at or above 85 dB</h3>
+    <p>This counts the seconds at or above 85 dB, from the full second-by-second record. It previously counted five-second display windows instead, which overstated the figure — reporting 3.9% where the true value was 1.33% on one measurement — and that has been corrected.</p>
     <div class="note warn">
       <span class="note-k">Screening only</span>
-      <p>Treat this as a flag for "this measurement is worth looking at", not as a quantity. It is <strong>not</strong> a daily or weekly personal noise exposure calculation, which is what workplace exposure limits are defined against, and it should never be presented as one. Where an exposure assessment is required, it must be calculated separately from the full record — this figure is not that calculation.</p>
+      <p>Treat this as a flag for "this measurement is worth looking at". It is <strong>not</strong> a daily or weekly personal noise exposure calculation, which is what workplace exposure limits are defined against, and it should never be presented as one. Exposure depends on the levels a person is subject to and for how long, so it must be calculated separately — this figure is not that calculation.</p>
     </div>
   </section>
 
@@ -295,9 +295,9 @@
             <td><span class="tag t-mid">Shape, not level</span></td>
           </tr>
           <tr>
-            <td>Display windows reaching 85 dB</td>
-            <td>Counted from five-second display windows, so overstates time above the threshold</td>
-            <td><span class="tag t-low">Screening only</span></td>
+            <td>Time at or above 85 dB</td>
+            <td>Counted from the full second-by-second record</td>
+            <td><span class="tag t-mid">Screening</span></td>
           </tr>
           <tr>
             <td>Weather</td>
@@ -322,7 +322,7 @@
     <h2>How the figures have been checked</h2>
     <p>The measured values have been checked two complementary ways. Both trace back to the same instrument, so they are corroborating rather than strictly independent.</p>
     <p><strong>Against the meter's own display.</strong> Headline values read directly from the instrument's screen for <strong>seven separate measurements</strong> were compared with the figures our software produces. All agreed to within the display's own rounding. This is the broader check, covering several measurements but only the headline figures.</p>
-    <p><strong>Against the manufacturer's software.</strong> Norsonic's own export tool was used to produce reference files for <strong>one complete measurement</strong>. For that measurement, every value our software produces — all the overall results, all 648 frequency values and all 4,500 second-by-second readings — matches the reference files exactly. This is the deeper check: total agreement, but demonstrated on one recording rather than across the whole archive.</p>
+    <p><strong>Against the manufacturer's software.</strong> Norsonic's own export tool was used to produce reference files for <strong>seven complete measurements, spanning 2021, 2025 and 2026</strong>. For each one, every value our software produces — all the overall results, all 648 frequency values and all 4,500 second-by-second readings — matches the reference files exactly. Two pieces of descriptive metadata in Norsonic's setup sheet are not yet reproduced; no measured value is affected.</p>
     <div class="note">
       <span class="note-k">One difference found, and resolved</span>
       <p>That checking did find a discrepancy: about 5% of the second-by-second readings displayed 0.1 dB lower than the manufacturer's software. The cause was ours. We were storing those readings rounded to a single decimal place, which discarded precision that could not then be recovered. Norsonic's software carries a second decimal and rounds to one only for display, so reproducing its figures means retaining that second decimal too. We now do, and the two agree on every value.</p>
