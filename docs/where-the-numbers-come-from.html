@@ -1,0 +1,354 @@
+<title>Where the Numbers Come From</title>
+
+<style>
+  :root {
+    --ground:      #F6F7F8;
+    --surface:     #FFFFFF;
+    --surface-sunk:#EDEFF1;
+    --ink:         #14181C;
+    --ink-soft:    #3A434B;
+    --muted:       #5C6670;
+    --rule:        #DCE0E3;
+    --rule-strong: #C2C9CE;
+    --amber:       #9A5D06;
+    --amber-bright:#C77A0E;
+    --amber-wash:  #FBF2E4;
+    --teal:        #22696A;
+    --teal-wash:   #E5F0F0;
+    --oxide:       #A8352A;
+
+    --measure: 66ch;
+    --f-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --f-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground:      #11151A;
+      --surface:     #181D23;
+      --surface-sunk:#1F262D;
+      --ink:         #E8EBED;
+      --ink-soft:    #C3CACF;
+      --muted:       #939DA6;
+      --rule:        #2C343B;
+      --rule-strong: #3E474F;
+      --amber:       #E7A644;
+      --amber-bright:#E7A644;
+      --amber-wash:  #241C0F;
+      --teal:        #5FB2B2;
+      --teal-wash:   #10201F;
+      --oxide:       #E08379;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground:      #11151A;
+    --surface:     #181D23;
+    --surface-sunk:#1F262D;
+    --ink:         #E8EBED;
+    --ink-soft:    #C3CACF;
+    --muted:       #939DA6;
+    --rule:        #2C343B;
+    --rule-strong: #3E474F;
+    --amber:       #E7A644;
+    --amber-bright:#E7A644;
+    --amber-wash:  #241C0F;
+    --teal:        #5FB2B2;
+    --teal-wash:   #10201F;
+    --oxide:       #E08379;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--f-sans);
+    font-size: 16.5px;
+    line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 860px; margin: 0 auto; padding: 72px 24px 96px; }
+
+  .eyebrow {
+    font-family: var(--f-mono);
+    font-size: 11px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--amber);
+    margin: 0 0 18px;
+  }
+  h1 {
+    font-size: clamp(2rem, 5vw, 2.9rem);
+    line-height: 1.07;
+    letter-spacing: -0.025em;
+    font-weight: 680;
+    margin: 0 0 20px;
+    text-wrap: balance;
+    max-width: 20ch;
+  }
+  .standfirst { font-size: 1.15rem; line-height: 1.55; color: var(--ink-soft); max-width: var(--measure); margin: 0; }
+  .masthead { border-bottom: 1px solid var(--rule-strong); padding-bottom: 34px; }
+  .instrument {
+    font-family: var(--f-mono); font-size: 12.5px; color: var(--muted);
+    margin: 24px 0 0; padding-top: 16px; border-top: 1px solid var(--rule);
+  }
+
+  section { padding-top: 48px; }
+  section > * { max-width: var(--measure); }
+  section > .scroller { max-width: none; }
+  h2 { font-size: 1.45rem; line-height: 1.2; letter-spacing: -0.016em; font-weight: 660; margin: 0 0 8px; text-wrap: balance; }
+  h2 + .sub { color: var(--muted); margin: 0 0 22px; font-size: 0.98rem; }
+  h3 { font-size: 1.02rem; font-weight: 640; margin: 26px 0 6px; }
+  p { margin: 0 0 15px; }
+  strong { font-weight: 640; }
+  a { color: var(--amber); text-underline-offset: 2px; }
+  code, .m {
+    font-family: var(--f-mono); font-size: 0.885em; background: var(--surface-sunk);
+    padding: 0.1em 0.36em; border-radius: 3px; white-space: nowrap;
+  }
+
+  .lede {
+    background: var(--surface); border: 1px solid var(--rule);
+    border-left: 3px solid var(--amber-bright); border-radius: 0 4px 4px 0;
+    padding: 20px 22px; margin: 0 0 8px; font-size: 1.03rem;
+  }
+  .lede > :last-child { margin-bottom: 0; }
+
+  .scroller { overflow-x: auto; margin: 0 0 18px; border: 1px solid var(--rule); border-radius: 4px; background: var(--surface); }
+  table { border-collapse: collapse; width: 100%; font-size: 14.5px; }
+  caption {
+    text-align: left; font-family: var(--f-mono); font-size: 10.5px;
+    letter-spacing: 0.13em; text-transform: uppercase; color: var(--muted);
+    padding: 14px 16px 12px; border-bottom: 1px solid var(--rule);
+  }
+  th, td { text-align: left; padding: 10px 16px; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  thead th { font-size: 11px; letter-spacing: 0.07em; text-transform: uppercase; color: var(--muted); font-weight: 620; white-space: nowrap; }
+  tbody tr:last-child th, tbody tr:last-child td { border-bottom: none; }
+  td.num { font-family: var(--f-mono); font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+
+  .tag {
+    display: inline-block; font-family: var(--f-mono); font-size: 10px;
+    letter-spacing: 0.1em; text-transform: uppercase; padding: 2px 7px;
+    border-radius: 3px; white-space: nowrap;
+  }
+  .t-high { background: var(--teal-wash); color: var(--teal); }
+  .t-mid  { background: var(--amber-wash); color: var(--amber); }
+  .t-low  { background: var(--surface-sunk); color: var(--muted); }
+
+  .note {
+    border: 1px solid var(--rule); border-left: 3px solid var(--teal);
+    background: var(--surface); padding: 15px 18px; margin: 0 0 18px; border-radius: 0 4px 4px 0;
+  }
+  .note.warn { border-left-color: var(--oxide); }
+  .note > :last-child { margin-bottom: 0; }
+  .note-k {
+    font-family: var(--f-mono); font-size: 10.5px; letter-spacing: 0.13em;
+    text-transform: uppercase; color: var(--teal); display: block; margin-bottom: 6px;
+  }
+  .note.warn .note-k { color: var(--oxide); }
+
+  footer {
+    margin-top: 56px; padding-top: 22px; border-top: 1px solid var(--rule-strong);
+    font-size: 13px; color: var(--muted); max-width: var(--measure);
+  }
+  :where(a):focus-visible { outline: 2px solid var(--amber-bright); outline-offset: 2px; border-radius: 2px; }
+
+  @media print {
+    :root {
+      --ground:#FFFFFF; --surface:#FFFFFF; --surface-sunk:#F1F3F5;
+      --ink:#0F1317; --ink-soft:#2B333A; --muted:#56606A;
+      --rule:#D2D7DC; --rule-strong:#AFB7BE;
+      --amber:#86500A; --amber-bright:#A4640C; --amber-wash:#FAF3E6;
+      --teal:#1C5A5B; --teal-wash:#EAF2F2; --oxide:#8F2C22;
+      --measure: 100%;
+    }
+    * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    @page { size: A4; margin: 15mm 15mm 16mm; }
+    html, body { background:#fff; font-size: 10pt; line-height: 1.45; }
+    .wrap { max-width: none; padding: 0; }
+    h1 { font-size: 22pt; margin-bottom: 12pt; }
+    .standfirst { font-size: 11pt; }
+    .masthead { padding-bottom: 16pt; break-after: avoid; }
+    .instrument { font-size: 8.5pt; margin-top: 14pt; padding-top: 10pt; }
+    section { padding-top: 16pt; }
+    h2 { font-size: 13.5pt; break-after: avoid; }
+    /* chain break-after so a section heading is never stranded from its first
+       subsection: h2 keeps its .sub, .sub keeps the h3, h3 keeps its paragraph */
+    h2 + .sub { font-size: 9.5pt; margin-bottom: 11pt; break-after: avoid; }
+    h3 { font-size: 10.5pt; margin: 13pt 0 4pt; break-after: avoid; }
+    /* Deliberately NOT break-inside:avoid on paragraphs. Chrome's print
+       fragmenter can overlay unbreakable blocks when they do not fit the
+       remaining space, and a paragraph split across pages is a far smaller
+       problem than overlapping text. Only genuinely atomic blocks below get it. */
+    .lede { padding: 12pt 14pt; font-size: 10.5pt; break-inside: avoid; }
+    /* Both tables are short, so keep each whole rather than let a page end on a
+       repeated header with no rows under it. */
+    .scroller { overflow: visible; break-inside: avoid; }
+    table { font-size: 8.8pt; }
+    caption { padding: 9pt 10pt 7pt; font-size: 8pt; }
+    th, td { padding: 5.5pt 10pt; }
+    thead { display: table-header-group; }
+    tr { break-inside: avoid; }
+    .note { padding: 11pt 13pt; break-inside: avoid; }
+    footer { margin-top: 20pt; font-size: 8.8pt; break-inside: avoid; }
+  }
+</style>
+
+<div class="wrap">
+  <header class="masthead">
+    <p class="eyebrow">Measurement provenance</p>
+    <h1>Where the Numbers Come From</h1>
+    <p class="standfirst">A plain explanation of how the figures and charts in a noise report are produced: what the instrument measures directly, what we calculate from it, and how far each figure should be relied on.</p>
+    <p class="instrument">Norsonic NOR140 · Class 1 sound level meter to IEC 61672-1:2013 · 1/3-octave analysis · five readings recorded every second</p>
+  </header>
+
+  <section>
+    <div class="lede">
+      <p><strong>In short:</strong> almost everything reported is measured by the instrument itself, then decoded and reproduced at the precision the manufacturer’s own software exports. No acoustic correction, model or estimate is applied — we do not infer sound levels. The handful of figures we calculate are standard acoustic arithmetic, and they are identified below. The results have been checked against the meter's own display and against the manufacturer's own software, value for value.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2>The instrument, and its calibration</h2>
+    <p>Measurements are made with a Norsonic NOR140 — a <strong>Class 1</strong> sound level meter conforming to IEC 61672-1:2013, which is the higher of the two accuracy grades defined for this work.</p>
+    <p>This system records <em>which</em> instrument was used, by serial number. It does not hold calibration records itself: the laboratory calibration certificate, and the field check carried out before and after measurement, are documented separately from the software.</p>
+    <div class="note">
+      <span class="note-k">What to ask for</span>
+      <p>A Class 1 rating describes the instrument's design, not whether it was in calibration on the day. For a formal assessment you are entitled to see the calibration position stated in the report itself: the date of the instrument's last laboratory calibration, confirmation that a field check was carried out at the time of measurement, and that any drift between the before and after checks was within tolerance.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2>What the instrument measures</h2>
+    <p class="sub">A single 15-minute measurement writes about 5,200 individual readings to the meter's memory card.</p>
+
+    <div class="scroller">
+      <table>
+        <caption>Recorded by the meter, per 15-minute measurement</caption>
+        <thead>
+          <tr><th>Reading</th><th class="num">Count</th><th>What it is</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Overall results</td><td class="num">22</td><td>The headline levels for the whole measurement — average level, loudest event, peak pressure, exposure — each recorded in two standard forms</td></tr>
+          <tr><td>Statistical levels</td><td class="num">16</td><td>The levels exceeded for given proportions of the time, including the background level used in assessments</td></tr>
+          <tr><td>Frequency detail</td><td class="num">648</td><td>The sound broken into 36 frequency bands, from very low to very high, for 18 different measures</td></tr>
+          <tr><td>Second-by-second history</td><td class="num">4,500</td><td>Five readings recorded every second for the full measurement</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>These are calculated inside the meter by its own detectors, at full measurement rate. Our software's only job is to read them off the card, using one fixed conversion that is the same for every value — there is no adjustment, weighting or interpretation applied. Every headline figure in a report, including the average level, the loudest event and the background level, is one of these measured values reproduced exactly.</p>
+  </section>
+
+  <section>
+    <h2>What we calculate</h2>
+    <p class="sub">Four things, all standard arithmetic applied to the measured readings above.</p>
+
+    <h3>Combining several measurements into one</h3>
+    <p>Where a report covers several measurements, the overall level is an <em>energy</em> average, not a simple one. Sound levels are logarithmic, so they cannot be averaged in the ordinary way: 60 dB and 70 dB combine to 67.4 dB, not 65 dB, because the louder sound carries ten times the energy. Using a simple average would understate the result.</p>
+
+    <h3>Background and statistical levels across measurements</h3>
+    <p>When several measurements are combined, the statistical levels are recalculated from every individual second-by-second reading pooled together. They are <em>not</em> averaged from each measurement's own figures, which would give a subtly wrong answer where measurements differ in length.</p>
+
+    <h3>The time-history chart</h3>
+    <p>The chart shows how the level changed through the measurement. To draw it, the readings are thinned for display — for a 15-minute measurement, 900 readings become 180 plotted points, and each point shows the <strong>loudest</strong> reading in its window rather than the average of it.</p>
+    <div class="note">
+      <span class="note-k">How to read the chart</span>
+      <p>This makes the chart a reliable guide to <em>when</em> things happened and how the noise behaved over time, and it will not hide a brief loud event. It is not the right place to read a level from: because each point is a local maximum, the trace sits above the true average. Quote levels from the tabulated figures, which come straight from the instrument.</p>
+    </div>
+
+    <h3>Display windows reaching 85 dB</h3>
+    <p>This counts the five-second chart windows whose loudest reading reaches 85 dB. Because a single qualifying second makes the whole window count, it can <strong>materially overstate</strong> the actual proportion of time above the threshold — in one measurement from the reference dataset it reported 3.9% where the true figure from the full record was 1.33%, close to three times over.</p>
+    <div class="note warn">
+      <span class="note-k">Screening only</span>
+      <p>Treat this as a flag for "this measurement is worth looking at", not as a quantity. It is <strong>not</strong> a daily or weekly personal noise exposure calculation, which is what workplace exposure limits are defined against, and it should never be presented as one. Where an exposure assessment is required, it must be calculated separately from the full record — this figure is not that calculation.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2>How far to rely on each figure</h2>
+    <div class="scroller">
+      <table>
+        <caption>Confidence by figure type</caption>
+        <thead>
+          <tr><th>Figure</th><th>Basis</th><th>Confidence</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Average level, loudest event, peak, background and statistical levels; frequency detail</td>
+            <td>Measured by the instrument, reproduced unchanged</td>
+            <td><span class="tag t-high">Highest</span></td>
+          </tr>
+          <tr>
+            <td>Second-by-second record</td>
+            <td>Measured by the instrument, reproduced unchanged</td>
+            <td><span class="tag t-high">Highest</span></td>
+          </tr>
+          <tr>
+            <td>Combined levels across several measurements</td>
+            <td>Standard acoustic arithmetic on measured values</td>
+            <td><span class="tag t-high">High</span></td>
+          </tr>
+          <tr>
+            <td>Time-history chart</td>
+            <td>Measured values, thinned to local maxima for display</td>
+            <td><span class="tag t-mid">Shape, not level</span></td>
+          </tr>
+          <tr>
+            <td>Display windows reaching 85 dB</td>
+            <td>Counted from five-second display windows, so overstates time above the threshold</td>
+            <td><span class="tag t-low">Screening only</span></td>
+          </tr>
+          <tr>
+            <td>Weather</td>
+            <td>Public archive service, by location and date</td>
+            <td><span class="tag t-low">Context only</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>What is not measured on site</h2>
+    <p>The weather shown alongside a measurement — wind, temperature, rainfall — is retrieved from a public meteorological archive for the location and date. It is <strong>not</strong> recorded at the microphone.</p>
+    <div class="note warn">
+      <span class="note-k">Please note</span>
+      <p>Wind in particular affects how sound travels, so these figures are useful background when interpreting a measurement. They are not a substitute for conditions recorded on site. Where a submission to the environment agencies requires meteorological evidence, that must be measured at the monitoring position with suitable equipment, and archive data is not accepted for that purpose.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2>How the figures have been checked</h2>
+    <p>The measured values have been checked two complementary ways. Both trace back to the same instrument, so they are corroborating rather than strictly independent.</p>
+    <p><strong>Against the meter's own display.</strong> Headline values read directly from the instrument's screen for <strong>seven separate measurements</strong> were compared with the figures our software produces. All agreed to within the display's own rounding. This is the broader check, covering several measurements but only the headline figures.</p>
+    <p><strong>Against the manufacturer's software.</strong> Norsonic's own export tool was used to produce reference files for <strong>one complete measurement</strong>. For that measurement, every value our software produces — all the overall results, all 648 frequency values and all 4,500 second-by-second readings — matches the reference files exactly. This is the deeper check: total agreement, but demonstrated on one recording rather than across the whole archive.</p>
+    <div class="note">
+      <span class="note-k">One difference found, and resolved</span>
+      <p>That checking did find a discrepancy: about 5% of the second-by-second readings displayed 0.1 dB lower than the manufacturer's software. The cause was ours. We were storing those readings rounded to a single decimal place, which discarded precision that could not then be recovered. Norsonic's software carries a second decimal and rounds to one only for display, so reproducing its figures means retaining that second decimal too. We now do, and the two agree on every value.</p>
+      <p>The effect was confined to the last displayed digit of individual one-second readings. Statistics pooled from those readings could shift by up to 0.1 dB as a result — one median level in the reference dataset moved from 67.0 to 67.1 dB — so the correction did slightly change some derived figures. The headline measured values were unaffected, because they come from the instrument's own whole-measurement results rather than from the second-by-second record.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2>How the written assessment is produced</h2>
+    <p>Everything above concerns the <em>measurements</em>. The written report is produced differently.</p>
+    <p>The figures come from the instrument, as described above. The narrative sections — the summary, the discussion of the results, the comparison against the relevant standards and the conclusions — are <strong>drafted by an AI language model</strong> working from those measured figures.</p>
+    <div class="note">
+      <span class="note-k">What the model does and does not do</span>
+      <p><strong>It does not produce any measurement.</strong> The figures are calculated before the model sees them, by the instrument and by the arithmetic set out above. The model is given the numbers; it cannot change them.</p>
+      <p><strong>It drafts; it does not decide.</strong> The professional judgement in an assessment — whether a level is acceptable, whether a standard is met, what should be recommended — remains that of the consultant who issues the report and puts their name to it.</p>
+      <p><strong>The tables are authoritative.</strong> Where the written text quotes a figure it should match the tabulated results. If the two ever disagree, the tables are correct and the text is wrong.</p>
+    </div>
+    <p>This is disclosed because you are entitled to know how a document you may rely on was prepared. Please raise it if you would rather the assessment were prepared differently.</p>
+  </section>
+
+  <section>
+    <h2>If you need the technical detail</h2>
+    <p>This note is deliberately non-technical. A fuller companion document, <strong>Reading the NOR140</strong>, is maintained for practitioners: it covers the instrument's data format and how each value is decoded, every measurement the meter records, the derivations in full, the source of each regulatory figure, and the verification results. It is the right reference if you, or another consultant acting for you, are examining the methodology closely. Available on request.</p>
+  </section>
+
+  <footer>
+    <p>This note describes how measurement data is captured and processed. It is not itself an assessment, and it does not replace the applicable standard or the professional judgement set out in the report it accompanies.</p>
+  </footer>
+</div>
