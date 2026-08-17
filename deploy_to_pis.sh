@@ -25,6 +25,7 @@ FILES=(
     noise_app.py
     reports.py
     assessments.py
+    helpdocs.py
     config.py
     webauth.py
     peer_client.py
@@ -44,6 +45,7 @@ FILES=(
 DIRS=(
     templates
     static
+    docs
 )
 
 deploy_to() {

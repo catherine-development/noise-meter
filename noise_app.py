@@ -33,6 +33,7 @@ from webauth import (AUTH_AVAILABLE, login_required, require_api_key,
 from peer_client import push_to_peer, sync_event_to_peer, startup_sync_from_peer
 import reports
 import assessments
+import helpdocs
 
 if AUTH_AVAILABLE:
     # webauth put the flight tracker's directory on sys.path when it imported
@@ -47,6 +48,7 @@ app.permanent_session_lifetime = timedelta(days=7)
 
 app.register_blueprint(reports.bp)
 app.register_blueprint(assessments.bp)
+app.register_blueprint(helpdocs.bp)
 
 
 def _fetch_weather_for_session(date, lat, lng):

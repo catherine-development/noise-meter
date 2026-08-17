@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Help · {{ pi_name }}</title>
+<style>
+:root{--bg:#EFF2F7;--surface:#fff;--border:#D0D8E8;--text:#0C1A2E;--text2:#3D5270;--text3:#7A92AE;--accent:#2660C4;--ok:#1a7f37;--err:#c0392b;--font:system-ui,-apple-system,'Helvetica Neue',sans-serif}
+@media(prefers-color-scheme:dark){:root{--bg:#090F1C;--surface:#111C30;--border:#1E2E48;--text:#E8EEF8;--text2:#8BA4C4;--text3:#4A6080;--accent:#4A90E8;--ok:#2ea043;--err:#e05c5c}}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:var(--font);background:var(--bg);color:var(--text);min-height:100vh}
+.site-nav{display:flex;align-items:center;gap:0;padding:0 20px;background:var(--surface);border-bottom:1px solid var(--border);font-size:13px}
+.nav-brand{font-weight:600;letter-spacing:-.01em;margin-right:24px}
+.nav-pi{color:var(--text3);font-size:11px;margin-right:auto;padding-right:16px}
+.nav-tab{color:var(--text2);text-decoration:none;padding:12px 14px;border-bottom:2px solid transparent;white-space:nowrap;font-size:13px;font-weight:500;transition:color .15s}
+.nav-tab:hover{color:var(--text)}
+.nav-tab.active{color:var(--accent);border-bottom-color:var(--accent)}
+.nav-tab-primary{background:var(--accent);color:#fff!important;border-radius:4px;padding:5px 12px;margin-left:8px;border-bottom:none!important}
+.nav-tab-primary:hover{opacity:.9}
+.page{max-width:820px;margin:40px auto;padding:0 20px 60px}
+h1{font-size:24px;letter-spacing:-.02em;margin-bottom:6px}
+.lede{color:var(--text2);font-size:14px;line-height:1.6;margin-bottom:28px;max-width:62ch}
+.doc{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:20px 22px;margin-bottom:16px}
+.doc-head{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:4px}
+.doc-title{font-size:17px;font-weight:640;letter-spacing:-.01em}
+.doc-title a{color:var(--text);text-decoration:none}
+.doc-title a:hover{color:var(--accent)}
+.pill{font-size:11px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--accent);background:color-mix(in srgb,var(--accent) 12%,transparent);padding:2px 8px;border-radius:99px;white-space:nowrap}
+.pages{font-size:12px;color:var(--text3)}
+.doc-blurb{color:var(--text2);font-size:13.5px;line-height:1.6;margin:8px 0 10px;max-width:66ch}
+.doc-note{font-size:12.5px;color:var(--text3);line-height:1.5;margin-bottom:14px;max-width:66ch}
+.doc-actions{display:flex;gap:8px;flex-wrap:wrap}
+.btn{font-size:13px;font-weight:500;text-decoration:none;padding:7px 14px;border-radius:5px;border:1px solid var(--border);color:var(--text2);background:transparent}
+.btn:hover{color:var(--text);border-color:var(--text3)}
+.btn-primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.btn-primary:hover{opacity:.9;color:#fff}
+.empty{background:var(--surface);border:1px dashed var(--border);border-radius:8px;padding:24px;color:var(--text3);font-size:13.5px}
+.foot{margin-top:26px;font-size:12.5px;color:var(--text3);line-height:1.6;max-width:66ch}
+.foot code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;background:var(--bg);padding:1px 5px;border-radius:3px}
+</style>
+</head>
+<body>
+
+<nav class="site-nav">
+  <span class="nav-brand">NOR140 Noise Monitor</span>
+  <span class="nav-pi">{{ pi_name }}</span>
+  <a href="/" class="nav-tab">Sessions</a>
+  <a href="/assessments" class="nav-tab">Assessments</a>
+  <a href="/manage" class="nav-tab">Manage</a>
+  <a href="/reports" class="nav-tab">Reports</a>
+  <a href="/help" class="nav-tab active">Help</a>
+  <a href="/upload" class="nav-tab nav-tab-primary">+ Add</a>
+  <a href="/logout" class="nav-tab" style="margin-left:8px;font-size:12px;color:var(--text3)">Sign out</a>
+</nav>
+
+<div class="page">
+  <h1>Help</h1>
+  <p class="lede">Reference documentation for the measurements this system records and how the figures in a report are produced.</p>
+
+  {% if documents %}
+    {% for slug, doc in documents.items() %}
+    <div class="doc">
+      <div class="doc-head">
+        <span class="doc-title"><a href="/help/{{ slug }}">{{ doc.title }}</a></span>
+        <span class="pill">{{ doc.who }}</span>
+        <span class="pages">{{ doc.pages }} pages</span>
+      </div>
+      <p class="doc-blurb">{{ doc.blurb }}</p>
+      <p class="doc-note">{{ doc.note }}</p>
+      <div class="doc-actions">
+        <a class="btn btn-primary" href="/help/{{ slug }}">Read</a>
+        <a class="btn" href="/help/{{ slug }}.pdf">PDF</a>
+      </div>
+    </div>
+    {% endfor %}
+  {% else %}
+    <div class="empty">
+      No documentation found. The <code>docs/</code> folder is missing from this
+      installation — copy it across and reload.
+    </div>
+  {% endif %}
+
+  <p class="foot">
+    These are also kept as files in <code>docs/</code> in the project, alongside
+    <code>render_pdf.py</code>, which regenerates the PDFs from the HTML after an edit.
+    The reverse-engineering log behind both documents is <code>NOR140_handoff.md</code>.
+  </p>
+</div>
+
+</body>
+</html>
