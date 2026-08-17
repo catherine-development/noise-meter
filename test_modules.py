@@ -288,13 +288,15 @@ def main(meas_root):
         # are the guard against that regressing: the decoded profile has to
         # reproduce the GLOB scalars exactly.
         import noise_parser as parser
-        from nor140_format import prof_record_size
+        import collections
+        from nor140_format import prof_record_size, read_duration_s
         _b = os.path.join(meas_root, '250823', 'PART0000', 'PROJ0002')
         if os.path.isdir(_b):
             _g = open(os.path.join(_b, 'GLOB0002.DAT'), 'rb').read()
             _p = open(os.path.join(_b, 'PROF0002.DAT'), 'rb').read()
-            check(prof_record_size(len(_p) - 3, 894) == 8,
+            check(prof_record_size(len(_p) - 3, 894, 1069) == 8,
                   '1069-byte variant resolves to 8-byte records')
+
             _d, _r = parser._parse_session_files(_g, _p)
             check(_r['n'] == 895, '8-byte run has 895 records', str(_r['n']))
             close(parser._energy_avg(_r['prof_laeq_json']), 80.28, 0.005,
@@ -303,6 +305,37 @@ def main(meas_root):
                   '8-byte profile LApeak reproduces the GLOB scalar')
             check(_r['prof_lae_json'] is None,
                   '4-channel layout stores no LAE series rather than faking one')
+
+        # prof_record_size() weighs two signals: the duration and the GLOB
+        # variant. Both are derived before either is returned, so a file whose
+        # signals disagree is refused rather than guessed at. The conflict case
+        # is the one that regressed — the duration branch used to return first.
+        check(prof_record_size(7160, 716, 1069) is None,
+              'conflicting duration and GLOB variant fails closed')
+        check(prof_record_size(7160, 3000, 1069) == 8,
+              'paused 1069 variant resolves by variant when duration cannot')
+        check(prof_record_size(7160, 3000, None) is None,
+              'unknown variant with no duration match is unresolved')
+        check(prof_record_size(9000, 900, 2653) == 10,
+              'normal 2653 variant resolves to 10-byte records')
+        check(prof_record_size(7160, None, 1069) == 8,
+              'variant alone resolves when there is no duration')
+
+        # Every historical file must still classify, and to the same size as
+        # before: an unresolved file is skipped on import, so a regression here
+        # silently drops runs.
+        _sizes = collections.Counter()
+        for _gg in _corpus:
+            _pp = _gg.replace('GLOB', 'PROF')
+            if not os.path.exists(_pp):
+                continue
+            _gd = open(_gg, 'rb').read()
+            _sizes[prof_record_size(os.path.getsize(_pp) - 3,
+                                    read_duration_s(_gd), len(_gd))] += 1
+        check(_sizes[None] == 0, 'no corpus file is left unclassified',
+              f'{_sizes[None]} unresolved')
+        check(_sizes[10] == 473 and _sizes[8] == 54,
+              'corpus classifies 473 ten-byte / 54 eight-byte', str(dict(_sizes)))
 
         # One example is not enough to pin a channel layout, so assert it over
         # every 8-byte file in the archive: ch2 must reproduce LAFmax and ch3

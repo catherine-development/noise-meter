@@ -231,29 +231,36 @@ GLOB_SIZE_RECORD_SIZE = {1069: PROF_RECORD_SIZE_4CH}
 def prof_record_size(payload_len, duration_s, glob_size=None):
     """Bytes per PROF record — 10 (5 channels), 8 (4 channels), or None.
 
-    Two signals, because neither is sufficient alone. The duration decides it
-    where it can: a run holds one record per second, give or take the final
-    partial one, and that agrees only for the true size. Where it cannot — a
-    paused or truncated run, whose record count no longer tracks the clock —
-    the GLOB variant decides instead.
+    Two independent signals, because neither is sufficient alone:
 
-    Returns None when the two disagree or neither resolves, so the caller skips
-    the run. Guessing here misaligns every record in the file, which is the
-    defect this function was written to fix; a skipped run is recoverable, a
-    silently misdecoded one is not.
+    * the duration, since a run holds one record per second give or take the
+      final partial one, which agrees only for the true size; and
+    * the GLOB variant, which identifies the layout directly but is only known
+      for sizes we have seen.
+
+    Both are derived before either is returned. Where they disagree the file is
+    not what it appears to be, so the answer is None. Where only one resolves,
+    it decides. Returning None makes the caller skip the run: guessing here
+    misaligns every record in the file, which is the defect this function was
+    written to prevent, and a skipped run is recoverable where a silently
+    misdecoded one is not.
     """
-    by_variant = GLOB_SIZE_RECORD_SIZE.get(glob_size, PROF_RECORD_SIZE) if glob_size else None
-
+    by_duration = None
     if duration_s:
         for size in (PROF_RECORD_SIZE, PROF_RECORD_SIZE_4CH):
-            if payload_len % size:
-                continue
-            if abs(payload_len // size - duration_s) <= 2:
-                return size
+            if payload_len % size == 0 and abs(payload_len // size - duration_s) <= 2:
+                by_duration = size
+                break
 
-    if by_variant and payload_len % by_variant == 0:
-        return by_variant
-    return None
+    by_variant = None
+    if glob_size:
+        size = GLOB_SIZE_RECORD_SIZE.get(glob_size, PROF_RECORD_SIZE)
+        if payload_len % size == 0:
+            by_variant = size
+
+    if by_duration and by_variant and by_duration != by_variant:
+        return None
+    return by_duration or by_variant
 
 
 def read_prof_records(data, record_size=None):

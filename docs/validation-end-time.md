@@ -28,7 +28,7 @@ needs a venv:
 python3 -m venv /tmp/nm-venv && /tmp/nm-venv/bin/pip install -q flask && /tmp/nm-venv/bin/python3 test_modules.py
 ```
 
-Expected: `All 185 checks passed.` The suite needs `MEAS118/` extracted in the
+Expected: `All 192 checks passed.` The suite needs `MEAS118/` extracted in the
 repo root (527 GLOB/PROF pairs, ~3 MB zipped, not committed — see `.gitignore`).
 
 ---
@@ -284,22 +284,34 @@ layouts, but that is an argument, not a measurement.
 | 1 | Peer sync discards the meter end time | Fixed; regression test added and verified to fail without the fix (§5) |
 | 2 | 300 s guard can silently substitute a wrong estimate | Fixed by removing the fallback outright; claim retracted (§3) |
 | 3 | Mobile run modal overflows at 360 px | Fixed; measured before/after (§6) |
-| 4 | `prof_record_size()` could misclassify a future paused 8-byte run | Fixed: GLOB size now participates, and it returns `None` to skip rather than defaulting to 10 |
+| 4 | `prof_record_size()` could misclassify a future paused 8-byte run | Fixed in two passes — the first left an early return that defeated the conflict check; see below |
 | 5 | Corpus counts inaccurate | Corrected here and in `NOR140_handoff.md` (§3) |
 
-On finding 4, the classifier now takes two signals. The duration decides where
-it can; where it cannot — precisely the paused or truncated case — the GLOB
-variant decides. If neither resolves, it returns `None` and the parser skips the
-run rather than guessing. Check the case directly:
+On finding 4, the classifier takes two signals: the duration, and the GLOB
+variant. **Both are now derived before either is returned.** The first attempt
+at this fix did not do that — the duration branch returned early, so a file
+whose two signals disagreed silently took the duration's answer, and
+`prof_record_size(7160, 716, 1069)` gave 10 despite the variant identifying
+8-byte records. The fail-closed claim in this brief was therefore true of the
+intent and not of the code. Caught on a second review pass and fixed.
+
+The resolution order is now: disagreement → `None`; otherwise whichever signal
+resolves; if neither, `None`. The parser skips a `None`, because guessing
+misaligns every record in the file.
 
 ```bash
 /tmp/nm-venv/bin/python3 -c "
 from nor140_format import prof_record_size
+print('signals conflict           :', prof_record_size(7160, 716, 1069))
 print('paused 8-byte, variant known:', prof_record_size(7160, 3000, 1069))
-print('nothing can decide         :', prof_record_size(7160, 3000, None))"
+print('nothing can decide         :', prof_record_size(7160, 3000, None))
+print('normal 10-byte             :', prof_record_size(9000, 900, 2653))"
 ```
 
-Expected `8` then `None`.
+Expected `None`, `8`, `None`, `10`. All five branches are asserted in the suite,
+along with the whole corpus classifying 473 ten-byte / 54 eight-byte with none
+left unresolved — an unresolved file is skipped on import, so a regression there
+would silently drop runs rather than fail loudly.
 
 ---
 
@@ -315,8 +327,14 @@ The second: the guard "never shows a wrong figure". I had reasoned about the
 threshold and not about the fallback behind it, so I checked the part I had
 built and missed the part I had inherited. The review caught it.
 
-Both were confident statements resting on a single unexamined assumption. Treat
-every "consistent across N files" claim here the same way, and ask what *else*
-would produce that consistency. The candidate that stood out on this pass — ch0/ch1 resting
+A third, from the follow-up pass: this brief described `prof_record_size()` as
+failing closed on conflicting signals when the code returned early and never
+compared them. That one is the most instructive of the three, because the
+document and the code were written together and still disagreed — describing
+intended behaviour is not evidence of it.
+
+All three were confident statements resting on a single unexamined assumption.
+Treat every "consistent across N files" claim here the same way, and ask what
+*else* would produce that consistency. The candidate that stood out on this pass — ch0/ch1 resting
 on analogy alone — is now pinned by an independent discriminator in the suite,
 so the next one will have to be found somewhere else.
