@@ -116,13 +116,14 @@ def main():
         SELECT r.id, r.run_number, r.source_file, r.avg_laeq, s.date
         FROM runs r
         JOIN sessions s ON r.session_id = s.id
-        WHERE r.spec_lfeq IS NULL
+        WHERE r.spec_lfeq IS NULL OR r.end_time IS NULL
+           OR r.duration_s IS NULL OR r.full_scale IS NULL
         ORDER BY s.date, r.run_number
     ''').fetchall()
 
     print(f'Runs to backfill:  {len(rows)}\n')
     if not rows:
-        print('Nothing to do — all runs already have spectral data.')
+        print('Nothing to do — every run has spectra and all header fields.')
         conn.close()
         return
 
