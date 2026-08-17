@@ -33,6 +33,17 @@ def _migrate(conn):
     for col, typ in new_cols:
         if col not in existing:
             conn.execute(f'ALTER TABLE sessions ADD COLUMN {col} {typ}')
+    # Tombstones for deleted sessions. A missed upsert self-heals on the next
+    # full sync, but a missed delete does not — the peer would keep the session
+    # forever — so deletions are recorded and replayed rather than only pushed.
+    # deleted_at uses datetime('now') (UTC) to match sessions.imported_at, which
+    # apply_full_sync() compares it against.
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS deleted_sessions (
+            date       TEXT PRIMARY KEY,
+            deleted_at TEXT DEFAULT (datetime('now'))
+        )
+    ''')
     conn.execute('''
         CREATE TABLE IF NOT EXISTS weather (
             date        TEXT PRIMARY KEY,
@@ -245,6 +256,10 @@ def import_sessions(sessions_data, metadata=None):
                 '  precip=excluded.precip',
                 (date, wx.get('ws'), wx.get('wd'), wx.get('tn'), wx.get('tx'), wx.get('pr'), None)
             )
+        # Importing a date supersedes any earlier deletion of it, so drop the
+        # tombstone — otherwise a legitimate SD-card re-import would be deleted
+        # again the next time a peer replayed its full sync payload.
+        conn.execute('DELETE FROM deleted_sessions WHERE date=?', (date,))
         sess_id = conn.execute('SELECT id FROM sessions WHERE date=?', (date,)).fetchone()['id']
         for i, proj in enumerate(projects, 1):
             _g = proj.get
@@ -665,12 +680,45 @@ def update_run_location_tag(date, run_number, tag):
 def delete_session(date):
     """Delete a session and its runs (cascaded via FK) plus its assessment
     assignments — assessment_runs.session_date is a plain text column, not a
-    declared foreign key, so it can't cascade automatically."""
+    declared foreign key, so it can't cascade automatically.
+
+    Records a tombstone so the deletion replicates to a peer that was offline
+    when it happened. Weather is deliberately left in place: it is keyed by
+    date, not by session, and is reference data rather than measurement data."""
     conn = get_db()
     conn.execute('DELETE FROM assessment_runs WHERE session_date=?', (date,))
     conn.execute('DELETE FROM sessions WHERE date=?', (date,))
+    _record_tombstones(conn, [date])
     conn.commit()
     conn.close()
+
+
+def _record_tombstones(conn, dates, deleted_at=None):
+    """Mark session dates as deleted. Caller commits.
+
+    deleted_at is supplied when replaying a peer's tombstone, so the original
+    deletion time is preserved as it propagates; the MAX() keeps the newest
+    time if the same date is deleted on both Pis."""
+    for date in dates:
+        if deleted_at is None:
+            conn.execute(
+                "INSERT INTO deleted_sessions (date) VALUES (?) "
+                "ON CONFLICT(date) DO UPDATE SET deleted_at=datetime('now')", (date,))
+        else:
+            conn.execute(
+                'INSERT INTO deleted_sessions (date, deleted_at) VALUES (?,?) '
+                'ON CONFLICT(date) DO UPDATE SET '
+                '  deleted_at=MAX(deleted_sessions.deleted_at, excluded.deleted_at)',
+                (date, deleted_at))
+
+
+def get_session_tombstones():
+    """Return [{date, deleted_at}] for every deleted session."""
+    conn = get_db()
+    rows = conn.execute(
+        'SELECT date, deleted_at FROM deleted_sessions ORDER BY date').fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 
 def get_sessions_export_format(dates=None):
@@ -719,6 +767,7 @@ def purge_sessions_before(before_date):
         conn.execute(
             f'DELETE FROM runs WHERE session_id IN (SELECT id FROM sessions WHERE date IN ({ph}))', old)
         conn.execute(f'DELETE FROM sessions WHERE date IN ({ph})', old)
+        _record_tombstones(conn, old)
         conn.commit()
     conn.close()
     return old

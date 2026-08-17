@@ -460,6 +460,7 @@ def export_nor140(date, run_number, report_type):
 @login_required
 def delete_session_route(date):
     delete_session(date)
+    sync_event_to_peer('session', 'delete', {'date': date})
     flash(f'Session {date} deleted.', 'success')
     return redirect(url_for('manage_page'))
 
@@ -520,6 +521,8 @@ def admin_purge_before():
     if not before or len(before) != 10:
         return jsonify({'error': 'provide before=YYYY-MM-DD'}), 400
     deleted = purge_sessions_before(before)
+    if deleted:
+        sync_event_to_peer('session', 'purge_before', {'before': before})
     return jsonify({'deleted': len(deleted), 'dates': deleted})
 
 

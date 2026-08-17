@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Empirical tests for the noise-meter data layer, run against a real temporary
-SQLite database built from the MEAS118 reference SD-card files.
+Empirical tests for the noise-meter data layer, run against real temporary
+SQLite databases built from the MEAS118 reference SD-card files.
 
 These are deliberately not import-smoke tests: every case drives real data
 through the real code path and checks values, because the bugs this codebase
@@ -9,10 +9,14 @@ has actually shipped (a placeholder count off by one, a percentile reading the
 wrong channel, a sync path dropping metadata) all compiled cleanly and read
 correctly.
 
+Replication is tested with two genuinely independent copies of the data layer,
+each bound to its own database file, so a "peer" really is a separate Pi.
+
     python3 test_modules.py [path/to/MEAS118]
 
 Exits non-zero on the first failure.
 """
+import importlib
 import json
 import os
 import shutil
@@ -42,6 +46,44 @@ def close(a, b, tol, label):
     check(a is not None and abs(a - b) <= tol, label, f'got {a!r}, expected {b} ±{tol}')
 
 
+class Side:
+    """One Pi: an independent import of the data layer bound to its own DB."""
+
+    def __init__(self, db_path):
+        self.db_path = db_path
+        os.environ['NOISE_DB_PATH'] = db_path
+        for name in ('noise_db', 'reports_db', 'assessments_db', 'sync_db', 'reports'):
+            sys.modules.pop(name, None)
+        self.db = importlib.import_module('noise_db')
+        assert self.db.DB_PATH == db_path, self.db.DB_PATH
+        self.sync = importlib.import_module('sync_db')
+        self.assess = importlib.import_module('assessments_db')
+        self.reports = importlib.import_module('reports')
+        self.db.init_db()
+
+    def sql(self, query, *params):
+        conn = self.db.get_db()
+        rows = conn.execute(query, params).fetchall()
+        conn.close()
+        return rows
+
+    def exec(self, query, *params):
+        conn = self.db.get_db()
+        conn.execute(query, params)
+        conn.commit()
+        conn.close()
+
+    def has_session(self, date):
+        return bool(self.sql('SELECT 1 FROM sessions WHERE date=?', date))
+
+    def tombstones(self):
+        return {r['date']: r['deleted_at'] for r in self.sql(
+            'SELECT date, deleted_at FROM deleted_sessions')}
+
+    def set_imported_at(self, date, ts):
+        self.exec('UPDATE sessions SET imported_at=? WHERE date=?', ts, date)
+
+
 def read_sd_pairs(meas_root):
     """Read the real GLOB/PROF files for one date folder off the SD-card tree."""
     root = os.path.join(meas_root, DATE_FOLDER, 'PART0000')
@@ -59,30 +101,30 @@ def read_sd_pairs(meas_root):
     return pairs
 
 
+META = {
+    'recorder_name': 'Catherine Ives-Yim',
+    'location_label': 'Reference site',
+    'postcode': 'LS1 1AA', 'lat': 53.7997, 'lng': -1.5492,
+    'notes': 'a note that must survive the hop',
+}
+
+
 def main(meas_root):
     pairs = read_sd_pairs(meas_root)
     tmp = tempfile.mkdtemp(prefix='noisetest-')
-    os.environ['NOISE_DB_PATH'] = os.path.join(tmp, 'noise.db')
     sys.path.insert(0, REPO)
     try:
-        import noise_db
-        import assessments_db
-        import sync_db
-        import reports
         from noise_parser import parse_files
+        from nor140_format import SPECTRAL_TABLES
+        sessions = parse_files(pairs)
 
         # ── 1. import_sessions() end to end ───────────────────────────────────
         print('\n1. import_sessions() from real SD-card binaries')
-        sessions = parse_files(pairs)
-        noise_db.init_db()
-        n = noise_db.import_sessions(sessions, metadata={
-            'recorder_name': 'Catherine Ives-Yim',
-            'location_label': 'Reference site',
-            'postcode': 'LS1 1AA', 'lat': 53.7997, 'lng': -1.5492,
-        })
+        a = Side(os.path.join(tmp, 'a.db'))
+        n = a.db.import_sessions(sessions, metadata=META)
         check(n == len(sessions) == 1, 'one session imported', f'n={n}')
 
-        data = noise_db.get_all_sessions_json()['sessions']
+        data = a.db.get_all_sessions_json()['sessions']
         check(len(data) == 1, 'one session read back')
         sess = data[0]
         check(sess['d'] == SESSION_DATE, 'session date', sess['d'])
@@ -95,7 +137,7 @@ def main(meas_root):
         # Run 9 against the Nortfr-confirmed reference values from NOR140_handoff.md.
         # This exercises parse -> INSERT -> SELECT for the GLOB scalar columns;
         # an INSERT placeholder miscount or column-order slip shows up here.
-        run9 = noise_db.get_full_run_row(SESSION_DATE, 9)
+        run9 = a.db.get_full_run_row(SESSION_DATE, 9)
         check(run9 is not None, 'run 9 present')
         close(run9['avg_laeq'], 70.8, 0.05, 'run 9 LAeq  = 70.8 (Nortfr)')
         close(run9['lceq'],     78.7, 0.05, 'run 9 LCeq  = 78.7 (Nortfr)')
@@ -106,8 +148,6 @@ def main(meas_root):
         close(run9['la_l90'],   57.1, 0.05, 'run 9 LA90  = 57.1 (Nortfr)')
         check(run9['n_samples'] == 900, 'run 9 is 900 s', str(run9['n_samples']))
 
-        # All 18 spectral tables and all 5 PROF series must survive the INSERT.
-        from nor140_format import SPECTRAL_TABLES
         missing = [c for c, _ in SPECTRAL_TABLES if not run9.get(c)]
         check(not missing, 'all 18 spectral tables stored', f'missing: {missing}')
         for col, _ in SPECTRAL_TABLES:
@@ -118,25 +158,23 @@ def main(meas_root):
 
         # ── 2. LA10/LA90 pooled percentile ────────────────────────────────────
         print('\n2. pooled LA10/LA90 percentile across runs')
-        pooled = noise_db.get_session_prof_lafspl(SESSION_DATE, [9])
+        pooled = a.db.get_session_prof_lafspl(SESSION_DATE, [9])
         check(len(pooled) == 900, 'run 9 pools 900 samples', str(len(pooled)))
         check(pooled == json.loads(run9['prof_lafspl_json']),
               'pooling reads PROF field 0 (LAFspl), not field 1 (LAeq,1s)')
         check(pooled != json.loads(run9['prof_laeq_json']),
               'LAFspl and LAeq,1s are genuinely different series')
 
-        multi = noise_db.get_session_prof_lafspl(SESSION_DATE, [9, 10])
+        multi = a.db.get_session_prof_lafspl(SESSION_DATE, [9, 10])
         check(len(multi) == 1800, 'two runs pool 1800 samples', str(len(multi)))
-        every = noise_db.get_session_prof_lafspl(SESSION_DATE)
+        every = a.db.get_session_prof_lafspl(SESSION_DATE)
         check(len(every) == sum(p['n'] for p in sess['projects']),
               'no run_numbers pools every run', f'{len(every)} samples')
 
-        # _percentile is an interpolating percentile over an ascending list:
-        # LA90 is the level exceeded 90% of the time = the 10th percentile.
+        # _percentile interpolates over an ascending list: LA90 is the level
+        # exceeded 90% of the time, i.e. the 10th percentile.
         s = sorted(pooled)
-        la90 = reports._percentile(s, 10)
-        la50 = reports._percentile(s, 50)
-        la10 = reports._percentile(s, 90)
+        la90, la50, la10 = (a.reports._percentile(s, p) for p in (10, 50, 90))
         check(la90 < la50 < la10, 'LA90 < LA50 < LA10', f'{la90} / {la50} / {la10}')
 
         def naive(sorted_vals, p):
@@ -146,124 +184,170 @@ def main(meas_root):
             return round(sorted_vals[lo] + (idx - lo) *
                          (sorted_vals[hi] - sorted_vals[lo]), 1)
         for p in (10, 50, 90):
-            check(reports._percentile(s, p) == naive(s, p),
+            check(a.reports._percentile(s, p) == naive(s, p),
                   f'percentile p={p} matches independent computation')
-        check(reports._percentile([], 50) is None, 'empty input returns None')
-        check(reports._percentile([42.0], 90) == 42.0, 'single value returns itself')
+        check(a.reports._percentile([], 50) is None, 'empty input returns None')
+        check(a.reports._percentile([42.0], 90) == 42.0, 'single value returns itself')
 
-        # Pooling real samples must not equal averaging each run's own
-        # percentile — percentiles do not compose linearly across sub-samples.
-        p9 = reports._percentile(sorted(noise_db.get_session_prof_lafspl(SESSION_DATE, [9])), 90)
-        p10 = reports._percentile(sorted(noise_db.get_session_prof_lafspl(SESSION_DATE, [10])), 90)
-        pooled_910 = reports._percentile(sorted(multi), 90)
+        p9 = a.reports._percentile(sorted(a.db.get_session_prof_lafspl(SESSION_DATE, [9])), 90)
+        p10 = a.reports._percentile(sorted(a.db.get_session_prof_lafspl(SESSION_DATE, [10])), 90)
+        pooled_910 = a.reports._percentile(sorted(multi), 90)
         check(abs(pooled_910 - (p9 + p10) / 2) > 1e-9,
               'pooled LA10 differs from the mean of per-run LA10s',
               f'pooled={pooled_910}, mean-of-runs={round((p9 + p10) / 2, 1)}')
 
         # ── 3. delete_session() cascade ───────────────────────────────────────
         print('\n3. delete_session() cascade')
-        aid = assessments_db.create_assessment('Cascade test', standard='bs4142')
-        loc = assessments_db.add_assessment_location(aid, 'Loc A')
-        assessments_db.assign_runs(aid, loc, [(SESSION_DATE, 9), (SESSION_DATE, 10)])
-        noise_db.save_weather(SESSION_DATE, {
+        aid = a.assess.create_assessment('Cascade test', standard='bs4142')
+        loc = a.assess.add_assessment_location(aid, 'Loc A')
+        a.assess.assign_runs(aid, loc, [(SESSION_DATE, 9), (SESSION_DATE, 10)])
+        a.db.save_weather(SESSION_DATE, {
             'wind_speed': 7.2, 'wind_dir': 210.5, 'temp_min': 11.0,
             'temp_max': 19.4, 'precip': 0.2, 'hourly_json': '{}'})
 
-        conn = noise_db.get_db()
-        def count(sql, *a):
-            return conn.execute(sql, a).fetchone()[0]
-        check(count('SELECT COUNT(*) FROM assessment_runs') == 2, 'two runs assigned')
-        before_runs = count('SELECT COUNT(*) FROM runs')
-        check(before_runs == n_runs, 'runs present before delete', str(before_runs))
-        conn.close()
+        def n_of(side, table, where='', *p):
+            return side.sql(f'SELECT COUNT(*) c FROM {table} {where}', *p)[0]['c']
 
-        noise_db.delete_session(SESSION_DATE)
+        check(n_of(a, 'assessment_runs') == 2, 'two runs assigned')
+        check(n_of(a, 'runs') == n_runs, 'runs present before delete', str(n_runs))
 
-        conn = noise_db.get_db()
-        check(count('SELECT COUNT(*) FROM sessions WHERE date=?', SESSION_DATE) == 0,
-              'session row deleted')
-        check(count('SELECT COUNT(*) FROM runs') == 0,
-              'runs cascaded via the sessions FK')
-        check(count('SELECT COUNT(*) FROM assessment_runs') == 0,
+        a.db.delete_session(SESSION_DATE)
+
+        check(n_of(a, 'sessions', 'WHERE date=?', SESSION_DATE) == 0, 'session row deleted')
+        check(n_of(a, 'runs') == 0, 'runs cascaded via the sessions FK')
+        check(n_of(a, 'assessment_runs') == 0,
               'assessment_runs deleted by hand (session_date is not a real FK)')
-        check(count('SELECT COUNT(*) FROM assessments') == 1,
+        check(n_of(a, 'assessments') == 1,
               'the assessment itself survives — only its run assignments go')
-        check(count('SELECT COUNT(*) FROM assessment_locations') == 1,
-              'assessment locations survive')
-        # Documented current behaviour, not an assertion that it is desirable:
-        # weather is keyed by date and is left in place by delete_session.
-        wx_left = count('SELECT COUNT(*) FROM weather WHERE date=?', SESSION_DATE)
-        check(wx_left == 1, 'weather row is intentionally NOT deleted (per-date data)')
-        conn.close()
+        check(n_of(a, 'assessment_locations') == 1, 'assessment locations survive')
+        check(n_of(a, 'weather', 'WHERE date=?', SESSION_DATE) == 1,
+              'weather row is intentionally NOT deleted (per-date data)')
 
         # ── 4. sync-shaped round trip ─────────────────────────────────────────
         print('\n4. peer-sync round trip preserves metadata and weather')
-        # Rebuild the source DB, then replicate it into a second one exactly the
-        # way sync_peer.py does: get_sessions_since() -> import_sessions().
-        noise_db.import_sessions(sessions, metadata={
-            'recorder_name': 'Catherine Ives-Yim',
-            'location_label': 'Reference site',
-            'postcode': 'LS1 1AA', 'lat': 53.7997, 'lng': -1.5492,
-            'notes': 'a note that must survive the hop',
-        })
-        noise_db.save_weather(SESSION_DATE, {
+        a.db.import_sessions(sessions, metadata=META)
+        a.db.save_weather(SESSION_DATE, {
             'wind_speed': 7.2, 'wind_dir': 210.5, 'temp_min': 11.0,
             'temp_max': 19.4, 'precip': 0.2, 'hourly_json': '{}'})
-        payload = sync_db_since(noise_db, '1970-01-01T00:00:00')
+        payload = a.db.get_sessions_since('1970-01-01T00:00:00')
         check(len(payload) == 1, 'one session in the sync payload')
         check(payload[0]['wx'] is not None, 'weather included in payload')
-        check(payload[0]['notes'] == 'a note that must survive the hop',
-              'notes included in payload')
+        check(payload[0]['notes'] == META['notes'], 'notes included in payload')
         check(payload[0]['projects'][8].get('spec_lfeq') is not None,
               'payload carries spectral arrays (full=True)')
 
-        peer_db = os.path.join(tmp, 'peer.db')
-        peer = load_fresh_noise_db(peer_db)
-        peer.init_db()
-        peer.import_sessions(payload)          # no metadata kwarg — as the peer does
+        b = Side(os.path.join(tmp, 'b.db'))
+        b.db.import_sessions(payload)          # no metadata kwarg — as the peer does
 
-        psess = peer.get_all_sessions_json()['sessions'][0]
+        psess = b.db.get_all_sessions_json()['sessions'][0]
         check(psess['name'] == 'Catherine Ives-Yim', 'recorder_name survived the hop')
         check(psess['loc'] == 'Reference site', 'location_label survived')
         check(psess['post'] == 'LS1 1AA', 'postcode survived')
-        check(psess['notes'] == 'a note that must survive the hop', 'notes survived')
+        check(psess['notes'] == META['notes'], 'notes survived')
         close(psess['lat'], 53.7997, 1e-9, 'lat survived')
         close(psess['lng'], -1.5492, 1e-9, 'lng survived')
         check(psess['wx'] is not None, 'weather survived the hop')
         close(psess['wx']['ws'], 7.2, 1e-9, 'wind speed survived')
         close(psess['wx']['tx'], 19.4, 1e-9, 'temp max survived')
 
-        prun9 = peer.get_full_run_row(SESSION_DATE, 9)
+        prun9 = b.db.get_full_run_row(SESSION_DATE, 9)
         close(prun9['avg_laeq'], 70.8, 0.05, 'peer run 9 LAeq intact')
         close(prun9['la_l90'],   57.1, 0.05, 'peer run 9 LA90 intact')
-        check(len(json.loads(prun9['spec_lfeq'])) == 36,
-              'peer run 9 spectral table intact')
+        check(len(json.loads(prun9['spec_lfeq'])) == 36, 'peer run 9 spectral table intact')
         check(len(json.loads(prun9['prof_lafspl_json'])) == 900,
               'peer run 9 PROF series intact — xlsx export works on the peer')
-        check(peer.get_session_prof_lafspl(SESSION_DATE, [9]) ==
-              noise_db.get_session_prof_lafspl(SESSION_DATE, [9]),
+        check(b.db.get_session_prof_lafspl(SESSION_DATE, [9]) ==
+              a.db.get_session_prof_lafspl(SESSION_DATE, [9]),
               'pooled LAFspl identical on both sides')
+
+        # ── 5. deletions replicate ────────────────────────────────────────────
+        print('\n5. session deletions replicate to the peer')
+        baid = b.assess.create_assessment('Peer side', standard='bs4142')
+        bloc = b.assess.add_assessment_location(baid, 'Loc B')
+        b.assess.assign_runs(baid, bloc, [(SESSION_DATE, 9)])
+        check(n_of(b, 'assessment_runs') == 1, 'peer has an assigned run')
+
+        # 5a — a local delete leaves a tombstone and publishes it
+        a.db.delete_session(SESSION_DATE)
+        tomb = a.tombstones()
+        check(SESSION_DATE in tomb, 'delete_session records a tombstone',
+              f'deleted_at={tomb.get(SESSION_DATE)}')
+        full = a.sync.get_full_sync_payload()
+        check([t['date'] for t in full['deleted_sessions']] == [SESSION_DATE],
+              'tombstone is carried in the full sync payload')
+
+        # 5b — a peer that was offline catches up on the next full sync
+        check(b.has_session(SESSION_DATE), 'peer still has the session beforehand')
+        b.set_imported_at(SESSION_DATE, '2020-01-01 00:00:00')   # imported long ago
+        b.sync.apply_full_sync(full)
+        check(not b.has_session(SESSION_DATE),
+              'offline peer deletes the session on full-sync catch-up')
+        check(n_of(b, 'runs') == 0, 'peer runs cascaded')
+        check(n_of(b, 'assessment_runs') == 0, 'peer assessment_runs cleared')
+        check(n_of(b, 'assessments') == 1, 'peer assessment itself survives')
+        check(b.tombstones().get(SESSION_DATE) == tomb[SESSION_DATE],
+              'peer relays the tombstone with the original deletion time')
+
+        # 5c — re-importing a date clears its tombstone
+        b.db.import_sessions(payload)
+        check(b.has_session(SESSION_DATE), 'peer re-imports the date')
+        check(SESSION_DATE not in b.tombstones(),
+              're-import clears the tombstone, so it will not be re-deleted')
+
+        # 5d — a stale tombstone must not delete a newer local re-import
+        b.set_imported_at(SESSION_DATE, '2030-01-01 00:00:00')   # newer than the delete
+        b.sync.apply_full_sync(full)
+        check(b.has_session(SESSION_DATE),
+              'a re-import newer than the peer tombstone is NOT deleted')
+
+        # 5e — the live event path deletes and re-tombstones
+        b.set_imported_at(SESSION_DATE, '2020-01-01 00:00:00')
+        b.sync.apply_sync_event('session', 'delete', {'date': SESSION_DATE})
+        check(not b.has_session(SESSION_DATE), "apply_sync_event('session','delete') deletes")
+        check(SESSION_DATE in b.tombstones(),
+              'the replayed delete tombstones locally too, so it keeps propagating')
+
+        # 5f — bulk purge replicates the same way
+        print('\n6. purge_sessions_before() replicates')
+        for side in (a, b):
+            side.exec("INSERT OR REPLACE INTO sessions (date, run_count, avg_laeq, max_laeq) "
+                      "VALUES ('2026-07-01', 1, 50.0, 60.0)")
+            side.exec("INSERT OR REPLACE INTO sessions (date, run_count, avg_laeq, max_laeq) "
+                      "VALUES ('2026-07-15', 1, 51.0, 61.0)")
+            side.exec("INSERT OR REPLACE INTO sessions (date, run_count, avg_laeq, max_laeq) "
+                      "VALUES ('2026-09-01', 1, 52.0, 62.0)")
+            side.exec("UPDATE sessions SET imported_at='2020-01-01 00:00:00'")
+        check(n_of(b, 'sessions') == 3, 'peer has three sessions before the purge')
+
+        purged = a.db.purge_sessions_before('2026-08-01')
+        check(sorted(purged) == ['2026-07-01', '2026-07-15'],
+              'purge removes only dates before the cutoff', str(purged))
+        atomb = a.tombstones()
+        check(all(d in atomb for d in purged), 'purge tombstones every date it removed')
+        check('2026-09-01' not in atomb, 'the surviving date is not tombstoned')
+
+        b.sync.apply_sync_event('session', 'purge_before', {'before': '2026-08-01'})
+        check(not b.has_session('2026-07-01') and not b.has_session('2026-07-15'),
+              'purge event removes both dates on the peer')
+        check(b.has_session('2026-09-01'), 'purge event leaves later sessions alone')
+        check(all(d in b.tombstones() for d in purged),
+              'peer tombstones the purged dates too')
+
+        # and a peer that missed the event still catches up via full sync
+        c = Side(os.path.join(tmp, 'c.db'))
+        c.db.import_sessions(payload)
+        c.exec("INSERT OR REPLACE INTO sessions (date, run_count, avg_laeq, max_laeq) "
+               "VALUES ('2026-07-01', 1, 50.0, 60.0)")
+        c.exec("UPDATE sessions SET imported_at='2020-01-01 00:00:00'")
+        check(c.has_session('2026-07-01') and c.has_session(SESSION_DATE),
+              'third Pi starts with both dates')
+        c.sync.apply_full_sync(a.sync.get_full_sync_payload())
+        check(not c.has_session('2026-07-01'), 'purged date removed on catch-up')
+        check(not c.has_session(SESSION_DATE), 'deleted session removed on catch-up')
 
         print(f'\nAll {_checks} checks passed.')
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
-
-
-def sync_db_since(noise_db, since):
-    return noise_db.get_sessions_since(since)
-
-
-def load_fresh_noise_db(db_path):
-    """Import a second, independent noise_db bound to a different database."""
-    import importlib
-    import noise_db as _nd
-    os.environ['NOISE_DB_PATH'] = db_path
-    for name in ('noise_db', 'reports_db', 'assessments_db', 'sync_db'):
-        if name in sys.modules:
-            del sys.modules[name]
-    peer = importlib.import_module('noise_db')
-    assert peer.DB_PATH == db_path, peer.DB_PATH
-    return peer
 
 
 if __name__ == '__main__':

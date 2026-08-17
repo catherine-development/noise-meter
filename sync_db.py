@@ -10,7 +10,30 @@ peer_client.py; this module is only the database half.
 Note that get_sessions_since() stays in noise_db: it is a core session/run read
 that the sync protocol happens to call, not part of the protocol itself.
 """
-from noise_db import get_db
+from noise_db import get_db, delete_session, purge_sessions_before, _record_tombstones
+
+
+def _apply_tombstones(conn, tombstones):
+    """Replay a peer's session deletions locally. Caller commits.
+
+    A tombstone is ignored when our own copy of the session was imported after
+    the peer deleted it: that means the date was legitimately re-imported here
+    (e.g. off the SD card), and the peer will pick it up again on its next
+    /api/sync pull. Both timestamps come from SQLite's datetime('now'), so a
+    string comparison is chronological.
+    """
+    for ts in tombstones:
+        date = ts.get('date')
+        deleted_at = ts.get('deleted_at')
+        if not date or not deleted_at:
+            continue
+        row = conn.execute(
+            'SELECT imported_at FROM sessions WHERE date=?', (date,)).fetchone()
+        if row is not None and row['imported_at'] and row['imported_at'] >= deleted_at:
+            continue  # re-imported here after the peer's delete — keep ours
+        conn.execute('DELETE FROM assessment_runs WHERE session_date=?', (date,))
+        conn.execute('DELETE FROM sessions WHERE date=?', (date,))
+        _record_tombstones(conn, [date], deleted_at=deleted_at)
 
 
 def get_last_sync_time():
@@ -44,14 +67,21 @@ def get_full_sync_payload():
         'FROM runs r JOIN sessions s ON r.session_id=s.id '
         'WHERE r.location_tag IS NOT NULL'
     ).fetchall()]
+    deleted_sess = [dict(r) for r in conn.execute(
+        'SELECT date, deleted_at FROM deleted_sessions').fetchall()]
     conn.close()
     return {'assessments': assessments, 'assessment_locations': locations,
-            'assessment_runs': assess_runs, 'sessions_meta': sess_meta, 'run_tags': run_tags}
+            'assessment_runs': assess_runs, 'sessions_meta': sess_meta,
+            'run_tags': run_tags, 'deleted_sessions': deleted_sess}
 
 
 def apply_full_sync(payload):
     """Upsert a full sync payload received from peer (startup catch-up)."""
     conn = get_db()
+    # Deletions are applied before the upserts below so that session metadata
+    # for a session the peer deleted is not re-applied to a row we are about
+    # to remove.
+    _apply_tombstones(conn, payload.get('deleted_sessions', []))
     for a in payload.get('assessments', []):
         conn.execute('''
             INSERT INTO assessments
@@ -106,6 +136,17 @@ def apply_full_sync(payload):
 
 def apply_sync_event(entity, action, data):
     """Apply a single sync event pushed from the peer after a mutation."""
+    # Session deletions run through the same noise_db functions the local
+    # routes use, so they record their own tombstone here too and will keep
+    # propagating if this Pi has a peer of its own that is currently offline.
+    # They take their own connection, hence the early return.
+    if entity == 'session':
+        if action == 'delete' and data.get('date'):
+            delete_session(data['date'])
+        elif action == 'purge_before' and data.get('before'):
+            purge_sessions_before(data['before'])
+        return
+
     conn = get_db()
     if entity == 'assessment':
         if action == 'upsert':
