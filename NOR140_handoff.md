@@ -918,7 +918,7 @@ Three-point verification against Nortfr reference for 2026-08-12:
 2. **Spectral integrity**: A-weighted energy sum of `spec_lfeq` matches stored `avg_laeq` to ±0.03 dB for all 10 August-12 runs. ✓
 3. **Nortfr reference parity (run 9)**: LAeq=70.8, LApeak=97.4, LCpeak=98.6, LA10=74.8, LA50=67.1, LA90=57.1, LCeq=78.7. All match. ✓
 
-### RESOLVED (2026-08-17): the 0.1 dB PROF discrepancy was our own double rounding
+### RESOLVED (2026-08-17): the 0.1 dB PROF discrepancy was precision lost in our storage
 
 **Status: fixed. PROFILE xlsx now matches the Nortfr reference exactly, 0 differing cells.**
 
@@ -928,7 +928,15 @@ counts, and is corrected here because it would mislead anyone re-deriving the fo
 
 - The code never used Python's `round()`. `nor140_format.round_half_up()` has always
   been half-up, so banker's rounding was never in play.
-- It was not a hardware quirk at all. It was **double rounding in our own storage.**
+- It was not a hardware quirk at all. **We discarded precision by storing the PROF
+  series at 1 decimal**, leaving nothing for the exporter to round from.
+
+Note the direction carefully, because it is easy to state backwards: the *two-stage*
+rounding is what Nortfr does (exact → 2 dp → 1 dp), and it is very slightly the less
+accurate of the two. Our old path rounded straight to 1 dp, which is correct rounding
+in isolation — but it threw away the second decimal, so Nortfr's displayed value could
+never be reproduced from what we had stored. The defect was the precision loss, not a
+double round on our side.
 
 Actual cause: `noise_parser.py` stored the PROF series at **1 decimal**, while it stored
 the GLOB scalars and spectra at **2**. `nor140_exporter._rv()` then rounds to 1 decimal
