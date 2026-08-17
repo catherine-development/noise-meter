@@ -15,6 +15,7 @@ import io
 import re
 
 from nor140_format import (
+    prof_record_size, PROF_RECORD_SIZE, PROF_RECORD_OFFSET,
     CAP_LAEQ, CAP_PEAK,
     GLOB_SCALAR_OFFSETS, SPECTRAL_TABLES,
     bcd, decode_raw, round_half_up, read_prof_records, read_duration_s,
@@ -122,10 +123,15 @@ def _read_glob(data):
     return date, start, metrics
 
 
-def _read_prof(data):
+def _read_prof(data, record_size=None):
     """Return list of [LAFspl, LAeq,1s, LAFmax,1s, LAE,1s, LApeak,1s] per second.
-    NOR140 profile levels decode as uint16_le / 128 - 20."""
-    return [[decode_raw(raw) for raw in rec] for rec in read_prof_records(data)]
+
+    The 8-byte record layout drops the LAE channel, so those rows are
+    [LAFspl, LAeq, LAFmax, LApeak]. NOR140 profile levels decode as
+    uint16_le / 128 - 20.
+    """
+    return [[decode_raw(raw) for raw in rec]
+            for rec in read_prof_records(data, record_size)]
 
 
 def _clamp(v, lo, hi):
@@ -150,20 +156,29 @@ def _parse_session_files(glob_data, prof_data):
     except Exception:
         return None, None
 
-    recs = _read_prof(prof_data)
+    # Records are 10 bytes on most files but 8 on the 1069-byte GLOB variant, and
+    # the size cannot be read from the PROF file itself — it is resolved against
+    # the GLOB duration. Reading an 8-byte file as 10 misaligns every record.
+    rec_size = prof_record_size(max(len(prof_data) - PROF_RECORD_OFFSET, 0),
+                                glob_metrics.get('duration_s'))
+    recs = _read_prof(prof_data, rec_size)
     if not recs:
         return date, None
 
     if max(r[1] for r in recs) > 140:  # corrupted record — check before clamping
         return date, None
 
+    # The 8-byte layout omits the LAE channel and moves LApeak into slot 3.
+    peak_ch = 4 if rec_size == PROF_RECORD_SIZE else 3
+    has_lae = rec_size == PROF_RECORD_SIZE
+
     # Capped above only. A lower clamp at 20 dB used to raise every quieter
     # reading to exactly 20.0, which Nortfr does not do — see nor140_format.
     lafspl_raw = [min(r[0], CAP_LAEQ) for r in recs]
     laeq_raw   = [min(r[1], CAP_LAEQ) for r in recs]
     lafmax_raw = [min(r[2], CAP_LAEQ) for r in recs]
-    lae_raw    = [min(r[3], CAP_LAEQ) for r in recs]
-    lapeak_raw = [min(r[4], CAP_PEAK) for r in recs]
+    lae_raw    = [min(r[3], CAP_LAEQ) for r in recs] if has_lae else None
+    lapeak_raw = [min(r[peak_ch], CAP_PEAK) for r in recs]
 
     n      = len(recs)
     step   = 1 if n <= 120 else 2 if n <= 300 else 5 if n <= 900 else 10
@@ -239,19 +254,24 @@ def _parse_session_files(glob_data, prof_data):
         'prof_lafspl_json': [_round_db(v, 2) for v in lafspl_raw],
         'prof_laeq_json':   [_round_db(v, 2) for v in laeq_raw],
         'prof_lafmax_json': [_round_db(v, 2) for v in lafmax_raw],
-        'prof_lae_json':    [_round_db(v, 2) for v in lae_raw],
+        'prof_lae_json':    [_round_db(v, 2) for v in lae_raw] if lae_raw else None,
         'prof_lapeak_json': [_round_db(v, 2) for v in lapeak_raw],
         # PROF-derived values (profile graphs and fallback mins/maxes)
         'mn':     _round_db(glob_metrics.get('lafmin', min(laeq_raw)), 1),
         'mx':     _round_db(glob_metrics.get('lafmax', max(lafmax_raw)), 1),
         'pmx':    _round_db(glob_metrics.get('lcpeak', max(lapeak_raw)), 1),
         'pmxf':   _round_db(glob_metrics.get('lafmax', max(lafmax_raw)), 1),
-        'pmxi':   _round_db(glob_metrics.get('laimax', max(lae_raw)), 1),
+        # The GLOB scalar is authoritative; the LAE channel is only a fallback
+        # for files that lack it, and the 4-channel layout has neither.
+        'pmxi':   (_round_db(glob_metrics['laimax'], 1)
+                   if glob_metrics.get('laimax') is not None
+                   else (_round_db(max(lae_raw), 1) if lae_raw else None)),
         'lafspl_profile': [_round_db(v, 1) for v in _downsample(lafspl_raw, step)],
         'laeq_profile':  [_round_db(v, 1) for v in _downsample(laeq_raw,   step)],
         'lafmax_profile': [_round_db(v, 1) for v in _downsample(lafmax_raw, step)],
-        'lae_profile': [_round_db(v, 1) for v in _downsample(lae_raw, step)],
-        'laimax_profile': [_round_db(v, 1) for v in _downsample(lae_raw, step)],
+        # No LAE channel in the 4-channel layout — stored NULL rather than faked.
+        'lae_profile': [_round_db(v, 1) for v in _downsample(lae_raw, step)] if lae_raw else None,
+        'laimax_profile': [_round_db(v, 1) for v in _downsample(lae_raw, step)] if lae_raw else None,
         'lapeak_profile': [_round_db(v, 1) for v in _downsample(lapeak_raw, step)],
         'lcpeak_profile': [_round_db(v, 1) for v in _downsample(lapeak_raw, step)],  # LApeak alias; true LCpeak is GLOB 0x03ef
     }

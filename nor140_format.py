@@ -205,11 +205,52 @@ def read_full_scale(data):
     return v if 40 <= v <= 200 else None
 
 
-def read_prof_records(data):
-    """Return list of [5 x raw uint16] per second from a PROF binary, undecoded."""
-    if len(data) < PROF_RECORD_OFFSET + 10:
+# Two PROF record layouts exist. The usual one is 5 channels in 10 bytes; the
+# 1069-byte GLOB variant pairs with a 4-channel, 8-byte record that simply omits
+# the redundant LAE channel:
+#
+#   10-byte:  LAFSPL  LAeq  LAFmax  LAE  LApeak
+#    8-byte:  LAFSPL  LAeq  LAFmax       LApeak
+#
+# Confirmed against the GLOB scalars — for 250823 run 2 the 8-byte ch2 max is
+# 90.12 and ch3 max 102.83, exactly the stored LAFmax and LApeak.
+#
+# The record size cannot be read from the PROF file: its 3-byte header is zero in
+# every file in the archive. Nor is divisibility alone enough — 8 of the 54
+# 8-byte files have a payload that also divides by 10. It is resolved instead
+# against the GLOB duration, which agrees only for the true size.
+PROF_RECORD_SIZE_4CH = 8
+PROF_CHANNELS_4CH = 4
+
+
+def prof_record_size(payload_len, duration_s):
+    """Bytes per PROF record — 10 (5 channels) or 8 (4 channels).
+
+    Picks the size whose implied record count matches the GLOB duration; a run
+    holds one record per second, give or take the final partial one. Falls back
+    to the 10-byte layout when no duration is available to arbitrate.
+    """
+    if duration_s:
+        for size in (PROF_RECORD_SIZE, PROF_RECORD_SIZE_4CH):
+            if payload_len % size:
+                continue
+            if abs(payload_len // size - duration_s) <= 2:
+                return size
+    return PROF_RECORD_SIZE
+
+
+def read_prof_records(data, record_size=None):
+    """Return list of raw uint16 channel values per second, undecoded.
+
+    Each record has 5 channels for the 10-byte layout and 4 for the 8-byte one;
+    see PROF_RECORD_SIZE_4CH. Pass record_size from prof_record_size(), or leave
+    it None for the 10-byte default.
+    """
+    size = record_size or PROF_RECORD_SIZE
+    n_chan = PROF_N_CHANNELS if size == PROF_RECORD_SIZE else PROF_CHANNELS_4CH
+    if len(data) < PROF_RECORD_OFFSET + size:
         return []
     return [
-        [struct.unpack_from('<H', data, off + i * 2)[0] for i in range(PROF_N_CHANNELS)]
-        for off in range(PROF_RECORD_OFFSET, len(data) - 9, PROF_RECORD_SIZE)
+        [struct.unpack_from('<H', data, off + i * 2)[0] for i in range(n_chan)]
+        for off in range(PROF_RECORD_OFFSET, len(data) - (size - 1), size)
     ]

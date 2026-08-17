@@ -283,6 +283,27 @@ def main(meas_root):
         check(all(d in r for d in ('230830', '250711') for r in [' '.join(_rejected)]),
               'the rejected pair are the known 230830/250711 runs')
 
+        # The 1069-byte GLOB variant pairs with a 4-channel, 8-byte PROF record.
+        # Read as 10 bytes the whole series is misaligned, so these assertions
+        # are the guard against that regressing: the decoded profile has to
+        # reproduce the GLOB scalars exactly.
+        import noise_parser as parser
+        from nor140_format import prof_record_size
+        _b = os.path.join(meas_root, '250823', 'PART0000', 'PROJ0002')
+        if os.path.isdir(_b):
+            _g = open(os.path.join(_b, 'GLOB0002.DAT'), 'rb').read()
+            _p = open(os.path.join(_b, 'PROF0002.DAT'), 'rb').read()
+            check(prof_record_size(len(_p) - 3, 894) == 8,
+                  '1069-byte variant resolves to 8-byte records')
+            _d, _r = parser._parse_session_files(_g, _p)
+            check(_r['n'] == 895, '8-byte run has 895 records', str(_r['n']))
+            close(parser._energy_avg(_r['prof_laeq_json']), 80.28, 0.005,
+                  '8-byte profile LAeq reproduces the GLOB scalar')
+            close(max(_r['prof_lapeak_json']), 102.83, 0.005,
+                  '8-byte profile LApeak reproduces the GLOB scalar')
+            check(_r['prof_lae_json'] is None,
+                  '4-channel layout stores no LAE series rather than faking one')
+
         missing = [c for c, _ in SPECTRAL_TABLES if not run9.get(c)]
         check(not missing, 'all 18 spectral tables stored', f'missing: {missing}')
         for col, _ in SPECTRAL_TABLES:

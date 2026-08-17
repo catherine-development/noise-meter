@@ -876,7 +876,7 @@ The run-9 export plus the screen-value cross-checks for runs 2, 4, 5, 6, 8, 9, a
 Seven Nortfr reference pairs (2026-08-12 runs 1/2/4/9, 2021-10-26 run 1,
 2025-07-12 runs 11/24) replaced the single run-9 comparison. All three tested
 2653-byte files — the normal case, 469 of 527 in the archive — now match cell
-for cell across three different years. Five new format facts came out of it.
+for cell across three different years. Six new format facts came out of it.
 
 ### `0x03bd` — effective measurement duration
 
@@ -905,14 +905,17 @@ nor `start + duration` reproduces it:
 
 | Case | Files | Why |
 | --- | --- | --- |
-| elapsed = record count | 333 | the ordinary 1 s run |
+| elapsed = record count | 387 | the ordinary run |
 | elapsed = count − 1 | 135 | the end is stamped at the last period's *start* |
-| elapsed ≈ 1.25 × count | 54 | the 1069-byte variant logs at a 1.25 s period |
 | unset (`00:00:00`) | 2 | see the cross-check below |
 
-The 1069-byte group is the one that matters: every file on 2025-08-23, -08-24 and
--08-31 logs at 1.25 s, so deriving an end time from the record count would report
-those runs as ending 179 s early.
+So the stored value is not reproducible by a single formula — it is the record
+count on most files and one less on 135 of them, with nothing in the run to say
+which. Storing it also removes the need to guess.
+
+An earlier version of this section claimed a third group of 54 files logging at a
+1.25 s period. That was wrong, and the error is instructive: 1.25 = 10/8, and
+those files were being read with the wrong PROF record size. See below.
 
 The field is occasionally left unset, reading `00:00:00`. `read_end_time()` does
 not blacklist that value — a run can legitimately end at midnight — but instead
@@ -925,6 +928,34 @@ back to arithmetic.
 Because `runs.end_time` is written only on import, rows that predate the column
 stay `NULL` until `backfill_glob.py` runs — that script now writes the three
 header fields (`duration_s`, `full_scale`, `end_time`) as well as the scalars.
+
+### The 1069-byte GLOB variant has 8-byte PROF records
+
+54 files pair a 1069-byte GLOB with a **4-channel, 8-byte** PROF record rather
+than the usual 5-channel, 10-byte one. It drops the redundant LAE channel and
+moves LApeak up:
+
+| | ch0 | ch1 | ch2 | ch3 | ch4 |
+| --- | --- | --- | --- | --- | --- |
+| 10-byte | LAFSPL | LAeq | LAFmax | LAE | LApeak |
+| 8-byte | LAFSPL | LAeq | LAFmax | LApeak | — |
+
+Read as 10-byte records, every one of those files decodes from misaligned data
+and yields a record count 0.8× the truth. Three independent facts identify the
+layout: all 54 have a payload divisible by 8 (only 8 of them by 10); at 8 bytes
+the record count equals the elapsed time exactly, with the duration at n−1; and
+the decoded channels reproduce the GLOB scalars to the hundredth — for 2025-08-23
+run 2, ch2 max is 90.12 and ch3 max 102.83 against a stored LAFmax of 90.12 and
+LApeak of 102.83.
+
+The size cannot be read from the PROF file: its 3-byte header is zero in all 527
+files. Divisibility alone is not enough either, since 8 of the 54 have a payload
+that also divides by 10. `prof_record_size()` resolves it against the GLOB
+duration, which agrees only for the true size — this separates the archive
+cleanly, 54 to 8 bytes and 473 to 10.
+
+No 1069-byte run has ever been in a live database, so no stored result was
+affected; the defect was latent, in the import path.
 
 ### `0x004a` — full scale (measurement range)
 
