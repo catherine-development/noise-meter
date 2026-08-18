@@ -22,7 +22,8 @@ Usage:
 """
 import json, os, re, sys, zipfile, sqlite3
 from nor140_format import (bcd, read_glob_scalars, read_glob_spectral_tables,
-                           read_duration_s, read_full_scale, read_end_time)
+                           read_duration_s, read_full_scale, read_end_time,
+                           read_start_datetime)
 # This script rewrites runs.avg_laeq, so the session row that aggregates it has
 # to be rebuilt afterwards or it keeps a stale value indefinitely.
 from noise_db import recompute_session_aggregates
@@ -51,9 +52,7 @@ _SCALAR_COLS = [
 def _glob_metrics(data):
     """Read manufacturer scalar metrics from GLOB binary. Returns dict or None."""
     try:
-        o = 0x19
-        mo, dd = bcd(data[o + 1]), bcd(data[o + 2])
-        if not (1 <= mo <= 12 and 1 <= dd <= 31):
+        if read_start_datetime(data)[0] is None:
             return None
     except (IndexError, ValueError):
         return None

@@ -16,6 +16,7 @@ import re
 
 from nor140_format import (
     prof_record_size, PROF_RECORD_SIZE, PROF_RECORD_OFFSET, read_glob_scalars,
+    read_glob_spectrum, read_start_datetime,
     CAP_LAEQ, CAP_PEAK,
     GLOB_SCALAR_OFFSETS, SPECTRAL_TABLES,
     bcd, decode_raw, round_half_up, read_prof_records, read_duration_s,
@@ -83,16 +84,13 @@ def _spectrum_total(levels, weight_fn):
 
 
 def _read_glob_spectrum(data, offset):
-    end = offset + len(_THIRD_OCTAVE_FREQS) * 2
-    if len(data) < end:
-        return None
-    levels = [
-        decode_raw(struct.unpack_from('<H', data, offset + i * 2)[0])
-        for i in range(len(_THIRD_OCTAVE_FREQS))
-    ]
-    if not all(-20.0 <= v <= CAP_LAEQ for v in levels):
-        return None
-    return levels
+    """Delegate to the shared decoder — this was a second, divergent copy.
+
+    It screened bands against CAP_LAEQ, so any impulse table above 130 dB was
+    dropped entirely on import while the backfill path kept it. The plausibility
+    check now lives in read_glob_spectrum() with CAP_PEAK as the ceiling.
+    """
+    return read_glob_spectrum(data, offset)
 
 
 def _read_glob_scalars(data):
@@ -107,10 +105,7 @@ def _read_glob_scalars(data):
 
 def _read_glob(data):
     """Extract ISO date, HH:MM:SS start time, and all spectrum-derived metrics."""
-    o = 0x19
-    yy, mo, dd, hh, mm, ss = (bcd(data[o + i]) for i in range(6))
-    date = f"20{yy:02d}-{mo:02d}-{dd:02d}"
-    start = f"{hh:02d}:{mm:02d}:{ss:02d}"
+    date, start = read_start_datetime(data)
     metrics = _read_glob_scalars(data)
     metrics['duration_s'] = read_duration_s(data)
     metrics['full_scale'] = read_full_scale(data)

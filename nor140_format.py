@@ -155,9 +155,21 @@ def read_glob_scalars(data, digits=None):
 
 
 def read_glob_spectrum(data, offset, digits=None):
-    """Decode one 36-band spectral table at `offset`. Returns list[36] or None if truncated."""
+    """Decode one 36-band spectral table at `offset`.
+
+    Returns list[36], or None if truncated or implausible. The ceiling is
+    CAP_PEAK, not CAP_LAEQ: the impulse tables (spec_lfimax, spec_lfie) legally
+    exceed 130 dB, and screening them against the LAeq cap silently discarded
+    whole valid tables — 3 of them across the archive, up to 136.4 dB.
+    """
     end = offset + N_BANDS * 2
     if len(data) < end:
+        return None
+    raw = [
+        decode_raw(struct.unpack_from('<H', data, offset + i * 2)[0])
+        for i in range(N_BANDS)
+    ]
+    if not all(-20.0 <= v <= CAP_PEAK for v in raw):
         return None
     return [
         decode_raw(struct.unpack_from('<H', data, offset + i * 2)[0]) if digits is None
@@ -192,6 +204,25 @@ def read_duration_s(data):
 # unset ones are out by 9,554 s and 46,474 s — so this tolerance separates them
 # with two orders of magnitude to spare.
 _END_TIME_SLACK_S = 300
+
+
+START_DATETIME_OFFSET = 0x19
+
+
+def read_start_datetime(data):
+    """Return (iso_date, 'HH:MM:SS') for the measurement start, or (None, None).
+
+    Six BCD bytes at 0x19: YY MM DD hh mm ss, immediately before the end block
+    at 0x1f. Both the import path and the backfill decoded this inline; this is
+    the shared version.
+    """
+    o = START_DATETIME_OFFSET
+    if len(data) < o + 6:
+        return None, None
+    yy, mo, dd, hh, mm, ss = (bcd(data[o + i]) for i in range(6))
+    if not (1 <= mo <= 12 and 1 <= dd <= 31 and hh <= 23 and mm <= 59 and ss <= 59):
+        return None, None
+    return '20%02d-%02d-%02d' % (yy, mo, dd), '%02d:%02d:%02d' % (hh, mm, ss)
 
 
 def read_end_time(data):

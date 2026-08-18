@@ -625,6 +625,42 @@ def main(meas_root):
         a.exec('UPDATE runs SET run_number = run_number - 1001 '
                'WHERE session_id=? AND run_number >= 1000', sid)
 
+        # ── 4ante. the import path and the shared decoders agree ─────────────
+        print('\n4ante. no divergent copies of the binary decoders')
+        # A duplicated decoder fails silently: the reference comparison exercises
+        # the export path, while a different function writes the database. That
+        # is how the -20 marker survived, and how impulse spectra above 130 dB
+        # were dropped on import while the backfill kept them. This asserts the
+        # two paths still agree over every table in the archive.
+        import noise_parser as _np
+        from nor140_format import (read_glob_spectrum as _rgs,
+                                   read_glob_scalars as _rsc,
+                                   read_start_datetime as _rsd)
+        _div = _scal = _dt = 0
+        for _gg in _corpus:
+            _bd = open(_gg, 'rb').read()
+            for _col, _off in a.db.SPECTRAL_TABLES:
+                if _np._read_glob_spectrum(_bd, _off) != _rgs(_bd, _off):
+                    _div += 1
+            if _np._read_glob_scalars(_bd) != _rsc(_bd):
+                _scal += 1
+            if _rsd(_bd)[0] is None and len(_bd) > 0x20:
+                _dt += 1
+        check(_div == 0, 'spectrum decode identical on both paths', f'{_div} divergent')
+        check(_scal == 0, 'scalar decode identical on both paths', f'{_scal} divergent')
+        check(_dt == 0, 'every archive file yields a start datetime', f'{_dt} failed')
+
+        # Impulse tables legitimately exceed CAP_LAEQ and must survive.
+        _imp = 0
+        for _gg in _corpus:
+            _bd = open(_gg, 'rb').read()
+            for _col, _off in a.db.SPECTRAL_TABLES:
+                _t = _rgs(_bd, _off)
+                if _t and max(_t) > 130.0:
+                    _imp += 1
+        check(_imp >= 3, 'spectra above the LAeq cap are kept, not discarded',
+              f'{_imp} tables above 130 dB')
+
         # ── 4bis. the -20 dB no-data marker never reaches a report ────────────
         print('\n4bis. no-data marker is dropped at the decode boundary')
         r1 = a.db.get_full_run_row(SESSION_DATE, 1)
