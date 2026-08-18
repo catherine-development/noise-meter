@@ -744,14 +744,13 @@ function renderRunsGrid(container, projects, runNums) {
         <div class="run-stats">
           <div class="rs">LA<sub>eq</sub><span>${proj.avg.toFixed(1)}</span></div>
           <div class="rs">Range<span style="font-size:11px">${proj.mn}–${proj.mx}</span></div>
-          <div class="rs">LC<sub>peak</sub><span class="hi">${proj.pmx}</span></div>
+          <div class="rs">LA<sub>Fmax</sub><span class="hi">${proj.lafmax != null ? proj.lafmax.toFixed(1) : '–'}</span></div>
         </div>
       </div>
       <div class="run-chart-wrap"><canvas data-idx="${idx}"></canvas></div>
       <div class="chart-leg">
         <div class="cl-item"><div class="cl-line laeq"></div>LA<sub>eq</sub></div>
-        <div class="cl-item"><div class="cl-line laimax"></div>LA<sub>Imax</sub></div>
-        <div class="cl-item"><div class="cl-line peak"></div>LC<sub>peak</sub></div>
+        <div class="cl-item"><div class="cl-line lafmax"></div>LA<sub>Fmax</sub></div>
         <div class="cl-item"><div class="cl-line ref"></div>85 dB</div>
       </div>
       ${(proj.la_l10 != null || proj.lafmax != null || proj.lceq != null) ? `<div class="run-scalars">
@@ -835,10 +834,12 @@ function drawRunChart(canvas, proj) {
   const ctx = setupCanvas(canvas, W, H);
   const PAD = {t:8, r:8, b:22, l:34};
   const cW = W-PAD.l-PAD.r, cH = H-PAD.t-PAD.b;
-  const laeq = proj.laeq_profile, lcpeak = proj.lcpeak_profile, n = laeq.length;
+  // Client asked to show only LAeq and LAFmax; LCpeak and LAImax are still
+  // stored (and still in the CSV export) but no longer plotted here.
+  const laeq = proj.laeq_profile, lafmax = proj.lafmax_profile, n = laeq.length;
   if (!n) return;
   const Y_MIN = dynYMin(laeq);
-  const Y_MAX = dynYMax(laeq, lcpeak);
+  const Y_MAX = dynYMax(laeq, lafmax);
 
   const yP = db => PAD.t + cH*(1-(clamp(db,Y_MIN,Y_MAX)-Y_MIN)/(Y_MAX-Y_MIN));
   const xP = i => PAD.l + (n===1 ? cW/2 : (i/(n-1))*cW);
@@ -865,12 +866,6 @@ function drawRunChart(canvas, proj) {
   ctx.beginPath(); ctx.moveTo(PAD.l,yP(85)); ctx.lineTo(PAD.l+cW,yP(85)); ctx.stroke();
   ctx.setLineDash([]);
 
-  // LCpeak
-  ctx.strokeStyle=css('--peak'); ctx.lineWidth=1; ctx.globalAlpha=.5;
-  ctx.beginPath();
-  lcpeak.forEach((v,i)=>{ const x=xP(i),y=yP(v); i?ctx.lineTo(x,y):ctx.moveTo(x,y); });
-  ctx.stroke(); ctx.globalAlpha=1;
-
   // LAeq fill
   ctx.fillStyle=css('--laeq-fill');
   ctx.beginPath(); ctx.moveTo(xP(0),yP(Y_MIN));
@@ -883,19 +878,12 @@ function drawRunChart(canvas, proj) {
   laeq.forEach((v,i)=>{ const x=xP(i),y=yP(v); i?ctx.lineTo(x,y):ctx.moveTo(x,y); });
   ctx.stroke();
 
-  // LAFmax (thin, subtle — floats above LAeq)
-  if (proj.lafmax_profile) {
-    ctx.strokeStyle=css('--lafmax'); ctx.lineWidth=1; ctx.globalAlpha=.6;
+  // LAFmax — now one of only two plotted series, so given more weight than
+  // its old "subtle background line" treatment.
+  if (lafmax) {
+    ctx.strokeStyle=css('--lafmax'); ctx.lineWidth=1.5; ctx.globalAlpha=.8;
     ctx.beginPath();
-    proj.lafmax_profile.forEach((v,i)=>{ const x=xP(i),y=yP(v); i?ctx.lineTo(x,y):ctx.moveTo(x,y); });
-    ctx.stroke(); ctx.globalAlpha=1;
-  }
-
-  // LAImax (impulse peak — shows transient events)
-  if (proj.laimax_profile) {
-    ctx.strokeStyle=css('--laimax'); ctx.lineWidth=1.5; ctx.globalAlpha=.8;
-    ctx.beginPath();
-    proj.laimax_profile.forEach((v,i)=>{ const x=xP(i),y=yP(v); i?ctx.lineTo(x,y):ctx.moveTo(x,y); });
+    lafmax.forEach((v,i)=>{ const x=xP(i),y=yP(v); i?ctx.lineTo(x,y):ctx.moveTo(x,y); });
     ctx.stroke(); ctx.globalAlpha=1;
   }
 
@@ -908,7 +896,7 @@ function drawRunChart(canvas, proj) {
   ctx.strokeStyle=css('--grid-border'); ctx.lineWidth=1; ctx.setLineDash([]);
   ctx.strokeRect(PAD.l+.5,PAD.t+.5,cW,cH);
   // small in-chart legend
-  const leg=[['--laeq',1,2,'LAeq,1s'],['--laimax',.8,1.5,'LAImax'],['--peak',.5,1,'LApk']];
+  const leg=[['--laeq',1,2,'LAeq,1s'],['--lafmax',.8,1.5,'LAFmax']];
   const lx=PAD.l+cW-4, ly=PAD.t+5;
   ctx.font='9px '+css('--font-ui');ctx.textAlign='right';
   leg.forEach(([col,alpha,lw,lbl],i)=>{
@@ -1281,10 +1269,10 @@ function drawModalTimeSeries(canvas, proj) {
   const ctx = setupCanvas(canvas, W, H);
   const PAD = {t:14,r:14,b:32,l:50};
   const cW=W-PAD.l-PAD.r, cH=H-PAD.t-PAD.b;
-  const laeq=proj.laeq_profile, lcpeak=proj.lcpeak_profile, n=laeq.length;
+  const laeq=proj.laeq_profile, lafmax=proj.lafmax_profile, n=laeq.length;
   if(!n)return;
   const Y_MIN=dynYMin(laeq);
-  const Y_MAX=dynYMax(laeq,lcpeak);
+  const Y_MAX=dynYMax(laeq,lafmax);
   const yP=db=>PAD.t+cH*(1-(clamp(db,Y_MIN,Y_MAX)-Y_MIN)/(Y_MAX-Y_MIN));
   const xP=i=>PAD.l+(n===1?cW/2:(i/(n-1))*cW);
   ctx.fillStyle=css('--panel'); ctx.fillRect(0,0,W,H);
@@ -1308,9 +1296,6 @@ function drawModalTimeSeries(canvas, proj) {
   let inA=false,sX=0;
   laeq.forEach((v,i)=>{const x=xP(i);if(v>=85&&!inA){inA=true;sX=x;}else if(v<85&&inA){ctx.fillRect(sX,PAD.t,x-sX,cH);inA=false;}});
   if(inA)ctx.fillRect(sX,PAD.t,xP(n-1)-sX,cH);
-  // LCpeak
-  ctx.strokeStyle=css('--peak');ctx.lineWidth=1;ctx.globalAlpha=.45;
-  ctx.beginPath();lcpeak.forEach((v,i)=>{const x=xP(i),y=yP(v);i?ctx.lineTo(x,y):ctx.moveTo(x,y);});ctx.stroke();ctx.globalAlpha=1;
   // LAeq fill
   ctx.fillStyle=css('--laeq-fill');
   ctx.beginPath();ctx.moveTo(xP(0),yP(Y_MIN));
@@ -1320,14 +1305,9 @@ function drawModalTimeSeries(canvas, proj) {
   ctx.strokeStyle=css('--laeq');ctx.lineWidth=2;
   ctx.beginPath();laeq.forEach((v,i)=>{const x=xP(i),y=yP(v);i?ctx.lineTo(x,y):ctx.moveTo(x,y);});ctx.stroke();
   // LAFmax
-  if(proj.lafmax_profile){
-    ctx.strokeStyle=css('--lafmax');ctx.lineWidth=1.5;ctx.globalAlpha=.65;
-    ctx.beginPath();proj.lafmax_profile.forEach((v,i)=>{const x=xP(i),y=yP(v);i?ctx.lineTo(x,y):ctx.moveTo(x,y);});ctx.stroke();ctx.globalAlpha=1;
-  }
-  // LAImax
-  if(proj.laimax_profile){
-    ctx.strokeStyle=css('--laimax');ctx.lineWidth=1.5;ctx.globalAlpha=.85;
-    ctx.beginPath();proj.laimax_profile.forEach((v,i)=>{const x=xP(i),y=yP(v);i?ctx.lineTo(x,y):ctx.moveTo(x,y);});ctx.stroke();ctx.globalAlpha=1;
+  if(lafmax){
+    ctx.strokeStyle=css('--lafmax');ctx.lineWidth=1.5;ctx.globalAlpha=.8;
+    ctx.beginPath();lafmax.forEach((v,i)=>{const x=xP(i),y=yP(v);i?ctx.lineTo(x,y):ctx.moveTo(x,y);});ctx.stroke();ctx.globalAlpha=1;
   }
   // X axis
   const label_n=Math.min(8,Math.floor(cW/80));
@@ -1338,7 +1318,7 @@ function drawModalTimeSeries(canvas, proj) {
   }
   ctx.strokeStyle=css('--grid-border');ctx.lineWidth=1;ctx.setLineDash([]);ctx.strokeRect(PAD.l+.5,PAD.t+.5,cW,cH);
   // In-chart legend (top-right, modal)
-  const mleg=[['--laeq',1,2,'LAeq,1s'],['--lafmax',.65,1.5,'LAFmax'],['--laimax',.85,1.5,'LAImax'],['--peak',.5,1,'LApeak']];
+  const mleg=[['--laeq',1,2,'LAeq,1s'],['--lafmax',.8,1.5,'LAFmax']];
   const mlx=PAD.l+cW-8, mly=PAD.t+8;
   ctx.font='11px '+css('--font-ui');ctx.textAlign='right';
   mleg.forEach(([col,alpha,lw,lbl],i)=>{
