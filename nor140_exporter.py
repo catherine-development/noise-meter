@@ -188,9 +188,11 @@ def _rv(value):
     quiet runs. Nortfr renders those cells as '-', not as -20, so emitting the
     number would both look wrong and read as a real (absurd) level.
     """
-    if value is None:
-        return None
-    if value <= -19.99:
+    # None now arrives here too: the sentinel is dropped at the decode boundary
+    # (nor140_format.NO_DATA_DB), so an unrecorded statistic reaches the export
+    # as None rather than -20. Both mean "the meter wrote nothing", and Nortfr
+    # renders that as '-'. The <= test stays for rows stored before the change.
+    if value is None or value <= -19.99:
         return _NO_DATA
     return round_half_up(value, 1)
 

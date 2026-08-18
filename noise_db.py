@@ -826,6 +826,38 @@ def get_session_tombstones():
     return [dict(r) for r in rows]
 
 
+def clear_sentinel_scalars():
+    """Null out stored scalars holding the meter's -20 dB no-data marker.
+
+    New imports drop it at the decode boundary (nor140_format.NO_DATA_DB), but
+    rows written before that change still hold -20.0, which passes every
+    "is not None" check on its way into a report. Returns {column: rows_cleared}.
+    """
+    cols = [
+        'avg_laeq', 'min_laeq', 'max_laeq',
+        'lceq', 'lae', 'lce', 'lafmax', 'lcfmax', 'lafmin', 'lcfmin',
+        'lasmax', 'lcsmax', 'lasmin', 'lcsmin', 'laieq', 'lcieq',
+        'laimax', 'lcimax', 'laimin', 'lcimin', 'laie', 'lcie',
+        'lapeak', 'lcpeak',
+        'la_l01', 'la_l1', 'la_l5', 'la_l10', 'la_l50', 'la_l90', 'la_l95', 'la_l99',
+        'lc_l01', 'lc_l1', 'lc_l5', 'lc_l10', 'lc_l50', 'lc_l90', 'lc_l95', 'lc_l99',
+    ]
+    conn = get_db()
+    present = {row[1] for row in conn.execute('PRAGMA table_info(runs)').fetchall()}
+    cleared = {}
+    for col in cols:
+        if col not in present:
+            continue
+        n = conn.execute(
+            f'SELECT COUNT(*) FROM runs WHERE {col} <= -19.99').fetchone()[0]
+        if n:
+            conn.execute(f'UPDATE runs SET {col}=NULL WHERE {col} <= -19.99')
+            cleared[col] = n
+    conn.commit()
+    conn.close()
+    return cleared
+
+
 def audit_assessment_run_keys():
     """Report every assessment_run whose stable key is missing or ambiguous.
 

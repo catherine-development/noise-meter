@@ -120,14 +120,37 @@ def decode_value(raw_uint16, digits=2, clamp_min=None, clamp_max=None):
     return round_half_up(v, digits)
 
 
+# A raw word of 0 decodes to exactly -20.0, which is the meter's "not recorded"
+# marker rather than a level: -20 dB SPL is 20 dB below the threshold of hearing
+# and below any real microphone's floor, so no measurement can produce it.
+#
+# The meter omits a statistic it lacks the samples for, and which ones go missing
+# tracks run length precisely — a 1% percentile needs 100 periods, so la_l01 is
+# absent from every run shorter than that. Percentiles other than la_l01 only go
+# missing on runs of ten periods or fewer, i.e. aborted ones.
+#
+# It is dropped here, at the decode boundary, because this is the only place the
+# meaning is unambiguous. Downstream the value is just a number, and -20 passes
+# every "is not None" check on its way into a report: fed through the BS 4142
+# path as an LA90 it yields a rating-level difference of +81 dB.
+NO_DATA_DB = -19.99
+
+
 def read_glob_scalars(data, digits=None):
-    """Decode all GLOB scalar metrics. Returns dict of key -> float (missing keys are out of range).
-    digits=None returns raw (unrounded) values; pass an int to round at read time."""
+    """Decode all GLOB scalar metrics. Returns dict of key -> float.
+
+    Keys are absent when out of range, and when the meter recorded no value —
+    see NO_DATA_DB. Callers get None from .get() either way.
+
+    digits=None returns raw (unrounded) values; pass an int to round at read time.
+    """
     out = {}
     for key, off in GLOB_SCALAR_OFFSETS.items():
         if off + 1 < len(data):
             raw = struct.unpack_from('<H', data, off)[0]
-            out[key] = decode_raw(raw) if digits is None else decode_value(raw, digits=digits)
+            value = decode_raw(raw) if digits is None else decode_value(raw, digits=digits)
+            if value > NO_DATA_DB:
+                out[key] = value
     return out
 
 

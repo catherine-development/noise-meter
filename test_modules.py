@@ -625,6 +625,32 @@ def main(meas_root):
         a.exec('UPDATE runs SET run_number = run_number - 1001 '
                'WHERE session_id=? AND run_number >= 1000', sid)
 
+        # ── 4bis. the -20 dB no-data marker never reaches a report ────────────
+        print('\n4bis. no-data marker is dropped at the decode boundary')
+        r1 = a.db.get_full_run_row(SESSION_DATE, 1)
+        check(r1['n_samples'] == 83, 'run 1 is short enough to lack a 0.1% percentile')
+        check(r1['la_l01'] is None, 'unrecorded percentile stored as NULL, not -20',
+              repr(r1['la_l01']))
+        check(r1['la_l90'] is not None, 'recorded percentiles are unaffected',
+              repr(r1['la_l90']))
+
+        # A stored -20 must not survive into the BS 4142 figures: fed through as
+        # an LA90 it produces a rating-level difference of about +81 dB.
+        a.exec('UPDATE runs SET la_l90=-20.0, la_l50=-20.0 WHERE run_number=2')
+        cleared = a.db.clear_sentinel_scalars()
+        check(cleared.get('la_l90') == 1, 'maintenance helper clears a stored marker',
+              str(cleared))
+        check(a.db.get_full_run_row(SESSION_DATE, 2)['la_l90'] is None,
+              'and leaves NULL behind')
+
+        aid2 = a.assess.create_assessment('Sentinel', standard='bs4142')
+        lid2 = a.assess.add_assessment_location(aid2, 'B')
+        a.assess.assign_runs(aid2, lid2, [(SESSION_DATE, 2)])
+        rd = a.assess.prepare_assessment_report_data(aid2)['locations'][0]['runs'][0]
+        check(rd.get('la90') is None or rd['la90'] > -19.99,
+              'report data carries no no-data marker', repr(rd.get('la90')))
+        a.assess.delete_assessment(aid2)
+
         # ── 4c. migration audit on hostile inputs ─────────────────────────────
         print('\n4c. migration audit flags links it cannot safely migrate')
         aid3 = a.assess.create_assessment('Audit test')

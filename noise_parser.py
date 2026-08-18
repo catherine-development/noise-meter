@@ -15,7 +15,7 @@ import io
 import re
 
 from nor140_format import (
-    prof_record_size, PROF_RECORD_SIZE, PROF_RECORD_OFFSET,
+    prof_record_size, PROF_RECORD_SIZE, PROF_RECORD_OFFSET, read_glob_scalars,
     CAP_LAEQ, CAP_PEAK,
     GLOB_SCALAR_OFFSETS, SPECTRAL_TABLES,
     bcd, decode_raw, round_half_up, read_prof_records, read_duration_s,
@@ -96,11 +96,13 @@ def _read_glob_spectrum(data, offset):
 
 
 def _read_glob_scalars(data):
-    metrics = {}
-    for key, offset in GLOB_SCALAR_OFFSETS.items():
-        if offset + 1 < len(data):
-            metrics[key] = decode_raw(struct.unpack_from('<H', data, offset)[0])
-    return metrics
+    """Delegate to the shared decoder — this was a second copy of it.
+
+    The duplicate is why the no-data sentinel survived the import path: it was
+    dropped in nor140_format.read_glob_scalars while this, the function that
+    actually feeds the database, kept writing -20.0.
+    """
+    return read_glob_scalars(data)
 
 
 def _read_glob(data):
