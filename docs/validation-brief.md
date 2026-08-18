@@ -1,21 +1,22 @@
-# Validation brief — run end times, and the 8-byte PROF record
+# Validation brief — NOR140 decoding, run identity, and data integrity
 
-**Scope:** `7dd0181`, `b7e5ad3`, `2467772`, `18af8f8` and the review-response
-commit that follows them on `master`.
-**Author:** Catherine Ives-Yim, 2026-08-17. **Revision 2**, after external review.
+**Scope:** `7dd0181` through `3f0d808` on `master`.
+**Author:** Catherine Ives-Yim, 2026-08-18. **Revision 3**, after two review rounds.
 **Purpose:** give a reviewer everything needed to falsify the claims below
 without taking any of them on trust.
 
-The work started as a display change — show each run's end time as well as its
-start. It turned up a latent parser defect, a peer-sync data loss, and two of my
-own claims that were wrong. All are covered here, and the retractions are left
-visible rather than tidied away, because how they were caught is the most useful
-thing in this document.
+The work began as a display change — show each run's end time as well as its
+start. Pulling that thread found a latent parser defect, a peer-sync data loss,
+an unstable key under the assessment feature, a no-data marker being read as a
+measurement, and three duplicated binary decoders. Four of my own claims were
+wrong along the way. All are covered here, and the retractions are left visible
+rather than tidied away, because how they were caught is the most useful thing
+in this document.
 
-**Revision 2 changes:** five findings from review are resolved (§7). The
-arithmetic fallback has been **removed entirely**, which changes the behaviour
-described in C4. Corpus counts in §3 were wrong and are corrected. C7 is now
-verified by measurement rather than by grep.
+**Revision 3 changes.** Second review round resolved (§10). The assessment run
+key is now `(session_date, source_file)` — §7, and the place I'd start reading.
+The −20 dB no-data marker is dropped at the decode boundary (§8). The binary
+decoders were swept for divergent copies (§9). Check count 192 → 221.
 
 ---
 
@@ -28,7 +29,7 @@ needs a venv:
 python3 -m venv /tmp/nm-venv && /tmp/nm-venv/bin/pip install -q flask && /tmp/nm-venv/bin/python3 test_modules.py
 ```
 
-Expected: `All 192 checks passed.` The suite needs `MEAS118/` extracted in the
+Expected: `All 221 checks passed.` The suite needs `MEAS118/` extracted in the
 repo root (527 GLOB/PROF pairs, ~3 MB zipped, not committed — see `.gitignore`).
 
 ---
@@ -44,8 +45,12 @@ repo root (527 GLOB/PROF pairs, ~3 MB zipped, not committed — see `.gitignore`
 | C5 | Two files have an *unset* end time | Medium | "Unset" is inference; could be an aborted run or a clock fault |
 | C6 | The backfill was purely additive | High | Directly observable — see §4 |
 | C7 | End times display correctly at all six sites | High | Modal measured at 360 px; other five sites still grep + API only |
+| C8 | Assessment links survive a run-number shift | **High** | Rebuilt twice; the first attempt fixed reads but not writes |
+| C9 | No no-data marker reaches a report | High | Dropped at decode; stored rows cleaned on both Pis |
+| C10 | One implementation of each binary decode | High | Asserted across the whole archive, not by reading code |
 
-Weakest link is now **C5**, and it is inconsequential — see §3.
+Weakest link is now **C5**, and it is inconsequential — see §3. The claim
+most worth attacking is **C8**, because it was got wrong once already.
 
 ---
 
@@ -277,7 +282,128 @@ layouts, but that is an argument, not a measurement.
 
 ---
 
-## 7. Review findings and disposition
+## 7. C8 — the assessment run key (the one I got wrong twice)
+
+`assessment_runs` linked an assessment to a measurement through
+`(session_date, run_number)`. Run numbers are positional — `noise_db` assigns
+them with `enumerate(projects, 1)` — so recovering a run that previously failed
+to parse shifts every later number on that date and re-points existing links to
+a different measurement. Six files in the archive fail to parse, so the scenario
+is real; none fall on a live date.
+
+**The first fix was wrong, and instructively so.** It added `source_file` and
+preferred it *on read*, while `assign_runs` kept
+`ON CONFLICT(assessment_id, session_date, run_number)`. Reads and writes then
+arbitrated on different keys, which is worse than either alone. Review
+reproduced both consequences:
+
+```
+duplicate: assessment_runs [(5,'PROJ0005'), (6,'PROJ0005')] — detail shows it twice
+rebind:    link source_file PROJ0005 -> PROJ0004, silently
+picker:    marks run 5 = PROJ0004 while the link points at PROJ0005
+card:      labels run 5 (PROJ0004) "Boundary" while detail follows PROJ0005 at run 6
+```
+
+The last two are what walk a user into the first two.
+
+`(session_date, source_file)` is now canonical. The positional UNIQUE was
+dropped by table rebuild and replaced with a partial unique index on
+`(assessment_id, session_date, source_file)`. `run_number` survives as display
+metadata and as a fallback for legacy `NULL` rows, which `assign_runs` adopts in
+place rather than duplicating. The client sends `source_file` with the
+assignment, because the number a row was rendered with may be stale by the time
+it posts.
+
+**Reproduce the guard:** section 4b of the suite shifts the numbering mid-session
+and asserts the link follows the same physical measurement. Revert the join in
+`assessments_db` to `r.run_number = ar.run_number` and it fails; revert the
+conflict target and the write path cannot execute at all, since the constraint
+it names no longer exists.
+
+**Audit before constraints.** `audit_assessment_run_keys()` reports every link
+whose stable key is missing, unresolvable, or duplicated. It was run on both Pis
+before the constraint change — clean on each — and that is what made tightening
+safe. It is tested against all three hostile inputs.
+
+```bash
+ssh flightdata@192.168.1.116 'cd ~/noise-meter && python3 -c "
+import noise_db; print(noise_db.audit_assessment_run_keys())"'
+```
+
+**Known limit.** `source_file` is unique only *within* a session — `PROJ0001`
+recurs on every date — so every join is scoped by `session_id` or
+`session_date`. I believe that is sufficient; no constraint enforces it across
+the `runs` table itself, and it is the assumption I would attack next.
+
+---
+
+## 8. C9 — the −20 dB no-data marker
+
+A raw GLOB word of 0 decodes to exactly `-20.0`. That is the meter's "not
+recorded" marker, not a level: −20 dB SPL is 20 dB below the threshold of
+hearing, so no measurement produces it. Only the xlsx exporter knew. Everywhere
+else it was a number that passes every `is not None` check on its way into a
+report:
+
+```
+what the BS 4142 path received:  LAeq 61.0   LA10 62.3   LA50 -20.0   LA90 -20.0
+implied rating-level difference: +81.0 dB
+```
+
+It affects 141 of 527 archived runs (27%). Which statistic goes missing tracks
+run length precisely — a 0.1% percentile needs enough periods to mean anything,
+so `la_l01` is absent from every run under ~100 periods (136 of 139 short runs,
+against 2 of 388 long ones), while every other percentile only goes missing on
+runs of ten periods or fewer. **So this was never corruption.** It is the meter
+correctly declining to compute a statistic it lacks the samples for; the defect
+was that the app stored a refusal as though it were a measurement.
+
+Dropped in `read_glob_scalars()` — the one place the meaning is unambiguous.
+`clear_sentinel_scalars()` cleans rows written earlier; both Pis are clean.
+
+Live exposure was limited to `la_l01`/`lc_l01`, which no template or report path
+reads, so no report was ever wrong.
+
+**Two things to check here.** The exporter's `_rv()` must render `None` as `'-'`
+as well as `<= -19.99`, or the GLOBAL sheet regresses to a blank cell — caught
+by the reference comparison, not by reasoning. And the spectral tables still
+store `-20.0` for unmeasured bands rather than `None`, deliberately, because
+changing that would alter the Nortfr-verified export. Whether that asymmetry is
+right is a fair question to put to me.
+
+---
+
+## 9. C10 — one implementation of each binary decode
+
+The sentinel fix initially changed nothing, because `noise_parser` held its own
+copy of the scalar decoder and *that* copy feeds the database. The class matters
+more than the instance: a duplicated decoder fails silently, since the reference
+comparison exercises the export path while a different function does the import.
+
+Swept. Three duplicates, one divergent:
+
+* `_read_glob_spectrum` screened bands against `CAP_LAEQ` (130 dB), so impulse
+  tables that legitimately exceed it were discarded **whole** on import while
+  the backfill kept them — `spec_lfimax` and `spec_lfie` on 2023-06-05 and
+  2024-05-01, up to 136.4 dB. The check now lives in the shared decoder with
+  `CAP_PEAK` as the ceiling.
+* The start date/time at `0x19` was decoded inline in both `noise_parser` and
+  `backfill_glob` with no shared function. `read_start_datetime()` now exists.
+* `backfill_glob`'s scalar and spectral readers already delegated correctly.
+
+All raw decoding is now confined to `nor140_format.py`:
+
+```bash
+grep -rn "struct.unpack" --include=*.py . | grep -v __pycache__ | grep -v nor140_format
+```
+
+Expected: no output. Section 4ante asserts the import path and the shared
+decoders return identical results for every scalar set and all 9,486 spectral
+tables in the archive, and that spectra above the LAeq cap survive.
+
+---
+
+## 10. Review findings and disposition
 
 | # | Finding | Disposition |
 | --- | --- | --- |
@@ -286,6 +412,24 @@ layouts, but that is an argument, not a measurement.
 | 3 | Mobile run modal overflows at 360 px | Fixed; measured before/after (§6) |
 | 4 | `prof_record_size()` could misclassify a future paused 8-byte run | Fixed in two passes — the first left an early return that defeated the conflict check; see below |
 | 5 | Corpus counts inaccurate | Corrected here and in `NOR140_handoff.md` (§3) |
+
+**Round two** — five findings on the assessment run key, all reproduced before
+fixing:
+
+| # | Finding | Disposition |
+| --- | --- | --- |
+| 1 | Writes still arbitrated on `run_number`, so an upsert could duplicate a link or silently rebind it | Fixed — conflict target is the stable key; both failures reproduced first (§7) |
+| 2 | The assignment picker still read by run number, marking the wrong physical run | Fixed — keyed on `source_file`, with a separate legacy map |
+| 3 | The session card retained a positional join, so card and detail disagreed on screen | Fixed — joined on the stable key |
+| 4 | The migration could bless an already-stale link | `audit_assessment_run_keys()` added and run on both Pis before the constraint change |
+| 5 | The regression test stopped before the dangerous operation | Extended past the shift into re-assignment, picker and card |
+
+Extending the test for finding 5 immediately exposed something neither side had
+listed: the session card marked **every** run as assessed, because
+`COALESCE(al.label,'?')` turned the LEFT JOIN's `NULL` into `'?'`. Pre-existing
+and user-visible.
+
+**Round one** — five findings on the end-time work:
 
 On finding 4, the classifier takes two signals: the duration, and the GLOB
 variant. **Both are now derived before either is returned.** The first attempt
@@ -315,7 +459,7 @@ would silently drop runs rather than fail loudly.
 
 ---
 
-## 8. What the retracted claims should tell you
+## 11. What the retracted claims should tell you
 
 Two claims in revision 1 were wrong, and they failed in the same way.
 
@@ -329,9 +473,14 @@ built and missed the part I had inherited. The review caught it.
 
 A third, from the follow-up pass: this brief described `prof_record_size()` as
 failing closed on conflicting signals when the code returned early and never
-compared them. That one is the most instructive of the three, because the
-document and the code were written together and still disagreed — describing
-intended behaviour is not evidence of it.
+compared them. The document and the code were written together and still
+disagreed — describing intended behaviour is not evidence of it.
+
+A fourth, and the one to weigh most: I called the assessment key fixed when I
+had changed only the read path. I even named the write path as my own leading
+worry in the handover, and shipped anyway. Stating a risk is not the same as
+clearing it, and a half-applied fix is worse than none — it removes the smell
+while leaving the bug, and it did so on live machines.
 
 All three were confident statements resting on a single unexamined assumption.
 Treat every "consistent across N files" claim here the same way, and ask what
