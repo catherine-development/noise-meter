@@ -687,6 +687,60 @@ def main(meas_root):
               'report data carries no no-data marker', repr(rd.get('la90')))
         a.assess.delete_assessment(aid2)
 
+        # ── 4d. the assign route, end to end ──────────────────────────────────
+        print('\n4d. assignment over HTTP, not just the data layer')
+        # The suite only ever called assign_runs() directly, so a 500 in the
+        # route sailed past every check: the endpoint built three-element tuples
+        # and handed them to a helper that unpacked two. assign_runs had already
+        # committed, so the row landed, the request failed, and the peer was
+        # never told.
+        #
+        # Its own Side, because constructing one rebinds sys.modules — the route
+        # resolves assign_runs through whichever binding is current, so sharing a
+        # Side with an earlier section writes to the wrong database.
+        import importlib as _il
+        rt = Side(os.path.join(tmp, 'route.db'))
+        rt.db.import_sessions(sessions, metadata=META)
+        _app = _il.import_module('noise_app').app
+        _app.config['TESTING'] = True
+        _client = _app.test_client()
+        with _client.session_transaction() as _sess:
+            _sess['user'] = 'test'
+            _sess['logged_in'] = True
+
+        aid4 = rt.assess.create_assessment('Route test')
+        lid4 = rt.assess.add_assessment_location(aid4, 'L')
+        src5 = rt.sql('SELECT r.source_file FROM runs r JOIN sessions s ON s.id=r.session_id '
+                      'WHERE s.date=? AND r.run_number=5', SESSION_DATE)[0]['source_file']
+        _resp = _client.post(f'/api/assessments/{aid4}/assign', json={
+            'location_id': lid4,
+            'runs': [{'date': SESSION_DATE, 'run_number': 5, 'source_file': src5}]})
+        check(_resp.status_code == 200, 'assign route returns 200, not 500',
+              f'{_resp.status_code}: {_resp.get_data(as_text=True)[:120]}')
+        check(_resp.get_json().get('assigned') == 1, 'route reports one assignment',
+              str(_resp.get_json()))
+
+        # A stale page: the number moved between render and POST, but the stable
+        # key the page carried still names the right measurement.
+        sid4 = rt.sql('SELECT id FROM sessions WHERE date=?', SESSION_DATE)[0]['id']
+        rt.exec('UPDATE runs SET run_number=run_number+1000 WHERE session_id=? AND run_number>=3', sid4)
+        rt.exec('UPDATE runs SET run_number=run_number-999 WHERE session_id=? AND run_number>=1000', sid4)
+        _resp = _client.post(f'/api/assessments/{aid4}/assign', json={
+            'location_id': lid4,
+            'runs': [{'date': SESSION_DATE, 'run_number': 5, 'source_file': src5}]})
+        check(_resp.status_code == 200, 'a stale run number still assigns cleanly',
+              str(_resp.status_code))
+        _srcs = [r['source_file'] for r in
+                 rt.sql('SELECT source_file FROM assessment_runs WHERE assessment_id=?', aid4)]
+        check(_srcs == [src5], 'the stable key won over the stale position', str(_srcs))
+
+        # A source_file that is not in this session is refused, not guessed at.
+        _resp = _client.post(f'/api/assessments/{aid4}/assign', json={
+            'location_id': lid4,
+            'runs': [{'date': SESSION_DATE, 'run_number': 5, 'source_file': 'PROJ7777'}]})
+        check(_resp.status_code == 400, 'a foreign source_file is rejected',
+              str(_resp.status_code))
+
         # ── 4c. migration audit on hostile inputs ─────────────────────────────
         print('\n4c. migration audit flags links it cannot safely migrate')
         aid3 = a.assess.create_assessment('Audit test')
@@ -723,6 +777,104 @@ def main(meas_root):
         idx = a.sql("SELECT name FROM sqlite_master WHERE type='index' "
                     "AND name='idx_assessment_runs_stable'")
         check(len(idx) == 1, 'the stable partial unique index exists')
+
+        # The client half of the stable key is JavaScript, so nothing above can
+        # exercise it — which is precisely how it was silently lost once: an edit
+        # that never landed, while the brief claimed the protection existed.
+        _tpl = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                 'templates', 'assessments.html'), encoding='utf-8').read()
+        _keyline = [l for l in _tpl.split('\n') if 'const key = ' in l]
+        check(len(_keyline) == 1 and 'r.source_file' in _keyline[0],
+              'the pool key carries source_file, not just the position',
+              _keyline[0].strip() if _keyline else 'not found')
+        check('const [date, rn, srcFile] = key.split' in _tpl,
+              'and the click handler destructures all three')
+        check('source_file: srcFile || null' in _tpl,
+              'and posts source_file to the server')
+
+        # ── 4e. migration from hostile starting schemas ───────────────────────
+        print('\n4e. migration on databases unlike the ones it was written against')
+        import sqlite3 as _sq, importlib as _il2
+        _BASE = ("CREATE TABLE assessments(id INTEGER PRIMARY KEY, name TEXT);"
+                 "CREATE TABLE assessment_locations(id INTEGER PRIMARY KEY, assessment_id INTEGER);"
+                 "CREATE TABLE sessions(id INTEGER PRIMARY KEY, date TEXT UNIQUE);"
+                 "CREATE TABLE runs(id INTEGER PRIMARY KEY, session_id INTEGER,"
+                 "  run_number INTEGER, source_file TEXT);")
+
+        def _build(name, extra):
+            path = os.path.join(tmp, name)
+            cx = _sq.connect(path); cx.executescript(_BASE + extra); cx.commit(); cx.close()
+            return path
+
+        def _migrate_only(path):
+            """Run the migration against `path` without disturbing the Side bindings."""
+            prev = os.environ.get('NOISE_DB_PATH')
+            os.environ['NOISE_DB_PATH'] = path
+            for _m in ('noise_db', 'reports_db', 'assessments_db', 'sync_db', 'reports'):
+                sys.modules.pop(_m, None)
+            try:
+                _nd = _il2.import_module('noise_db')
+                _nd.init_db()
+                return None
+            except Exception as exc:
+                return exc
+            finally:
+                if prev:
+                    os.environ['NOISE_DB_PATH'] = prev
+                for _m in ('noise_db', 'reports_db', 'assessments_db', 'sync_db', 'reports'):
+                    sys.modules.pop(_m, None)
+
+        # (a) a database predating the source_file column. The index used to be
+        # created in the schema script, before the ALTER that adds the column.
+        _p = _build('old_schema.db', """
+            CREATE TABLE assessment_runs(id INTEGER PRIMARY KEY,
+              assessment_id INTEGER NOT NULL REFERENCES assessments(id) ON DELETE CASCADE,
+              location_id INTEGER, session_date TEXT NOT NULL, run_number INTEGER NOT NULL,
+              conditions TEXT, notes TEXT,
+              UNIQUE(assessment_id, session_date, run_number));
+            INSERT INTO sessions(id,date) VALUES(1,'2026-08-12');
+            INSERT INTO runs(id,session_id,run_number,source_file) VALUES(1,1,1,'PROJ0001');
+            INSERT INTO assessments(id,name) VALUES(1,'A');
+            INSERT INTO assessment_runs(id,assessment_id,session_date,run_number)
+              VALUES(1,1,'2026-08-12',1);""")
+        _err = _migrate_only(_p)
+        check(_err is None, 'pre-source_file schema migrates', repr(_err))
+        _cx = _sq.connect(_p)
+        check(_cx.execute('SELECT source_file FROM assessment_runs').fetchone()[0] == 'PROJ0001',
+              'and the existing link is backfilled')
+        check('UNIQUE(assessment_id, session_date, run_number)' not in
+              _cx.execute("SELECT sql FROM sqlite_master WHERE name='assessment_runs'").fetchone()[0],
+              'and the positional UNIQUE is dropped')
+        _cx.close()
+
+        # (b) duplicated stable keys must refuse, not fail with a bare
+        # IntegrityError naming nothing.
+        _p = _build('dupe_keys.db', """
+            CREATE TABLE assessment_runs(id INTEGER PRIMARY KEY,
+              assessment_id INTEGER NOT NULL REFERENCES assessments(id) ON DELETE CASCADE,
+              location_id INTEGER, session_date TEXT NOT NULL, run_number INTEGER,
+              source_file TEXT, conditions TEXT, notes TEXT);
+            INSERT INTO assessments(id,name) VALUES(1,'A');
+            INSERT INTO assessment_runs(id,assessment_id,session_date,run_number,source_file)
+              VALUES(1,1,'2026-08-12',5,'PROJ0005'),(2,1,'2026-08-12',6,'PROJ0005');""")
+        _err = _migrate_only(_p)
+        check(type(_err).__name__ == 'MigrationUnsafe',
+              'duplicated stable keys refuse the migration', repr(_err))
+        check('audit_assessment_run_keys' in str(_err),
+              'and the message says how to resolve it')
+
+        # (c) two runs sharing one source_file make the key ambiguous.
+        _p = _build('dupe_runs.db', """
+            CREATE TABLE assessment_runs(id INTEGER PRIMARY KEY,
+              assessment_id INTEGER NOT NULL REFERENCES assessments(id) ON DELETE CASCADE,
+              location_id INTEGER, session_date TEXT NOT NULL, run_number INTEGER,
+              source_file TEXT, conditions TEXT, notes TEXT);
+            INSERT INTO sessions(id,date) VALUES(1,'2026-08-12');
+            INSERT INTO runs(id,session_id,run_number,source_file)
+              VALUES(1,1,1,'PROJ0001'),(2,1,2,'PROJ0001');""")
+        _err = _migrate_only(_p)
+        check(type(_err).__name__ == 'MigrationUnsafe',
+              'duplicated run identities refuse the migration', repr(_err))
 
         # ── 5. deletions replicate ────────────────────────────────────────────
         print('\n5. session deletions replicate to the peer')

@@ -1,7 +1,7 @@
 # Validation brief — NOR140 decoding, run identity, and data integrity
 
 **Scope:** `7dd0181` through `3f0d808` on `master`.
-**Author:** Catherine Ives-Yim, 2026-08-18. **Revision 3**, after two review rounds.
+**Author:** Catherine Ives-Yim, 2026-08-18. **Revision 4**, after three review rounds.
 **Purpose:** give a reviewer everything needed to falsify the claims below
 without taking any of them on trust.
 
@@ -16,7 +16,7 @@ in this document.
 **Revision 3 changes.** Second review round resolved (§10). The assessment run
 key is now `(session_date, source_file)` — §7, and the place I'd start reading.
 The −20 dB no-data marker is dropped at the decode boundary (§8). The binary
-decoders were swept for divergent copies (§9). Check count 192 → 221.
+decoders were swept for divergent copies (§9). Check count 192 → 235.
 
 ---
 
@@ -29,7 +29,7 @@ needs a venv:
 python3 -m venv /tmp/nm-venv && /tmp/nm-venv/bin/pip install -q flask && /tmp/nm-venv/bin/python3 test_modules.py
 ```
 
-Expected: `All 221 checks passed.` The suite needs `MEAS118/` extracted in the
+Expected: `All 235 checks passed.` The suite needs `MEAS118/` extracted in the
 repo root (527 GLOB/PROF pairs, ~3 MB zipped, not committed — see `.gitignore`).
 
 ---
@@ -312,7 +312,15 @@ dropped by table rebuild and replaced with a partial unique index on
 metadata and as a fallback for legacy `NULL` rows, which `assign_runs` adopts in
 place rather than duplicating. The client sends `source_file` with the
 assignment, because the number a row was rendered with may be stale by the time
-it posts.
+it posts — and the server refuses a `source_file` that is not a run in the
+session named, rather than falling back to the position.
+
+**Revision 3 of this document claimed that client protection existed when it did
+not.** The edit that added `source_file` to the pool key never reached disk: the
+script that made it raised on a later assertion and never wrote the file, so
+`srcFile` was `undefined` and the field posted as `null` throughout. A static
+guard now asserts the key, the destructure and the payload agree, because that
+half is JavaScript and nothing in the Python suite touches it.
 
 **Reproduce the guard:** section 4b of the suite shifts the numbering mid-session
 and asserts the link follows the same physical measurement. Revert the join in
@@ -459,6 +467,28 @@ would silently drop runs rather than fail loudly.
 
 ---
 
+**Round three** — four findings, all reproduced before fixing:
+
+| # | Finding | Disposition |
+| --- | --- | --- |
+| 1 | The assign route 500'd on every request: it built three-element tuples for a helper that unpacked two, *after* `assign_runs` had committed | Fixed — `assign_runs` returns the rows it touched and the positional re-query is gone |
+| 2 | The browser never sent the canonical key, so the brief's claim was false | Fixed and guarded statically (§7) |
+| 3 | The migration created the unique index before adding the column, dying on any pre-`source_file` database | Fixed — column, backfill, audit, rebuild, index, in that order |
+| 4 | Two runs could share one `source_file`, and the audit called it clean because it only asked whether *at least one* run matched | Fixed — the audit counts, and `runs` now carries a unique index on `(session_id, source_file)` |
+
+Finding 1 is the one that matters most, and not for its severity. **221 checks
+passed while the feature was completely broken over HTTP**, because every test
+called `assign_runs()` directly. There is now a section 4d that drives the real
+route through a Flask test client, including a stale-page POST and a rejected
+foreign key. Reverting the fix makes it fail.
+
+On finding 4, zero duplicates exist across the 518 archived runs or on either
+Pi, so the constraint could be added rather than merely detected. The migration
+refuses with `MigrationUnsafe` — naming the offending rows — instead of failing
+with a bare `IntegrityError`.
+
+---
+
 ## 11. What the retracted claims should tell you
 
 Two claims in revision 1 were wrong, and they failed in the same way.
@@ -476,11 +506,20 @@ failing closed on conflicting signals when the code returned early and never
 compared them. The document and the code were written together and still
 disagreed — describing intended behaviour is not evidence of it.
 
-A fourth, and the one to weigh most: I called the assessment key fixed when I
-had changed only the read path. I even named the write path as my own leading
+A fourth: I called the assessment key fixed when I had changed only the read
+path. I even named the write path as my own leading
 worry in the handover, and shipped anyway. Stating a risk is not the same as
 clearing it, and a half-applied fix is worse than none — it removes the smell
 while leaving the bug, and it did so on live machines.
+
+A fifth, from round three, and the one to weigh most. Two of the four findings
+were failures of *verification*, not of judgement. The client-side edit never
+reached disk and I asserted in this document that it had. The assign route was
+broken end to end while 221 checks passed, because the tests spoke to the data
+layer and never to the route. Both would have been caught by looking at the
+result rather than at the intention — reading the file back, or calling the
+endpoint once. Everything in this brief that rests on "I changed it" rather than
+"I observed it afterwards" deserves the same suspicion.
 
 All three were confident statements resting on a single unexamined assumption.
 Treat every "consistent across N files" claim here the same way, and ask what

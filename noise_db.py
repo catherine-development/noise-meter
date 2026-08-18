@@ -15,6 +15,14 @@ def get_db():
     return conn
 
 
+class MigrationUnsafe(RuntimeError):
+    """Raised when a schema change cannot be applied without losing meaning.
+
+    Better than a bare IntegrityError from a failing index: it names the rows
+    needing attention and leaves the database as it was.
+    """
+
+
 def _migrate(conn):
     conn.execute('''
         CREATE TABLE IF NOT EXISTS app_settings (
@@ -178,12 +186,42 @@ def _migrate(conn):
             conditions      TEXT,
             notes           TEXT
         );
-        -- The stable identity. Partial, because legacy rows may still carry a
-        -- NULL source_file and must not collide with one another.
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_assessment_runs_stable
-            ON assessment_runs(assessment_id, session_date, source_file)
-            WHERE source_file IS NOT NULL;
     ''')
+
+    # Order matters, and got this wrong once. The unique index used to be created
+    # inside the schema script above, which referenced source_file before the
+    # ALTER below had added it — so migrating any database predating the column
+    # died with "no such column: source_file". Column, then backfill, then audit,
+    # then rebuild, then index.
+    ar_cols = {row[1] for row in conn.execute('PRAGMA table_info(assessment_runs)').fetchall()}
+    if 'source_file' not in ar_cols:
+        conn.execute('ALTER TABLE assessment_runs ADD COLUMN source_file TEXT')
+        # Backfill through the run_number join, which is still correct at this
+        # point: the numbers only go stale once a re-import shifts them, and
+        # this runs before any such import can.
+        conn.execute('''
+            UPDATE assessment_runs SET source_file = (
+                SELECT r.source_file FROM runs r
+                JOIN sessions s ON s.id = r.session_id
+                WHERE s.date = assessment_runs.session_date
+                  AND r.run_number = assessment_runs.run_number
+            ) WHERE source_file IS NULL
+        ''')
+
+    # Only now is it safe to look. A duplicated stable key cannot be migrated
+    # automatically, and creating the index over it would fail with a bare
+    # IntegrityError naming nothing. Refuse instead, and say which rows.
+    dupes = conn.execute('''
+        SELECT assessment_id, session_date, source_file, COUNT(*) AS n
+        FROM assessment_runs WHERE source_file IS NOT NULL
+        GROUP BY assessment_id, session_date, source_file HAVING n > 1
+    ''').fetchall()
+    if dupes:
+        raise MigrationUnsafe(
+            'assessment_runs holds %d duplicated stable key(s), so the unique '
+            'index cannot be created. Run audit_assessment_run_keys(), resolve '
+            'them, then restart. First few: %s'
+            % (len(dupes), [tuple(d) for d in dupes][:5]))
 
     ar_sql = (conn.execute(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='assessment_runs'"
@@ -211,26 +249,33 @@ def _migrate(conn):
                    source_file, conditions, notes FROM assessment_runs;
             DROP TABLE assessment_runs;
             ALTER TABLE assessment_runs_new RENAME TO assessment_runs;
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_assessment_runs_stable
-                ON assessment_runs(assessment_id, session_date, source_file)
-                WHERE source_file IS NOT NULL;
         ''')
         conn.execute('PRAGMA foreign_keys=on')
 
-    ar_cols = {row[1] for row in conn.execute('PRAGMA table_info(assessment_runs)').fetchall()}
-    if 'source_file' not in ar_cols:
-        conn.execute('ALTER TABLE assessment_runs ADD COLUMN source_file TEXT')
-        # Backfill through the run_number join, which is still correct at this
-        # point: the numbers only go stale once a re-import shifts them, and
-        # this runs before any such import can.
-        conn.execute('''
-            UPDATE assessment_runs SET source_file = (
-                SELECT r.source_file FROM runs r
-                JOIN sessions s ON s.id = r.session_id
-                WHERE s.date = assessment_runs.session_date
-                  AND r.run_number = assessment_runs.run_number
-            ) WHERE source_file IS NULL
-        ''')
+    conn.execute('''
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_assessment_runs_stable
+            ON assessment_runs(assessment_id, session_date, source_file)
+            WHERE source_file IS NOT NULL
+    ''')
+
+    # source_file is the run's identity, so make the database enforce it. Two
+    # runs sharing one within a session would make every stable-key join
+    # ambiguous, and the audit would still have called it clean because it only
+    # asked whether at least one run matched.
+    run_dupes = conn.execute('''
+        SELECT session_id, source_file, COUNT(*) AS n FROM runs
+        WHERE source_file IS NOT NULL
+        GROUP BY session_id, source_file HAVING n > 1
+    ''').fetchall()
+    if run_dupes:
+        raise MigrationUnsafe(
+            'runs holds %d duplicated (session, source_file) identit(ies), which '
+            'the stable key cannot distinguish. Resolve them, then restart. '
+            'First few: %s' % (len(run_dupes), [tuple(d) for d in run_dupes][:5]))
+    conn.execute('''
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_stable
+            ON runs(session_id, source_file) WHERE source_file IS NOT NULL
+    ''')
 
     conn.commit()
 
@@ -874,18 +919,22 @@ def audit_assessment_run_keys():
         ORDER BY ar.session_date, ar.run_number
     ''').fetchall()]
 
-    report = {'null_source_file': [], 'unmatched': [], 'duplicate': []}
+    report = {'null_source_file': [], 'unmatched': [], 'duplicate': [], 'ambiguous': []}
     seen = {}
     for r in rows:
         if not r['source_file']:
             report['null_source_file'].append(r)
             continue
-        hit = conn.execute(
-            'SELECT 1 FROM runs rn JOIN sessions se ON se.id = rn.session_id '
+        # Count, don't just look: one match is healthy, none is unmatched, and
+        # more than one means the stable key does not identify a single run.
+        n_hits = conn.execute(
+            'SELECT COUNT(*) FROM runs rn JOIN sessions se ON se.id = rn.session_id '
             'WHERE se.date=? AND rn.source_file=?',
-            (r['session_date'], r['source_file'])).fetchone()
-        if not hit:
+            (r['session_date'], r['source_file'])).fetchone()[0]
+        if n_hits == 0:
             report['unmatched'].append(r)
+        elif n_hits > 1:
+            report['ambiguous'].append(dict(r, matching_runs=n_hits))
         key = (r['assessment_id'], r['session_date'], r['source_file'])
         if key in seen:
             report['duplicate'].append(r)

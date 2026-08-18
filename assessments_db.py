@@ -151,9 +151,20 @@ def assign_runs(assessment_id, location_id, run_pairs):
     silently rebound the existing link to a different measurement.
     """
     conn = get_db()
+    touched = []
     for pair in run_pairs:
         date, run_num = pair[0], pair[1]
         source_file = pair[2] if len(pair) > 2 else None
+        if source_file:
+            # Trust nothing from the client about identity: the stable key must
+            # name a run that actually exists in the session being assigned.
+            ok = conn.execute(
+                'SELECT 1 FROM runs r JOIN sessions s ON s.id=r.session_id '
+                'WHERE s.date=? AND r.source_file=?', (date, source_file)).fetchone()
+            if not ok:
+                conn.close()
+                raise ValueError(
+                    'source_file %r is not a run in session %s' % (source_file, date))
         if not source_file:
             row = conn.execute(
                 'SELECT r.source_file FROM runs r JOIN sessions s ON s.id=r.session_id '
@@ -172,6 +183,7 @@ def assign_runs(assessment_id, location_id, run_pairs):
                 conn.execute(
                     'UPDATE assessment_runs SET source_file=?, location_id=? WHERE id=?',
                     (source_file, location_id, legacy['id']))
+                touched.append(legacy['id'])
                 continue
             conn.execute(
                 'INSERT INTO assessment_runs '
@@ -185,6 +197,11 @@ def assign_runs(assessment_id, location_id, run_pairs):
                 '  run_number=excluded.run_number',
                 (assessment_id, location_id, date, run_num, source_file)
             )
+            row = conn.execute(
+                'SELECT id FROM assessment_runs WHERE assessment_id=? AND session_date=? '
+                'AND source_file=?', (assessment_id, date, source_file)).fetchone()
+            if row:
+                touched.append(row['id'])
         else:
             # No stable key available (a run that never carried a source_file).
             # Fall back to the positional key, and do not create a second row.
@@ -195,13 +212,19 @@ def assign_runs(assessment_id, location_id, run_pairs):
             if existing:
                 conn.execute('UPDATE assessment_runs SET location_id=? WHERE id=?',
                              (location_id, existing['id']))
+                touched.append(existing['id'])
             else:
-                conn.execute(
+                cur = conn.execute(
                     'INSERT INTO assessment_runs '
                     '  (assessment_id, location_id, session_date, run_number) '
                     'VALUES (?,?,?,?)', (assessment_id, location_id, date, run_num))
+                touched.append(cur.lastrowid)
     conn.commit()
+    rows = [dict(r) for r in conn.execute(
+        'SELECT * FROM assessment_runs WHERE id IN (%s)'
+        % ','.join('?' * len(touched)), touched).fetchall()] if touched else []
     conn.close()
+    return rows
 
 
 def get_assessment_run(ar_id):

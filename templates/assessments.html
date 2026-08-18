@@ -493,7 +493,9 @@ function renderPool() {
       : b.run_number - a.run_number
   );
   const html = runs.map(r => {
-    const key = `${r.session_date}|${r.run_number}`;
+    // Carries the stable identity as well as the position: the run number this
+    // was rendered with may be stale by the time the click posts.
+    const key = `${r.session_date}|${r.run_number}|${r.source_file || ''}`;
     const p = timePeriod(r.start_time, a.standard);
     const pk = periodKey(p);
     const isAssigned = r.ar_id !== null;

@@ -146,10 +146,17 @@ def api_assign_runs(aid):
     # Carry source_file when the client sends it: the run number it was
     # rendered with may already be stale by the time this posts.
     pairs = [(r['date'], r['run_number'], r.get('source_file')) for r in runs]
-    assign_runs(aid, location_id, pairs)
-    for row in get_assessment_runs_by_pairs(aid, pairs):
+    # assign_runs returns the rows it touched. The previous positional re-query
+    # took (date, run_number) pairs and blew up on the three-element tuples built
+    # above — after assign_runs had already committed, so the local write landed,
+    # the request 500'd and the peer never heard about it.
+    try:
+        rows = assign_runs(aid, location_id, pairs)
+    except ValueError as exc:
+        return jsonify({'status': 'error', 'error': str(exc)}), 400
+    for row in rows:
         sync_event_to_peer('assessment_run', 'upsert', row)
-    return jsonify({'status': 'ok', 'assigned': len(pairs)})
+    return jsonify({'status': 'ok', 'assigned': len(rows)})
 
 
 @bp.route('/api/assessment-runs/<int:ar_id>', methods=['DELETE'])
