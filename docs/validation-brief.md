@@ -495,6 +495,56 @@ with a bare `IntegrityError`.
 
 ---
 
+## 10b. The session LAeq definition changed (WP5, decision D2)
+
+Added after this brief's scope, and recorded here because it is the one change
+in the production-fix round that **moves a number already on screen** rather
+than correcting a wrong one.
+
+`sessions.avg_laeq` — the figure in the session list, the session CSV
+(`laeq_avg_db`) and the history chart — was an *equal-weight* energy average of
+the per-run LAeq. Every run counted the same whether it ran for 15 seconds or 15
+minutes. The report block computed a *duration-weighted* one from the same runs,
+so the same day could be quoted at two different levels depending on which page
+you read it from.
+
+It is now duration-weighted everywhere: weight is the meter's `duration_s`,
+falling back to `n_samples` for runs imported before that column existed. One
+implementation, `noise_parser._energy_avg_weighted()`, is called by
+`parse_zip()`, by `_recompute_session_aggregates()` and by
+`reports._build_session_data_block()`, so an import, a backfill and a report
+cannot drift apart again.
+
+**Per-run values are untouched.** No `runs` column changes; this is only how
+they are combined.
+
+**Size of the move.** Only sessions whose runs differ in length change at all,
+and the shift is toward the longer runs. On the reference date the suite uses
+(2026-08-12, ten runs of mixed length) the session LAeq moves by about 1 dB.
+A day of equal-length runs does not move.
+
+**What must be run on the Pis after this deploys — not yet run:**
+
+```bash
+ssh flightdata@192.168.1.116 'cd ~/noise-meter && python3 -c "import noise_db; print(noise_db.recompute_session_aggregates())"'
+```
+
+and the same on `.138`. Until it is, stored session rows keep the old
+equal-weight value while any freshly imported date gets the new one, so the
+session list would be internally inconsistent. The call prints
+`[(date, old, new)]` for every row it moves — capture that output, it is the
+record of which dates changed and by how much. Take the usual `.backup` first.
+The same command is already the documented follow-up to `backfill_glob.py`,
+which rewrites run LAeqs and leaves session rows stale.
+
+**How to falsify the claim that import and recompute agree:** suite section 11
+imports a two-run session of 100 s at 70.0 dB and 900 s at 80.0 dB and asserts
+the stored value is 79.59 — hand-computed as
+`10·log₁₀((100·10⁷ + 900·10⁸)/1000)`. The equal-weight answer would be 77.40.
+It then asserts the recompute and the report block reproduce the same figure.
+
+---
+
 ## 11. What the retracted claims should tell you
 
 Two claims in revision 1 were wrong, and they failed in the same way.
