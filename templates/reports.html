@@ -187,7 +187,7 @@ textarea{resize:vertical;font-family:var(--font-data);font-size:12px;line-height
           {% for r in history %}
           <tr id="rrow-{{ r.id }}">
             <td class="td-mono">{{ r.session_date }}</td>
-            <td>{{ r.run_label or 'All runs' }}</td>
+            <td>{{ r.run_label or 'All runs' }}{% if r.source_file %} <span class="td-mono" style="font-size:11px;color:var(--text3)" title="NOR140 project folder the report is pinned to">{{ r.source_file }}</span>{% endif %}</td>
             <td>{{ r.template_name or '—' }}</td>
             <td style="font-size:11px;color:var(--text2)">{{ r.model.replace('claude-','').replace('-20251001','') }}</td>
             <td>
@@ -299,11 +299,11 @@ function onSessionChange() {
       sess.runs.map(r => {
         const mins = Math.floor(r.dur / 60), secs = r.dur % 60;
         const dur = mins ? `${mins}m ${secs}s` : `${secs}s`;
-        return `<option value="${r.n}">Run ${r.n} — ${r.start}${r.end ? '–' + r.end : ''} (${dur})</option>`;
+        return `<option value="${r.n}" data-src="${r.src || ''}">Run ${r.n} — ${r.start}${r.end ? '–' + r.end : ''} (${dur})</option>`;
       }).join('');
   } else if (sess && sess.runs.length === 1) {
     const r = sess.runs[0];
-    runSel.innerHTML = `<option value="${r.n}">Run ${r.n} — ${r.start}${r.end ? '–' + r.end : ''}</option>`;
+    runSel.innerHTML = `<option value="${r.n}" data-src="${r.src || ''}">Run ${r.n} — ${r.start}${r.end ? '–' + r.end : ''}</option>`;
   } else {
     runSel.innerHTML = '<option value="">No runs</option>';
   }
@@ -339,7 +339,13 @@ async function generateReport() {
   showNotice('genNotice', '', 'info');
 
   const body = {session_date: date, template_id: parseInt(templateId), model, thinking_level: thinking};
-  if (runVal) body.run_number = parseInt(runVal);
+  if (runVal) {
+    body.run_number = parseInt(runVal);
+    // The run's stable identity (PROJ folder); run_number alone moves on re-import.
+    const runSel = document.getElementById('selRun');
+    const src = runSel.selectedOptions[0] && runSel.selectedOptions[0].dataset.src;
+    if (src) body.source_file = src;
+  }
 
   try {
     const res = await fetch('/api/generate-report', {

@@ -121,6 +121,17 @@ tbody tr:hover{background:var(--bg)}
 .print-btn:hover{opacity:.9}
 .print-label{font-size:12px;color:var(--ink3)}
 
+/* ── Provenance notice (snapshot vs live) ── */
+.provenance{
+  font-family:var(--font-ui);font-size:12px;line-height:1.55;
+  border:1px solid var(--rule);border-left:3px solid var(--ink3);
+  background:var(--surface);color:var(--ink2);
+  padding:10px 14px;border-radius:4px;margin:0 0 16px;
+}
+.provenance.warn{border-left-color:var(--warn)}
+.provenance ul{margin:6px 0 0 18px}
+.provenance li{font-family:var(--font-data);font-size:11.5px}
+
 @media print{
   body{background:#fff;font-size:11pt}
   .shell{max-width:none;padding:0}
@@ -174,6 +185,17 @@ tbody tr:hover{background:var(--bg)}
 
   <div class="report-body">
 
+    {% if provenance and provenance.state in ('differs', 'missing', 'no_snapshot') %}
+    <div class="provenance {% if provenance.state != 'no_snapshot' %}warn{% endif %}" id="provenanceNotice" data-state="{{ provenance.state }}">
+      {% if provenance.state == 'differs' %}
+      Live values differ from those used when this report was generated; the report shows the values it was generated from:
+      <ul>{% for d in provenance.diffs %}<li>{{ d }}</li>{% endfor %}</ul>
+      {% else %}
+      {{ provenance.message }}
+      {% endif %}
+    </div>
+    {% endif %}
+
     <!-- Executive summary -->
     <div class="section">
       <div class="section-title">Executive Summary</div>
@@ -220,6 +242,10 @@ tbody tr:hover{background:var(--bg)}
       <div class="section-title">Measurement Details</div>
       <div class="meta-grid">
         <div class="meta-row"><div class="meta-k">Date</div><div class="meta-v">{{ date }}</div></div>
+        {% set srcs = run_rows | map(attribute='source_file') | select | list %}
+        {% if srcs %}
+        <div class="meta-row"><div class="meta-k">Source run{{ 's' if srcs | length > 1 }}</div><div class="meta-v">{{ srcs | join(', ') }}</div></div>
+        {% endif %}
         <div class="meta-row">
           <div class="meta-k">Location</div>
           <div class="meta-v">{% set loc = [sess.loc, sess.post] | select | list %}{{ loc | join(', ') if loc else '—' }}</div>
@@ -323,7 +349,7 @@ tbody tr:hover{background:var(--bg)}
       Analysis prepared on {{ generated_at }} using NOR140 Noise Monitor ({{ pi_name }}).
       Reference standards: HSE Noise at Work Regulations 2005; BS 4142:2014+A1:2019; WHO Environmental Noise Guidelines 2018.
       {% if usage_info %}
-      <br>API usage (claude-sonnet-5): {{ usage_info.input_tokens | int }} input + {{ usage_info.output_tokens | int }} output tokens ≈ ${{ '%.4f' | format(usage_info.cost_usd) }} (pricing approximate).
+      <br>API usage (claude-sonnet-5): {{ usage_info.input_tokens | int }} input + {{ usage_info.output_tokens | int }} output tokens ≈ ${{ '%.4f' | format(usage_info.cost_usd or 0) }} (pricing approximate).
       {% endif %}
     </div>
 

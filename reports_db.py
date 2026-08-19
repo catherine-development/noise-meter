@@ -127,15 +127,20 @@ def delete_report_template(tid):
 
 def save_generated_report(session_date, template_id, template_name, model,
                           thinking_level, sections_json, input_tokens, output_tokens, cost_usd,
-                          run_number=None, run_label=None):
+                          run_number=None, run_label=None,
+                          source_file=None, input_snapshot_json=None):
+    """source_file pins a single-run report to the run's stable identity
+    (run_number is display metadata that moves on re-import);
+    input_snapshot_json is the JSON of every input the report was rendered
+    from, so view_report can show what was true at generation time."""
     conn = get_db()
     cur = conn.execute(
         'INSERT INTO generated_reports '
         '  (session_date, run_number, run_label, template_id, template_name, model, thinking_level, '
-        '   sections_json, input_tokens, output_tokens, cost_usd) '
-        'VALUES (?,?,?,?,?,?,?,?,?,?,?)',
+        '   sections_json, input_tokens, output_tokens, cost_usd, source_file, input_snapshot_json) '
+        'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
         (session_date, run_number, run_label, template_id, template_name, model, thinking_level,
-         sections_json, input_tokens, output_tokens, cost_usd)
+         sections_json, input_tokens, output_tokens, cost_usd, source_file, input_snapshot_json)
     )
     rid = cur.lastrowid
     conn.commit()
@@ -144,12 +149,19 @@ def save_generated_report(session_date, template_id, template_name, model,
 
 
 def get_generated_reports():
+    """Listing rows. The input snapshot is a per-report blob that only
+    view_report needs, so it is left out of the listing."""
     conn = get_db()
     rows = conn.execute(
         'SELECT * FROM generated_reports ORDER BY created_at DESC'
     ).fetchall()
     conn.close()
-    return [dict(r) for r in rows]
+    out = []
+    for r in rows:
+        d = dict(r)
+        d.pop('input_snapshot_json', None)
+        out.append(d)
+    return out
 
 
 def get_generated_report(rid):

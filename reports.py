@@ -254,28 +254,40 @@ def _call_claude(prompt, model, thinking_level):
     return sections, tok_in, tok_out, round(cost_usd, 4)
 
 
-def _prepare_session_for_report(date, run_number=None):
-    """Fetch session + compute stats. run_number=None means all runs.
-    Returns (sess, run_rows, all_laeq, total_s) or None."""
+def _prepare_session_for_report(date, run_number=None, source_file=None):
+    """Fetch session + compute stats. Returns (sess, run_rows, all_laeq, total_s)
+    or None.
+
+    A single run is selected by `source_file` (its stable identity — the
+    NOR140 PROJ folder) when one is given; `run_number` is the position in the
+    session, which is renumbered on every import, and is honoured only for
+    legacy reports that recorded nothing else. Neither means all runs. Each
+    run_row carries the run's current number and its source_file.
+    """
     all_sessions = get_all_sessions_json()['sessions']
     sess = next((s for s in all_sessions if s['d'] == date), None)
     if not sess:
         return None
     all_projects = sess.get('projects', [])
-    if run_number is not None:
+    if source_file is not None:
+        projects = [p for p in all_projects if p.get('source_file') == source_file]
+        if not projects:
+            return None
+    elif run_number is not None:
         if run_number < 1 or run_number > len(all_projects):
             return None
         projects = [all_projects[run_number - 1]]
-        base_num = run_number
     else:
         projects = all_projects
-        base_num = None
     run_rows, all_laeq = [], []
-    for i, proj in enumerate(projects, 1):
-        rn = base_num if base_num is not None else i
+    for proj in projects:
+        # The payload lists runs in run_number order, so the stored number and
+        # the position agree; prefer the stored one and fall back to the
+        # position only for a payload that carries none.
+        rn = proj.get('run_number') or (all_projects.index(proj) + 1)
         st = _run_stats(proj, true_laeq=get_run_prof_laeq(date, rn))
-        run_rows.append({'run': rn, 'start': proj['start'],
-                         'end': proj.get('end'), **st})
+        run_rows.append({'run': rn, 'source_file': proj.get('source_file'),
+                         'start': proj['start'], 'end': proj.get('end'), **st})
         all_laeq.extend(_expand_run(proj))
     # Meter-stored duration where available (a run stopped mid-period can
     # differ from its 1-second record count); falls back to n for runs
@@ -291,7 +303,8 @@ def reports_page():
     sessions_with_runs = [
         {
             'd': s['d'],
-            'runs': [{'n': i + 1, 'start': p['start'], 'end': p.get('end'), 'dur': p.get('n', 0)}
+            'runs': [{'n': p.get('run_number') or i + 1, 'src': p.get('source_file'),
+                      'start': p['start'], 'end': p.get('end'), 'dur': p.get('n', 0)}
                      for i, p in enumerate(s.get('projects', []))],
         }
         for s in reversed(all_sessions)
@@ -362,16 +375,27 @@ def api_generate_report():
     model          = data.get('model', 'claude-sonnet-5')
     thinking_level = data.get('thinking_level', 'none')
     run_number     = data.get('run_number')  # int or None = all runs
+    source_file    = (data.get('source_file') or '').strip() or None
     if run_number is not None:
         run_number = int(run_number)
 
     if not date:
         return jsonify({'error': 'session_date required'}), 400
 
-    result = _prepare_session_for_report(date, run_number)
+    # A single run is pinned by source_file. The clients send it alongside
+    # run_number; when only the number arrives (an older client) it is
+    # resolved to the source_file now, while the number is still current.
+    if source_file is None and run_number is not None:
+        result = _prepare_session_for_report(date, run_number=run_number)
+        if result:
+            source_file = result[1][0].get('source_file')
+    result = _prepare_session_for_report(date, run_number=run_number,
+                                         source_file=source_file)
     if not result:
         return jsonify({'error': f'Session {date} not found'}), 404
     sess, run_rows, all_laeq, total_s = result
+    if source_file is not None:
+        run_number = run_rows[0]['run']
 
     tmpl = get_report_template(template_id) if template_id else None
     if not tmpl:
@@ -380,7 +404,7 @@ def api_generate_report():
     if not tmpl:
         return jsonify({'error': 'No report templates configured'}), 400
 
-    session_data_block, _ = _build_session_data_block(sess, run_rows, all_laeq, total_s)
+    session_data_block, stats = _build_session_data_block(sess, run_rows, all_laeq, total_s)
     prompt = tmpl['prompt'].replace('{{session_data}}', session_data_block)
 
     try:
@@ -389,6 +413,20 @@ def api_generate_report():
         return jsonify({'error': str(e)}), 500
 
     run_label = f"Run {run_number}" if run_number else "All runs"
+    # Everything view_report renders, frozen at generation time. The narrative
+    # sections were already frozen; the statistics table was recomputed live,
+    # so a later backfill or re-import made a report disagree with itself.
+    snapshot = {
+        'session_data_block': session_data_block,
+        'stats': stats,
+        'run_rows': run_rows,
+        'sess': _snapshot_sess(sess),
+        'total_s': total_s,
+        'generated_from': {
+            'dates': [date],
+            'source_files': [r.get('source_file') for r in run_rows],
+        },
+    }
     rid = save_generated_report(
         session_date=date,
         template_id=tmpl['id'],
@@ -401,11 +439,61 @@ def api_generate_report():
         cost_usd=cost_usd,
         run_number=run_number,
         run_label=run_label,
+        source_file=source_file,
+        input_snapshot_json=json.dumps(snapshot),
     )
     print(f"Report generated [{date}] template={tmpl['name']} model={model} "
           f"thinking={thinking_level}: {tok_in}/{tok_out} tokens ≈ ${cost_usd:.4f}")
     return jsonify({'report_id': rid, 'cost_usd': cost_usd,
                     'input_tokens': tok_in, 'output_tokens': tok_out})
+
+
+_SESS_SNAPSHOT_KEYS = ('d', 'name', 'loc', 'post', 'lat', 'lng', 'notes', 'wx')
+
+
+def _snapshot_sess(sess):
+    """The session metadata the report template reads — not the projects."""
+    return {k: sess.get(k) for k in _SESS_SNAPSHOT_KEYS}
+
+
+_SESSION_STAT_LABELS = (('session_leq', 'LAeq'), ('session_la10', 'LA10'),
+                        ('session_la90', 'LA90'), ('session_lmax', 'LAmax'),
+                        ('session_pmx', 'LCpeak max'))
+_RUN_STAT_LABELS = (('leq', 'LAeq'), ('la10', 'LA10'), ('la50', 'LA50'),
+                    ('la90', 'LA90'), ('lmax', 'LAmax'), ('pmx', 'LCpeak'),
+                    ('pct85', 'time ≥85 dB'), ('n', 'samples'))
+
+
+def _snapshot_diffs(snap, stats, run_rows, total_s):
+    """Name every displayed figure whose live value differs from the snapshot.
+
+    Returns strings like 'LAeq 71.2 → 71.5' or 'PROJ0003 LA90 …'. Only what
+    report.html shows is compared; an empty list means the page would read the
+    same either way.
+    """
+    diffs = []
+    s_stats = snap.get('stats') or {}
+    for key, label in _SESSION_STAT_LABELS:
+        if s_stats.get(key) != stats.get(key):
+            diffs.append(f"{label} {s_stats.get(key)} → {stats.get(key)}")
+    if snap.get('total_s') != total_s:
+        diffs.append(f"total duration {snap.get('total_s')} s → {total_s} s")
+    live_by_src = {r.get('source_file'): r for r in run_rows if r.get('source_file')}
+    live_by_num = {r.get('run'): r for r in run_rows}
+    for sr in snap.get('run_rows') or []:
+        lr = live_by_src.get(sr.get('source_file')) if sr.get('source_file') else None
+        if lr is None and not sr.get('source_file'):
+            lr = live_by_num.get(sr.get('run'))
+        tag = sr.get('source_file') or f"run {sr.get('run')}"
+        if lr is None:
+            diffs.append(f"{tag} is no longer stored")
+            continue
+        if lr.get('run') != sr.get('run'):
+            diffs.append(f"{tag} was run {sr.get('run')}, now run {lr.get('run')}")
+        for key, label in _RUN_STAT_LABELS:
+            if sr.get(key) != lr.get(key):
+                diffs.append(f"{tag} {label} {sr.get(key)} → {lr.get(key)}")
+    return diffs
 
 
 @bp.route('/reports/<int:rid>')
@@ -418,13 +506,48 @@ def view_report(rid):
     sections = json.loads(stored['sections_json'])
     date = stored['session_date']
 
-    result = _prepare_session_for_report(date, stored.get('run_number'))
+    # Live figures, by the pinned identity where the report recorded one. A
+    # legacy row (generated before provenance was stored) has only the
+    # position, and that is all it can be resolved by.
+    result = _prepare_session_for_report(date, run_number=stored.get('run_number'),
+                                         source_file=stored.get('source_file'))
     if result:
         sess, run_rows, all_laeq, total_s = result
         _, stats = _build_session_data_block(sess, run_rows, all_laeq, total_s)
     else:
         sess, run_rows, stats = {'d': date}, [], {}
         total_s = 0
+
+    # The snapshot is what the report is rendered from when it has one; the
+    # live values only ever produce a notice, never a silent swap. An evidence
+    # document shows the inputs it was generated from.
+    snap = None
+    if stored.get('input_snapshot_json'):
+        try:
+            snap = json.loads(stored['input_snapshot_json'])
+        except ValueError:
+            snap = None
+    provenance = {'source_file': stored.get('source_file'),
+                  'state': None, 'diffs': [], 'message': ''}
+    if snap is not None:
+        if result:
+            provenance['diffs'] = _snapshot_diffs(snap, stats, run_rows, total_s)
+            provenance['state'] = 'differs' if provenance['diffs'] else 'snapshot'
+        else:
+            provenance['state'] = 'missing'
+            provenance['message'] = (
+                'The measurement this report was generated from is no longer stored; '
+                'the figures shown are the ones used when the report was generated.')
+        sess     = snap.get('sess') or {'d': date}
+        run_rows = snap.get('run_rows') or []
+        stats    = snap.get('stats') or {}
+        total_s  = snap.get('total_s') or 0
+    else:
+        provenance['state'] = 'no_snapshot'
+        provenance['message'] = (
+            'No snapshot — this report was generated before provenance was recorded. '
+            'The figures shown are computed from the database as it is now and may '
+            'differ from those the narrative was written against.')
 
     usage_info = {
         'input_tokens':  stored.get('input_tokens'),
@@ -452,6 +575,7 @@ def view_report(rid):
         sections=sections,
         usage_info=usage_info,
         generated_at=stored.get('created_at', ''),
+        provenance=provenance,
     )
 
 

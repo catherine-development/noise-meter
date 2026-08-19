@@ -1729,6 +1729,210 @@ def main(meas_root):
         check('chart profile' in _render,
               'and the fallback says so on the rows it produced')
 
+        # ── 11. report provenance: pinned runs and input snapshots (F4) ───────
+        print('\n11. report provenance: pinned runs and input snapshots (F4)')
+        # generated_reports stored only run_number, and view_report selected
+        # all_projects[run_number-1] — so once a re-import renumbered the
+        # session, a stored report re-pointed at a different physical run. And
+        # the statistics table was recomputed live while the narrative was
+        # frozen, so a later backfill made a report disagree with itself. The
+        # report now pins its run by source_file and renders from a snapshot
+        # of its inputs; live values only ever produce a notice.
+        #
+        # Its own Side, noise_app dropped with it (see section 10). Claude is
+        # stubbed at the module boundary: the route reads _call_claude through
+        # the reports module noise_app registered, which is this Side's.
+        sys.modules.pop('noise_app', None)
+        rp = Side(os.path.join(tmp, 'prov.db'))
+        rp.db.import_sessions(_copy.deepcopy(sessions), metadata=META)
+        _rapp = importlib.import_module('noise_app').app
+        _rapp.config['TESTING'] = True
+        _rcl = _rapp.test_client()
+        with _rcl.session_transaction() as _s:
+            _s['user'] = 'test'
+            _s['logged_in'] = True
+            _s['_csrf_token'] = SUITE_CSRF
+        _FAKE_SECTIONS = {k: f'<p>{k}</p>' for k in (
+            'executive_summary', 'methodology', 'results_narrative',
+            'compliance', 'conclusions', 'recommendations')}
+        _prompts = []
+
+        def _fake_claude(prompt, model, thinking_level):
+            _prompts.append(prompt)
+            return _FAKE_SECTIONS, 100, 50, 0.0015
+        rp.reports._call_claude = _fake_claude
+
+        def _gr(rid):
+            return dict(rp.sql('SELECT * FROM generated_reports WHERE id=?', rid)[0])
+
+        def _src_of(n):
+            return rp.sql('SELECT r.source_file FROM runs r JOIN sessions s ON s.id=r.session_id '
+                          'WHERE s.date=? AND r.run_number=?', SESSION_DATE, n)[0]['source_file']
+
+        check(_src_of(5) == 'PROJ0005', 'baseline: run 5 is PROJ0005', _src_of(5))
+
+        # (a) Generated with the run's identity, as both clients now send it.
+        _r = _rcl.post('/api/generate-report', headers=CSRF_HDR, json={
+            'session_date': SESSION_DATE, 'run_number': 5, 'source_file': 'PROJ0005',
+            'model': 'claude-sonnet-5', 'thinking_level': 'none'})
+        check(_r.status_code == 200, 'generate-report for run 5 returns 200',
+              f'{_r.status_code} {_r.get_data(as_text=True)[:200]}')
+        rid5 = _r.get_json()['report_id']
+        row5 = _gr(rid5)
+        check(row5['source_file'] == 'PROJ0005', 'the report stores the run source_file',
+              str(row5['source_file']))
+        check(row5['run_number'] == 5 and row5['run_label'] == 'Run 5',
+              'and the run number as a label', f"{row5['run_number']} {row5['run_label']}")
+        snap5 = json.loads(row5['input_snapshot_json'] or 'null')
+        check(isinstance(snap5, dict), 'an input snapshot is stored')
+        check(set(snap5) >= {'session_data_block', 'stats', 'run_rows', 'sess',
+                             'total_s', 'generated_from'},
+              'the snapshot carries every input view_report renders', str(sorted(snap5)))
+        check(snap5['run_rows'][0]['source_file'] == 'PROJ0005' and snap5['run_rows'][0]['run'] == 5,
+              'snapshot run row names the run by source_file and number')
+        check(snap5['generated_from'] == {'dates': [SESSION_DATE], 'source_files': ['PROJ0005']},
+              'generated_from records the date and source_file', str(snap5['generated_from']))
+        check(snap5['session_data_block'] == _prompts[-1].split('\n\n', 1)[1]
+              .rsplit('\n\nProduce a professional', 1)[0]
+              or snap5['session_data_block'] in _prompts[-1],
+              'the stored data block is the one the prompt was built from')
+        check(snap5['stats'].get('session_leq') is not None, 'snapshot stats hold the session LAeq')
+        snap_leq5 = snap5['run_rows'][0]['leq']
+
+        # (b) An older client that sends only run_number: resolved to the
+        # source_file now, while the number is still current.
+        _r = _rcl.post('/api/generate-report', headers=CSRF_HDR, json={
+            'session_date': SESSION_DATE, 'run_number': 3})
+        check(_r.status_code == 200, 'generate-report by run_number alone returns 200',
+              str(_r.status_code))
+        rid3 = _r.get_json()['report_id']
+        check(_gr(rid3)['source_file'] == _src_of(3) == 'PROJ0003',
+              'run_number alone is resolved to its source_file', str(_gr(rid3)['source_file']))
+
+        # A whole-session report has no single run to pin.
+        _r = _rcl.post('/api/generate-report', headers=CSRF_HDR, json={'session_date': SESSION_DATE})
+        check(_r.status_code == 200, 'a whole-session report generates', str(_r.status_code))
+        rid_all = _r.get_json()['report_id']
+        snap_all = json.loads(_gr(rid_all)['input_snapshot_json'])
+        check(_gr(rid_all)['source_file'] is None and
+              len(snap_all['generated_from']['source_files']) == len(snap_all['run_rows']) > 1,
+              'a whole-session report pins no single run but lists every source_file')
+
+        # (c) Viewing it while nothing has changed: no notice, source shown.
+        _h = _rcl.get(f'/reports/{rid5}').get_data(as_text=True)
+        check('id="provenanceNotice"' not in _h, 'an unchanged report shows no provenance notice')
+        check('PROJ0005' in _h, 'the report names its source run')
+        check(f'<td>5</td>' in _h and str(snap_leq5) in _h, 'and shows run 5 and its LAeq')
+
+        # (d) A WP1-style renumbering: PROJ0001 is gone from the card, so a
+        # complete-date re-import deletes it and PROJ0005 becomes run 4.
+        gone_p = _copy.deepcopy(sessions)
+        gone_p[0]['projects'] = gone_p[0]['projects'][1:]
+        gone_p[0]['complete_date'] = True
+        gone_p[0]['skipped_files'] = []
+        rp.db.import_sessions(gone_p, metadata=META)
+        check(_src_of(4) == 'PROJ0005', 'after the re-import PROJ0005 is run 4', _src_of(4))
+        _h = _rcl.get(f'/reports/{rid5}').get_data(as_text=True)
+        check('data-state="differs"' in _h,
+              'the report notices that live values differ from its snapshot')
+        def _notice(html):
+            i = html.find('<ul>', html.find('provenanceNotice'))
+            return html[i:html.find('</ul>', i) + 5] if i > 0 else '(no notice)'
+        check('PROJ0005 was run 5, now run 4' in _h, 'and says the run moved', _notice(_h))
+        check(f'<td>5</td>' in _h and str(snap_leq5) in _h,
+              'the table still shows the original run 5 and its figures')
+        # The report generated by run_number alone is pinned the same way.
+        check('PROJ0003 was run 3, now run 2' in _rcl.get(f'/reports/{rid3}').get_data(as_text=True),
+              'a report generated by run_number alone follows its run too')
+
+        # A backfill that changes a stored figure: the page keeps the snapshot
+        # value and names the difference, rather than swapping silently.
+        rp.exec('UPDATE runs SET avg_laeq = avg_laeq + 1.0 WHERE source_file=? AND session_id IN '
+                '(SELECT id FROM sessions WHERE date=?)', 'PROJ0005', SESSION_DATE)
+        _h = _rcl.get(f'/reports/{rid5}').get_data(as_text=True)
+        _new_leq = round(snap_leq5 + 1.0, 1)
+        check(f'PROJ0005 LAeq {snap_leq5} → {_new_leq}' in _h,
+              'a changed stored LAeq is named in the notice', _notice(_h))
+        check(f'<td class="">{snap_leq5}</td>' in _h or f'<td class="td-hi">{snap_leq5}</td>' in _h,
+              'the table shows the snapshot LAeq, not the live one')
+        check(f'<td class="">{_new_leq}</td>' not in _h and f'<td class="td-hi">{_new_leq}</td>' not in _h,
+              'the live LAeq appears only in the notice')
+
+        # (e) The run is gone altogether: the snapshot renders under a banner.
+        rp.exec('DELETE FROM runs WHERE source_file=? AND session_id IN '
+                '(SELECT id FROM sessions WHERE date=?)', 'PROJ0005', SESSION_DATE)
+        _r = _rcl.get(f'/reports/{rid5}')
+        check(_r.status_code == 200, 'a report whose run is gone still renders', str(_r.status_code))
+        _h = _r.get_data(as_text=True)
+        check('data-state="missing"' in _h and 'no longer stored' in _h,
+              'with a banner saying the measurement is no longer stored')
+        check(str(snap_leq5) in _h and '<td>5</td>' in _h, 'and the snapshot figures')
+
+        # (f) A legacy row: no source_file, no snapshot. Renders live with a note.
+        rp.exec('INSERT INTO generated_reports (session_date, run_number, run_label, model, '
+                'thinking_level, sections_json) VALUES (?,?,?,?,?,?)',
+                SESSION_DATE, 2, 'Run 2', 'claude-sonnet-5', 'none', json.dumps(_FAKE_SECTIONS))
+        rid_legacy = rp.sql('SELECT MAX(id) AS id FROM generated_reports')[0]['id']
+        _r = _rcl.get(f'/reports/{rid_legacy}')
+        check(_r.status_code == 200, 'a legacy report renders', str(_r.status_code))
+        _h = _r.get_data(as_text=True)
+        check('data-state="no_snapshot"' in _h and 'before provenance was recorded' in _h,
+              'with the no-snapshot note')
+        _live2 = rp.reports._prepare_session_for_report(SESSION_DATE, run_number=2)[1][0]
+        check(f'<td>2</td>' in _h and str(_live2['leq']) in _h and _live2['source_file'] in _h,
+              'and the live figures for the run at that position')
+
+        # (g) Listings carry the source_file and not the snapshot blob.
+        _lst = _rcl.get('/api/generated-reports').get_json()
+        _by_id = {r['id']: r for r in _lst}
+        check(_by_id[rid5]['source_file'] == 'PROJ0005', 'api listing shows the source_file')
+        check(all('input_snapshot_json' not in r for r in _lst),
+              'and leaves the snapshot blob out')
+        _h = _rcl.get('/reports').get_data(as_text=True)
+        check('PROJ0005' in _h and 'PROJ0003' in _h, 'the history table names the pinned runs')
+        check('data-src="' in _h, 'the run selector carries each run source_file')
+
+        # (h) Migration: a database whose generated_reports predates the
+        # provenance columns gets them, and single-run rows are backfilled
+        # through the positional join — the one moment it is still trustworthy.
+        _OLD_GR = """
+            CREATE TABLE generated_reports (
+              id INTEGER PRIMARY KEY, session_date TEXT NOT NULL, run_number INTEGER,
+              run_label TEXT, template_id INTEGER, template_name TEXT, model TEXT NOT NULL,
+              thinking_level TEXT NOT NULL DEFAULT 'none', sections_json TEXT NOT NULL,
+              input_tokens INTEGER, output_tokens INTEGER, cost_usd REAL,
+              created_at TEXT DEFAULT (datetime('now', 'localtime')));
+            INSERT INTO sessions(id,date) VALUES(1,'2026-08-12');
+            INSERT INTO runs(id,session_id,run_number,source_file)
+              VALUES(1,1,1,'PROJ0001'),(2,1,2,'PROJ0002');
+            INSERT INTO generated_reports(id,session_date,run_number,run_label,model,sections_json)
+              VALUES(1,'2026-08-12',2,'Run 2','m','{}'),
+                    (2,'2026-08-12',NULL,'All runs','m','{}');"""
+        _p = _build('old_reports.db', _OLD_GR)
+        _err = _migrate_only(_p)
+        check(_err is None, 'pre-provenance generated_reports migrates', repr(_err))
+        _cx = _sq.connect(_p)
+        _cols = {r[1] for r in _cx.execute('PRAGMA table_info(generated_reports)')}
+        check({'source_file', 'input_snapshot_json'} <= _cols, 'the two columns are added', str(sorted(_cols)))
+        _rows = _cx.execute('SELECT id, source_file, input_snapshot_json FROM generated_reports ORDER BY id').fetchall()
+        check(_rows[0][1] == 'PROJ0002', 'a single-run row is backfilled by position', str(_rows))
+        check(_rows[1][1] is None, 'a whole-session row stays unpinned', str(_rows))
+        check(all(r[2] is None for r in _rows), 'no snapshot is invented for old rows')
+        _cx.close()
+        _err = _migrate_only(_p)
+        check(_err is None, 'and the migration is idempotent', repr(_err))
+        _cx = _sq.connect(_p)
+        check(_cx.execute('SELECT source_file FROM generated_reports WHERE id=1').fetchone()[0] == 'PROJ0002',
+              'a second run leaves the backfill alone')
+        _cx.close()
+
+        # The clients send the identity alongside the number.
+        _idx_src = open(os.path.join(REPO, 'templates', 'index.html')).read()
+        check('body.source_file = _roptSrc' in _idx_src and 'proj.source_file);' in _idx_src,
+              'index.html posts source_file with run_number')
+        _rep_src = open(os.path.join(REPO, 'templates', 'reports.html')).read()
+        check('body.source_file = src' in _rep_src, 'reports.html posts source_file with run_number')
+
         print(f'\nAll {_checks} checks passed.')
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
