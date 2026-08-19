@@ -327,192 +327,227 @@ def import_sessions(sessions_data, metadata=None):
     """Import sessions. Per-session metadata/weather (as sent by
     get_sessions_since() for peer sync) takes precedence when present;
     the `metadata` kwarg is the fallback used by the single-session manual
-    upload form, which has no per-session metadata of its own."""
+    upload form, which has no per-session metadata of its own.
+
+    Run identity. Runs are upserted on (session_id, source_file) — the PROJ
+    folder the measurement came from, which is the meter's own name for it and
+    the only key that survives a partial or re-ordered upload. Keyed on the
+    position within the payload, as this used to be, a ZIP of just PROJ0004
+    became "run 1" and overwrote PROJ0001. Payload rows that carry no
+    source_file (JSON exports made before the column existed, or a peer on the
+    older schema) fall back to the positional key, matching the row at that
+    run_number rather than creating a duplicate; the stored source_file is
+    kept through COALESCE.
+
+    After the upsert, run_number is reassigned from the stored order for the
+    whole session (by source_file, then start_time), so it is display metadata
+    that always reflects what the database holds — and the session aggregates
+    are recomputed from every stored run rather than copied from the payload,
+    which may have been a partial upload.
+
+    Deletion. A session dict may carry complete_date=True (parse_zip sets it
+    when the upload held the whole date folder). Only then are stored runs
+    absent from the payload deleted — and never one named in the session's
+    skipped_files, which are runs the parser saw but could not read. Payloads
+    without the flag (partial uploads, JSON, peer sync) only add or refresh.
+    """
     meta = metadata or {}
     conn = get_db()
     imported = 0
-    for sess in sessions_data:
-        date = sess['d']
-        projects = sess.get('projects', [])
-        recorder_name  = sess.get('name', meta.get('recorder_name')) or None
-        location_label = sess.get('loc',  meta.get('location_label')) or None
-        postcode       = sess.get('post', meta.get('postcode')) or None
-        lat            = sess.get('lat',  meta.get('lat'))
-        lng            = sess.get('lng',  meta.get('lng'))
-        notes          = sess.get('notes', meta.get('notes')) or None
-        conn.execute(
-            'INSERT INTO sessions '
-            '  (date, run_count, avg_laeq, max_laeq, recorder_name, location_label, postcode, lat, lng, notes) '
-            'VALUES (?,?,?,?,?,?,?,?,?,?) '
-            'ON CONFLICT(date) DO UPDATE SET '
-            '  run_count=excluded.run_count, '
-            '  avg_laeq=excluded.avg_laeq, '
-            '  max_laeq=excluded.max_laeq, '
-            '  recorder_name=COALESCE(excluded.recorder_name, sessions.recorder_name), '
-            '  location_label=COALESCE(excluded.location_label, sessions.location_label), '
-            '  postcode=COALESCE(excluded.postcode, sessions.postcode), '
-            '  lat=COALESCE(excluded.lat, sessions.lat), '
-            '  lng=COALESCE(excluded.lng, sessions.lng), '
-            '  notes=COALESCE(excluded.notes, sessions.notes), '
-            '  imported_at=datetime(\'now\')',
-            (date, len(projects), sess.get('avg', 0), sess.get('mx', 0),
-             recorder_name, location_label, postcode, lat, lng, notes)
-        )
-        wx = sess.get('wx')
-        if wx:
+    dates = []
+    try:
+        for sess in sessions_data:
+            date = sess['d']
+            projects = sess.get('projects', [])
+            recorder_name  = sess.get('name', meta.get('recorder_name')) or None
+            location_label = sess.get('loc',  meta.get('location_label')) or None
+            postcode       = sess.get('post', meta.get('postcode')) or None
+            lat            = sess.get('lat',  meta.get('lat'))
+            lng            = sess.get('lng',  meta.get('lng'))
+            notes          = sess.get('notes', meta.get('notes')) or None
+            # run_count / avg_laeq / max_laeq are deliberately not taken from the
+            # payload: they describe whatever was uploaded, not what is stored.
+            # _recompute_session_aggregates() below fills them from the runs.
             conn.execute(
-                'INSERT INTO weather (date, wind_speed, wind_dir, temp_min, temp_max, precip, hourly_json) '
+                'INSERT INTO sessions '
+                '  (date, recorder_name, location_label, postcode, lat, lng, notes) '
                 'VALUES (?,?,?,?,?,?,?) '
                 'ON CONFLICT(date) DO UPDATE SET '
-                '  wind_speed=excluded.wind_speed, wind_dir=excluded.wind_dir, '
-                '  temp_min=excluded.temp_min,     temp_max=excluded.temp_max, '
-                '  precip=excluded.precip',
-                (date, wx.get('ws'), wx.get('wd'), wx.get('tn'), wx.get('tx'), wx.get('pr'), None)
+                '  recorder_name=COALESCE(excluded.recorder_name, sessions.recorder_name), '
+                '  location_label=COALESCE(excluded.location_label, sessions.location_label), '
+                '  postcode=COALESCE(excluded.postcode, sessions.postcode), '
+                '  lat=COALESCE(excluded.lat, sessions.lat), '
+                '  lng=COALESCE(excluded.lng, sessions.lng), '
+                '  notes=COALESCE(excluded.notes, sessions.notes), '
+                '  imported_at=datetime(\'now\')',
+                (date, recorder_name, location_label, postcode, lat, lng, notes)
             )
-        # Importing a date supersedes any earlier deletion of it, so drop the
-        # tombstone — otherwise a legitimate SD-card re-import would be deleted
-        # again the next time a peer replayed its full sync payload.
-        conn.execute('DELETE FROM deleted_sessions WHERE date=?', (date,))
-        sess_id = conn.execute('SELECT id FROM sessions WHERE date=?', (date,)).fetchone()['id']
-        for i, proj in enumerate(projects, 1):
-            _g = proj.get
-            conn.execute(
-                'INSERT INTO runs '
-                '  (session_id, run_number, start_time, n_samples, step, '
-                '   avg_laeq, min_laeq, max_laeq, max_lcpeak, max_laimax, '
-                '   laeq_json, lafmax_json, laimax_json, lcpeak_json, source_file, '
-                '   lceq, lae, lce, lafmax, lcfmax, lafmin, lcfmin, '
-                '   lasmax, lcsmax, lasmin, lcsmin, laieq, lcieq, '
-                '   laimax, lcimax, laimin, lcimin, laie, lcie, '
-                '   la_l01, la_l1, la_l5, la_l10, la_l50, la_l90, la_l95, la_l99, '
-                '   lapeak, lcpeak, '
-                '   lc_l01, lc_l1, lc_l5, lc_l10, lc_l50, lc_l90, lc_l95, lc_l99, '
-                '   spec_lfeq, spec_lffmax, spec_lffmin, spec_lfe, '
-                '   spec_lfsmax, spec_lfsmin, spec_lfieq, spec_lfimax, spec_lfimin, spec_lfie, '
-                '   spec_lff_l01, spec_lff_l1, spec_lff_l5, spec_lff_l10, '
-                '   spec_lff_l50, spec_lff_l90, spec_lff_l95, spec_lff_l99, '
-                '   prof_lafspl_json, prof_laeq_json, prof_lafmax_json, '
-                '   prof_lae_json, prof_lapeak_json, duration_s, full_scale, end_time) '
-                'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) '
-                'ON CONFLICT(session_id, run_number) DO UPDATE SET '
-                '  start_time=excluded.start_time, n_samples=excluded.n_samples, '
-                '  step=excluded.step, avg_laeq=excluded.avg_laeq, '
-                '  min_laeq=excluded.min_laeq, max_laeq=excluded.max_laeq, '
-                '  max_lcpeak=excluded.max_lcpeak, max_laimax=excluded.max_laimax, '
-                '  laeq_json=excluded.laeq_json, lafmax_json=excluded.lafmax_json, '
-                '  laimax_json=excluded.laimax_json, lcpeak_json=excluded.lcpeak_json, '
-                '  source_file=excluded.source_file, '
-                # GLOB-derived scalar columns: COALESCE so that a push from older
-                # code (which sends NULL) never overwrites an already-backfilled value.
-                '  lceq=COALESCE(excluded.lceq,runs.lceq), '
-                '  lae=COALESCE(excluded.lae,runs.lae), '
-                '  lce=COALESCE(excluded.lce,runs.lce), '
-                '  lafmax=COALESCE(excluded.lafmax,runs.lafmax), '
-                '  lcfmax=COALESCE(excluded.lcfmax,runs.lcfmax), '
-                '  lafmin=COALESCE(excluded.lafmin,runs.lafmin), '
-                '  lcfmin=COALESCE(excluded.lcfmin,runs.lcfmin), '
-                '  lasmax=COALESCE(excluded.lasmax,runs.lasmax), '
-                '  lcsmax=COALESCE(excluded.lcsmax,runs.lcsmax), '
-                '  lasmin=COALESCE(excluded.lasmin,runs.lasmin), '
-                '  lcsmin=COALESCE(excluded.lcsmin,runs.lcsmin), '
-                '  laieq=COALESCE(excluded.laieq,runs.laieq), '
-                '  lcieq=COALESCE(excluded.lcieq,runs.lcieq), '
-                '  laimax=COALESCE(excluded.laimax,runs.laimax), '
-                '  lcimax=COALESCE(excluded.lcimax,runs.lcimax), '
-                '  laimin=COALESCE(excluded.laimin,runs.laimin), '
-                '  lcimin=COALESCE(excluded.lcimin,runs.lcimin), '
-                '  laie=COALESCE(excluded.laie,runs.laie), '
-                '  lcie=COALESCE(excluded.lcie,runs.lcie), '
-                '  la_l01=COALESCE(excluded.la_l01,runs.la_l01), '
-                '  la_l1=COALESCE(excluded.la_l1,runs.la_l1), '
-                '  la_l5=COALESCE(excluded.la_l5,runs.la_l5), '
-                '  la_l10=COALESCE(excluded.la_l10,runs.la_l10), '
-                '  la_l50=COALESCE(excluded.la_l50,runs.la_l50), '
-                '  la_l90=COALESCE(excluded.la_l90,runs.la_l90), '
-                '  la_l95=COALESCE(excluded.la_l95,runs.la_l95), '
-                '  la_l99=COALESCE(excluded.la_l99,runs.la_l99), '
-                '  lapeak=COALESCE(excluded.lapeak,runs.lapeak), '
-                '  lcpeak=COALESCE(excluded.lcpeak,runs.lcpeak), '
-                '  lc_l01=COALESCE(excluded.lc_l01,runs.lc_l01), '
-                '  lc_l1=COALESCE(excluded.lc_l1,runs.lc_l1), '
-                '  lc_l5=COALESCE(excluded.lc_l5,runs.lc_l5), '
-                '  lc_l10=COALESCE(excluded.lc_l10,runs.lc_l10), '
-                '  lc_l50=COALESCE(excluded.lc_l50,runs.lc_l50), '
-                '  lc_l90=COALESCE(excluded.lc_l90,runs.lc_l90), '
-                '  lc_l95=COALESCE(excluded.lc_l95,runs.lc_l95), '
-                '  lc_l99=COALESCE(excluded.lc_l99,runs.lc_l99), '
-                '  spec_lfeq=COALESCE(excluded.spec_lfeq,runs.spec_lfeq), '
-                '  spec_lffmax=COALESCE(excluded.spec_lffmax,runs.spec_lffmax), '
-                '  spec_lffmin=COALESCE(excluded.spec_lffmin,runs.spec_lffmin), '
-                '  spec_lfe=COALESCE(excluded.spec_lfe,runs.spec_lfe), '
-                '  spec_lfsmax=COALESCE(excluded.spec_lfsmax,runs.spec_lfsmax), '
-                '  spec_lfsmin=COALESCE(excluded.spec_lfsmin,runs.spec_lfsmin), '
-                '  spec_lfieq=COALESCE(excluded.spec_lfieq,runs.spec_lfieq), '
-                '  spec_lfimax=COALESCE(excluded.spec_lfimax,runs.spec_lfimax), '
-                '  spec_lfimin=COALESCE(excluded.spec_lfimin,runs.spec_lfimin), '
-                '  spec_lfie=COALESCE(excluded.spec_lfie,runs.spec_lfie), '
-                '  spec_lff_l01=COALESCE(excluded.spec_lff_l01,runs.spec_lff_l01), '
-                '  spec_lff_l1=COALESCE(excluded.spec_lff_l1,runs.spec_lff_l1), '
-                '  spec_lff_l5=COALESCE(excluded.spec_lff_l5,runs.spec_lff_l5), '
-                '  spec_lff_l10=COALESCE(excluded.spec_lff_l10,runs.spec_lff_l10), '
-                '  spec_lff_l50=COALESCE(excluded.spec_lff_l50,runs.spec_lff_l50), '
-                '  spec_lff_l90=COALESCE(excluded.spec_lff_l90,runs.spec_lff_l90), '
-                '  spec_lff_l95=COALESCE(excluded.spec_lff_l95,runs.spec_lff_l95), '
-                '  spec_lff_l99=COALESCE(excluded.spec_lff_l99,runs.spec_lff_l99), '
-                '  prof_lafspl_json=COALESCE(excluded.prof_lafspl_json,runs.prof_lafspl_json), '
-                '  prof_laeq_json=COALESCE(excluded.prof_laeq_json,runs.prof_laeq_json), '
-                '  prof_lafmax_json=COALESCE(excluded.prof_lafmax_json,runs.prof_lafmax_json), '
-                '  prof_lae_json=COALESCE(excluded.prof_lae_json,runs.prof_lae_json), '
-                '  prof_lapeak_json=COALESCE(excluded.prof_lapeak_json,runs.prof_lapeak_json), '
-                '  duration_s=COALESCE(excluded.duration_s,runs.duration_s), '
-                '  full_scale=COALESCE(excluded.full_scale,runs.full_scale), '
-                '  end_time=COALESCE(excluded.end_time,runs.end_time)',
-                (sess_id, i, proj['start'], proj['n'], proj.get('step', 1),
-                 proj['avg'], proj['mn'], proj['mx'], proj['pmx'], _g('pmxi'),
-                 json.dumps(_g('laeq_profile') or []),
-                 json.dumps(_g('lafmax_profile')) if _g('lafmax_profile') else None,
-                 json.dumps(_g('laimax_profile')) if _g('laimax_profile') else None,
-                 json.dumps(_g('lcpeak_profile') or []),
-                 _g('source_file'),
-                 _g('lceq'), _g('lae'), _g('lce'),
-                 _g('lafmax'), _g('lcfmax'), _g('lafmin'), _g('lcfmin'),
-                 _g('lasmax'), _g('lcsmax'), _g('lasmin'), _g('lcsmin'),
-                 _g('laieq'), _g('lcieq'), _g('laimax'), _g('lcimax'),
-                 _g('laimin'), _g('lcimin'), _g('laie'), _g('lcie'),
-                 _g('la_l01'), _g('la_l1'), _g('la_l5'),
-                 _g('la_l10'), _g('la_l50'), _g('la_l90'), _g('la_l95'), _g('la_l99'),
-                 _g('lapeak'), _g('lcpeak'),
-                 _g('lc_l01'), _g('lc_l1'), _g('lc_l5'),
-                 _g('lc_l10'), _g('lc_l50'), _g('lc_l90'), _g('lc_l95'), _g('lc_l99'),
-                 json.dumps(_g('spec_lfeq'))    if _g('spec_lfeq')    else None,
-                 json.dumps(_g('spec_lffmax'))  if _g('spec_lffmax')  else None,
-                 json.dumps(_g('spec_lffmin'))  if _g('spec_lffmin')  else None,
-                 json.dumps(_g('spec_lfe'))     if _g('spec_lfe')     else None,
-                 json.dumps(_g('spec_lfsmax'))  if _g('spec_lfsmax')  else None,
-                 json.dumps(_g('spec_lfsmin'))  if _g('spec_lfsmin')  else None,
-                 json.dumps(_g('spec_lfieq'))   if _g('spec_lfieq')   else None,
-                 json.dumps(_g('spec_lfimax'))  if _g('spec_lfimax')  else None,
-                 json.dumps(_g('spec_lfimin'))  if _g('spec_lfimin')  else None,
-                 json.dumps(_g('spec_lfie'))    if _g('spec_lfie')    else None,
-                 json.dumps(_g('spec_lff_l01')) if _g('spec_lff_l01') else None,
-                 json.dumps(_g('spec_lff_l1'))  if _g('spec_lff_l1')  else None,
-                 json.dumps(_g('spec_lff_l5'))  if _g('spec_lff_l5')  else None,
-                 json.dumps(_g('spec_lff_l10')) if _g('spec_lff_l10') else None,
-                 json.dumps(_g('spec_lff_l50')) if _g('spec_lff_l50') else None,
-                 json.dumps(_g('spec_lff_l90')) if _g('spec_lff_l90') else None,
-                 json.dumps(_g('spec_lff_l95')) if _g('spec_lff_l95') else None,
-                 json.dumps(_g('spec_lff_l99')) if _g('spec_lff_l99') else None,
-                 json.dumps(_g('prof_lafspl_json')) if _g('prof_lafspl_json') else None,
-                 json.dumps(_g('prof_laeq_json'))   if _g('prof_laeq_json')   else None,
-                 json.dumps(_g('prof_lafmax_json'))  if _g('prof_lafmax_json') else None,
-                 json.dumps(_g('prof_lae_json'))    if _g('prof_lae_json')    else None,
-                 json.dumps(_g('prof_lapeak_json')) if _g('prof_lapeak_json') else None,
-                 _g('duration_s'), _g('full_scale'), _g('end_time'))
-            )
-        imported += 1
-    conn.commit()
-    conn.close()
+            wx = sess.get('wx')
+            if wx:
+                conn.execute(
+                    'INSERT INTO weather (date, wind_speed, wind_dir, temp_min, temp_max, precip, hourly_json) '
+                    'VALUES (?,?,?,?,?,?,?) '
+                    'ON CONFLICT(date) DO UPDATE SET '
+                    '  wind_speed=excluded.wind_speed, wind_dir=excluded.wind_dir, '
+                    '  temp_min=excluded.temp_min,     temp_max=excluded.temp_max, '
+                    '  precip=excluded.precip',
+                    (date, wx.get('ws'), wx.get('wd'), wx.get('tn'), wx.get('tx'), wx.get('pr'), None)
+                )
+            # Importing a date supersedes any earlier deletion of it, so drop the
+            # tombstone — otherwise a legitimate SD-card re-import would be deleted
+            # again the next time a peer replayed its full sync payload.
+            conn.execute('DELETE FROM deleted_sessions WHERE date=?', (date,))
+            sess_id = conn.execute('SELECT id FROM sessions WHERE date=?', (date,)).fetchone()['id']
+
+            touched = []   # run ids written by this payload
+            for i, proj in enumerate(projects, 1):
+                touched.append(_upsert_run(conn, sess_id, i, proj))
+
+            if sess.get('complete_date') and touched:
+                # The upload held the whole date folder, so anything stored for the
+                # date that was not in it no longer exists on the card — except the
+                # files the parser saw and could not read, which are still there.
+                keep_files = [f for f in (sess.get('skipped_files') or []) if f]
+                ph_ids = ','.join('?' * len(touched))
+                sql = f'DELETE FROM runs WHERE session_id=? AND id NOT IN ({ph_ids})'
+                args = [sess_id, *touched]
+                if keep_files:
+                    sql += f' AND (source_file IS NULL OR source_file NOT IN ({",".join("?" * len(keep_files))}))'
+                    args += keep_files
+                conn.execute(sql, args)
+
+            _renumber_session_runs(conn, sess_id)
+            dates.append(date)
+            imported += 1
+        if dates:
+            _recompute_session_aggregates(conn, dates)
+        conn.commit()
+    finally:
+        # One transaction per call: a constraint failure part-way through
+        # leaves nothing behind, and the connection is released even then.
+        conn.close()
     return imported
+
+
+_PROF_COLS = [
+    'prof_lafspl_json', 'prof_laeq_json', 'prof_lafmax_json',
+    'prof_lae_json', 'prof_lapeak_json',
+]
+
+
+# Every run column written by import_sessions(), in INSERT order, paired with
+# the payload key that feeds it. A key of None means the value is computed in
+# _upsert_run(); `coalesce` marks the GLOB/PROF-derived columns that an older
+# peer sends as NULL, which must never overwrite a value already backfilled.
+_RUN_SCALAR_KEYS = (
+    'lceq', 'lae', 'lce', 'lafmax', 'lcfmax', 'lafmin', 'lcfmin',
+    'lasmax', 'lcsmax', 'lasmin', 'lcsmin', 'laieq', 'lcieq',
+    'laimax', 'lcimax', 'laimin', 'lcimin', 'laie', 'lcie',
+    'la_l01', 'la_l1', 'la_l5', 'la_l10', 'la_l50', 'la_l90', 'la_l95', 'la_l99',
+    'lapeak', 'lcpeak',
+    'lc_l01', 'lc_l1', 'lc_l5', 'lc_l10', 'lc_l50', 'lc_l90', 'lc_l95', 'lc_l99',
+)
+_RUN_SPEC_KEYS = tuple(col for col, _ in SPECTRAL_TABLES)
+_RUN_COALESCE_COLS = (_RUN_SCALAR_KEYS + _RUN_SPEC_KEYS + tuple(_PROF_COLS)
+                      + ('duration_s', 'full_scale', 'end_time'))
+_RUN_PLAIN_COLS = (
+    'start_time', 'n_samples', 'step', 'avg_laeq', 'min_laeq', 'max_laeq',
+    'max_lcpeak', 'max_laimax', 'laeq_json', 'lafmax_json', 'laimax_json',
+    'lcpeak_json',
+)
+
+
+def _run_row_values(proj):
+    """Column -> value for one payload run, excluding the identity columns."""
+    _g = proj.get
+
+    def _json_or_none(key):
+        v = _g(key)
+        return json.dumps(v) if v else None
+
+    vals = {
+        'start_time': proj['start'], 'n_samples': proj['n'],
+        'step': proj.get('step', 1),
+        'avg_laeq': proj['avg'], 'min_laeq': proj['mn'], 'max_laeq': proj['mx'],
+        'max_lcpeak': proj['pmx'], 'max_laimax': _g('pmxi'),
+        'laeq_json':   json.dumps(_g('laeq_profile') or []),
+        'lafmax_json': _json_or_none('lafmax_profile'),
+        'laimax_json': _json_or_none('laimax_profile'),
+        'lcpeak_json': json.dumps(_g('lcpeak_profile') or []),
+    }
+    for k in _RUN_SCALAR_KEYS:
+        vals[k] = _g(k)
+    for k in _RUN_SPEC_KEYS:
+        vals[k] = _json_or_none(k)
+    for k in _PROF_COLS:
+        vals[k] = _json_or_none(k)
+    vals['duration_s'] = _g('duration_s')
+    vals['full_scale'] = _g('full_scale')
+    vals['end_time'] = _g('end_time')
+    return vals
+
+
+def _upsert_sql(conflict):
+    cols = ('session_id', 'run_number', 'source_file') + _RUN_PLAIN_COLS + _RUN_COALESCE_COLS
+    sets = [f'{c}=excluded.{c}' for c in _RUN_PLAIN_COLS]
+    # GLOB-derived scalar, spectral and PROF columns: COALESCE so that a push
+    # from older code (which sends NULL) never overwrites a backfilled value.
+    sets += [f'{c}=COALESCE(excluded.{c},runs.{c})' for c in _RUN_COALESCE_COLS]
+    if conflict == 'source_file':
+        target = 'ON CONFLICT(session_id, source_file) WHERE source_file IS NOT NULL'
+        # run_number is left as stored; _renumber_session_runs() assigns it.
+    else:
+        target = 'ON CONFLICT(session_id, run_number)'
+        # A legacy row names no source_file, so keep whatever the stored row
+        # already knows about its identity.
+        sets.append('source_file=COALESCE(excluded.source_file,runs.source_file)')
+    return (f'INSERT INTO runs ({",".join(cols)}) VALUES ({",".join("?" * len(cols))}) '
+            f'{target} DO UPDATE SET {", ".join(sets)}'), cols
+
+
+_UPSERT_BY_FILE, _RUN_COLS = _upsert_sql('source_file')
+_UPSERT_BY_POSITION, _ = _upsert_sql('run_number')
+
+
+def _upsert_run(conn, sess_id, position, proj):
+    """Insert or refresh one run; returns its row id.
+
+    Keyed on source_file when the payload names one. A new row is inserted with
+    run_number NULL — the table's UNIQUE(session_id, run_number) would otherwise
+    reject it whenever another measurement already holds that position, which
+    is exactly the partial-upload case — and _renumber_session_runs() gives it
+    its number from the stored order afterwards.
+    """
+    vals = _run_row_values(proj)
+    src = proj.get('source_file') or None
+    if src:
+        vals.update(session_id=sess_id, run_number=None, source_file=src)
+        conn.execute(_UPSERT_BY_FILE, [vals[c] for c in _RUN_COLS])
+        return conn.execute(
+            'SELECT id FROM runs WHERE session_id=? AND source_file=?',
+            (sess_id, src)).fetchone()['id']
+    # Positional fallback for payloads that predate source_file.
+    vals.update(session_id=sess_id, run_number=position, source_file=None)
+    conn.execute(_UPSERT_BY_POSITION, [vals[c] for c in _RUN_COLS])
+    return conn.execute(
+        'SELECT id FROM runs WHERE session_id=? AND run_number=?',
+        (sess_id, position)).fetchone()['id']
+
+
+def _renumber_session_runs(conn, sess_id):
+    """Assign run_number 1..n across a session from the stored order.
+
+    Order is source_file (the meter's PROJnnnn, chronological on the card),
+    then start_time for rows without one, then id. Numbers are cleared first:
+    UNIQUE(session_id, run_number) is checked row by row, so a direct
+    renumber collides with itself whenever a run moves up.
+    """
+    ids = [r['id'] for r in conn.execute(
+        'SELECT id FROM runs WHERE session_id=? '
+        'ORDER BY source_file IS NULL, source_file, start_time, id', (sess_id,))]
+    conn.execute('UPDATE runs SET run_number=NULL WHERE session_id=?', (sess_id,))
+    conn.executemany('UPDATE runs SET run_number=? WHERE id=?',
+                     [(n, rid) for n, rid in enumerate(ids, 1)])
 
 
 def _wx(row):
@@ -520,12 +555,6 @@ def _wx(row):
         return None
     return {'ws': row['wind_speed'], 'wd': row['wind_dir'],
             'tn': row['temp_min'],   'tx': row['temp_max'], 'pr': row['precip']}
-
-
-_PROF_COLS = [
-    'prof_lafspl_json', 'prof_laeq_json', 'prof_lafmax_json',
-    'prof_lae_json', 'prof_lapeak_json',
-]
 
 
 def _run_to_dict(r, full=False):
@@ -959,8 +988,20 @@ def recompute_session_aggregates(dates=None):
     and CSV export.)
 
     Returns [(date, old_avg, new_avg)] for the sessions whose values changed.
+
+    import_sessions() calls the connection-taking form below after every
+    import, so the session row is derived from the stored runs rather than
+    from the payload, which may have been a partial upload.
     """
     conn = get_db()
+    changed = _recompute_session_aggregates(conn, dates)
+    conn.commit()
+    conn.close()
+    return changed
+
+
+def _recompute_session_aggregates(conn, dates=None):
+    """recompute_session_aggregates() on a caller-owned connection; caller commits."""
     if dates:
         ph = ','.join('?' * len(dates))
         sess = conn.execute(
@@ -990,8 +1031,6 @@ def recompute_session_aggregates(dates=None):
                 'UPDATE sessions SET avg_laeq=?, max_laeq=?, run_count=? WHERE id=?',
                 (new_avg, new_max, len(runs), s['id']))
             changed.append((s['date'], s['avg_laeq'], new_avg))
-    conn.commit()
-    conn.close()
     return changed
 
 

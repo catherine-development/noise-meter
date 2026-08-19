@@ -124,6 +124,14 @@ def main():
     print(f"Reading SD card from {sd_root}" + (f" (since {since})" if since else ""))
     sessions = parse_all(sd_root=sd_root, since=since)
 
+    # Pairs the parser found but could not read. Printed before anything else
+    # so a corrupt PROJ folder is never mistaken for a day with one run fewer.
+    skipped = list(getattr(sessions, 'skipped', ()) or ())
+    if skipped:
+        print(f"\nWARNING: {len(skipped)} GLOB/PROF pair(s) skipped:", file=sys.stderr)
+        for sk in skipped:
+            print(f"  {sk['path']}: {sk['reason']}", file=sys.stderr)
+
     if not sessions:
         print("No sessions found.")
         return
