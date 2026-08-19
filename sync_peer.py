@@ -3,12 +3,19 @@
 Pull new noise sessions from the peer Pi.
 Run every 15 minutes via noise-sync.timer.
 """
+import logging
 import os
 import json
 import urllib.request
 import urllib.error
 from pathlib import Path
 from datetime import datetime, timezone
+
+# Standalone script run by noise-sync.timer (systemd), not imported by
+# noise_app — its own basicConfig, going to stderr, which journald captures
+# just as it did print()'s stdout.
+logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s')
+log = logging.getLogger('noise.sync_peer')
 
 _env_file = Path(__file__).parent / '.env'
 if _env_file.exists():
@@ -27,14 +34,14 @@ PI_NAME   = os.environ.get('PI_NAME', 'Pi')
 IMPORT_KEY = os.environ.get('IMPORT_API_KEY', '')
 
 if not PEER_URL:
-    print("No PEER_URL set — skipping sync")
+    log.info('No PEER_URL set — skipping sync')
     exit(0)
 
 init_db()
 since = get_last_sync_time()
 synced_at = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S')
 
-print(f"Syncing from {PEER_URL} (since {since})")
+log.info('Syncing from %s (since %s)', PEER_URL, since)
 
 try:
     url = f"{PEER_URL.rstrip('/')}/api/sync?since={since}"
@@ -50,16 +57,16 @@ try:
 
     sessions = data.get('sessions', [])
     peer_name = data.get('pi_name', 'peer')
-    print(f"Received {len(sessions)} session(s) from {peer_name}")
+    log.info('Received %d session(s) from %s', len(sessions), peer_name)
 
     if sessions:
         n = import_sessions(sessions)
-        print(f"Imported {n} session(s)")
+        log.info('Imported %d session(s)', n)
     else:
-        print("Nothing new")
+        log.info('Nothing new')
 
     update_last_sync_time(synced_at)
 
 except Exception as e:
-    print(f"Sync failed: {e}")
+    log.error('Sync failed: %s', e)
     exit(1)

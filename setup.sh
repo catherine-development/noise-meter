@@ -62,6 +62,23 @@ $PIP install -r "$SCRIPT_DIR/requirements.txt" --quiet 2>/dev/null || \
     $PIP install --break-system-packages -r "$SCRIPT_DIR/requirements.txt" --quiet
 
 # Install systemd service
+#
+# gunicorn, not `python3 noise_app.py`'s Werkzeug dev server: the dev server
+# is single-process and single-threaded-by-default, is documented upstream as
+# not hardened for production traffic, and (Werkzeug's reloader aside) has no
+# process-management story of its own — Restart=always below is doing that
+# job either way, but gunicorn also gives clean worker timeouts.
+#
+# Exactly 1 worker, deliberately, not the usual "2 x CPU + 1": this app keeps
+# state that is only safe to share within a single process. get_db() opens a
+# fresh SQLite connection per call against one on-disk file — WAL mode lets
+# concurrent readers and writers coexist within a process, but SQLite's own
+# locking degrades badly under multiple *separate processes* hammering writes
+# at once, which is what a second gunicorn worker would mean. The rate
+# limiter in noise_app.py also uses in-memory storage (`storage_uri='memory://'`)
+# — a second worker would have its own separate counters, so the per-IP
+# request limits on /login and /upload would silently double. --threads 4
+# still gets a burst of concurrent requests handled inside that one worker.
 SERVICE_FILE="/etc/systemd/system/noise-app.service"
 echo "Installing systemd service..."
 sudo tee "$SERVICE_FILE" > /dev/null << EOF
@@ -74,7 +91,7 @@ Type=simple
 User=flightdata
 WorkingDirectory=$APP_DIR
 EnvironmentFile=$APP_DIR/.env
-ExecStart=$PYTHON $APP_DIR/noise_app.py
+ExecStart=/bin/bash -c '$PYTHON -m gunicorn -w 1 --threads 4 --timeout 120 -b 0.0.0.0:\${PORT:-5001} noise_app:app'
 Restart=always
 RestartSec=10
 
@@ -116,10 +133,45 @@ sudo systemctl daemon-reload
 sudo systemctl enable noise-sync.timer
 sudo systemctl start noise-sync.timer
 
+# Nightly database backup (03:00), 14-day local rotation, best-effort copy to
+# the peer Pi (backup_db.py; see its docstring for the restore command).
+# BACKUP_DIR defaults to /home/flightdata/backups; mkdir'd by backup_db.py
+# itself on first run.
+sudo tee /etc/systemd/system/noise-backup.service > /dev/null << EOF
+[Unit]
+Description=NOR140 Noise Database Backup
+After=network.target
+
+[Service]
+Type=oneshot
+User=flightdata
+WorkingDirectory=$APP_DIR
+EnvironmentFile=$APP_DIR/.env
+ExecStart=$PYTHON $APP_DIR/backup_db.py
+EOF
+
+sudo tee /etc/systemd/system/noise-backup.timer > /dev/null << EOF
+[Unit]
+Description=NOR140 Noise Database Backup Timer
+
+[Timer]
+OnCalendar=*-*-* 03:00:00
+RandomizedDelaySec=10min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable noise-backup.timer
+sudo systemctl start noise-backup.timer
+
 echo ""
 sleep 2
 sudo systemctl status noise-app --no-pager | head -12
 echo ""
 echo "==========================================="
 echo "Done! Visit http://$(hostname).local:5001"
+echo "Restore a backup: see the docstring in backup_db.py"
 echo "==========================================="
