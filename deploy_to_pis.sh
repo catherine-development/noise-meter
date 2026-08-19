@@ -78,7 +78,9 @@ deploy_to() {
     # Copy every tracked file in one pass, preserving the templates/, docs/
     # etc. subdirectory structure — a streamed tar instead of a scp loop plus
     # a separate list of directories to copy recursively.
-    tar -C "$LOCAL_DIR" -cf - -T "$FILELIST" | ssh "$HOST" "tar -xf - -C $REMOTE_DIR"
+    # COPYFILE_DISABLE stops macOS bsdtar embedding AppleDouble xattr headers
+    # that GNU tar on the Pi warns about on every file.
+    COPYFILE_DISABLE=1 tar -C "$LOCAL_DIR" -cf - -T "$FILELIST" | ssh "$HOST" "tar -xf - -C $REMOTE_DIR"
 
     # Record what's actually running, for /health and for whoever is
     # debugging "which commit is this?" at 11pm.
