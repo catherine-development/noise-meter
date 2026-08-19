@@ -122,11 +122,11 @@ h1{font-size:20px;font-weight:700;margin-bottom:4px}
   {% if sessions %}
   <div class="sess-list">
     {% for s in sessions %}
-    <div class="sess-row" id="row-{{ s.date }}">
+    <div class="sess-row" id="row-{{ s.key }}">
 
-      <div class="sess-summary" onclick="toggleRow('{{ s.date }}')">
-        <span class="sess-toggle" id="tog-{{ s.date }}">▶</span>
-        <span class="sess-date">{{ s.date }}</span>
+      <div class="sess-summary" onclick="toggleRow('{{ s.key }}')">
+        <span class="sess-toggle" id="tog-{{ s.key }}">▶</span>
+        <span class="sess-date">{{ s.date }}{% if multi_serial and s.instrument_serial %} <span style="font-size:10px;color:var(--text3,#888)" title="Instrument serial">{{ s.instrument_serial }}</span>{% endif %}</span>
         <span class="sess-stats">
           <span class="sess-stat">Runs&nbsp;<span>{{ s.run_count }}</span></span>
           <span class="sess-stat">LAeq&nbsp;<span>{{ '%.1f'|format(s.avg_laeq) }}&nbsp;dB</span></span>
@@ -134,24 +134,26 @@ h1{font-size:20px;font-weight:700;margin-bottom:4px}
         </span>
         <span class="sess-loc-preview">{{ [s.recorder_name, s.location_label, s.postcode] | select | join(' · ') or '— no metadata —' }}</span>
         <span class="sess-actions" onclick="event.stopPropagation()">
-          <a class="btn-icon" href="/?date={{ s.date }}">View</a>
-          <button class="btn-icon" onclick="toggleRow('{{ s.date }}')">Edit</button>
-          <button class="btn-icon btn-del" onclick="confirmDel('{{ s.date }}')">Delete</button>
+          <a class="btn-icon" href="/?date={{ s.date }}{% if s.instrument_serial %}&serial={{ s.instrument_serial | urlencode }}{% endif %}">View</a>
+          <button class="btn-icon" onclick="toggleRow('{{ s.key }}')">Edit</button>
+          <button class="btn-icon btn-del" onclick="confirmDel('{{ s.key }}')">Delete</button>
         </span>
       </div>
 
-      <div class="del-confirm" id="del-{{ s.date }}">
-        <span class="del-msg">Delete {{ s.date }} and all its runs? This cannot be undone.</span>
+      <div class="del-confirm" id="del-{{ s.key }}">
+        <span class="del-msg">Delete {{ s.date }}{% if multi_serial and s.instrument_serial %} (serial {{ s.instrument_serial }}){% endif %} and all its runs? This cannot be undone.</span>
         <form method="POST" action="/session/{{ s.date }}/delete" style="display:inline">
           <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <input type="hidden" name="serial" value="{{ s.instrument_serial }}">
           <button type="submit" class="btn-del-confirm">Yes, delete</button>
         </form>
-        <button class="btn-cancel" onclick="closeDel('{{ s.date }}')">Cancel</button>
+        <button class="btn-cancel" onclick="closeDel('{{ s.key }}')">Cancel</button>
       </div>
 
-      <div class="sess-edit" id="edit-{{ s.date }}">
+      <div class="sess-edit" id="edit-{{ s.key }}">
         <form method="POST" action="/session/{{ s.date }}/edit">
           <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <input type="hidden" name="serial" value="{{ s.instrument_serial }}">
           <div class="edit-grid">
             <div class="field">
               <label>Recorded by</label>
@@ -161,7 +163,7 @@ h1{font-size:20px;font-weight:700;margin-bottom:4px}
               <label>Postcode</label>
               <input type="text" name="postcode" value="{{ s.postcode or '' }}" placeholder="e.g. LS1 3AA">
             </div>
-            <div class="field" style="grid-column:span 2" id="loc-span-{{ s.date }}">
+            <div class="field" style="grid-column:span 2" id="loc-span-{{ s.key }}">
               <label>Location description</label>
               <input type="text" name="location_label" value="{{ s.location_label or '' }}" placeholder="e.g. Front of 42 High Street, outside pub entrance">
             </div>
@@ -179,7 +181,7 @@ h1{font-size:20px;font-weight:700;margin-bottom:4px}
           </div>
           <div class="edit-footer">
             <button type="submit" class="btn-save">Save</button>
-            <button type="button" class="btn-cancel" onclick="closeRow('{{ s.date }}')">Cancel</button>
+            <button type="button" class="btn-cancel" onclick="closeRow('{{ s.key }}')">Cancel</button>
           </div>
         </form>
       </div>

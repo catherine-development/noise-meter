@@ -118,8 +118,9 @@ textarea{resize:vertical;font-family:var(--font-data);font-size:12px;line-height
           <label for="selDate">Session</label>
           <select id="selDate" onchange="onSessionChange()">
             <option value="">— select a session —</option>
+            {% set serial_count = sessions_with_runs | map(attribute='serial') | unique | list | length %}
             {% for s in sessions_with_runs %}
-            <option value="{{ s.d }}">{{ s.d }}</option>
+            <option value="{{ loop.index0 }}">{{ s.d }}{% if serial_count > 1 and s.serial %} · SN {{ s.serial }}{% endif %}</option>
             {% endfor %}
           </select>
         </div>
@@ -283,16 +284,20 @@ textarea{resize:vertical;font-family:var(--font-data);font-size:12px;line-height
 <script>
 const SESSION_RUNS = {{ sessions_with_runs | tojson }};
 
+function selectedSession() {
+  const idx = document.getElementById('selDate').value;
+  return idx === '' ? null : SESSION_RUNS[parseInt(idx)];
+}
+
 function onSessionChange() {
-  const date = document.getElementById('selDate').value;
+  const sess = selectedSession();
   const runSel = document.getElementById('selRun');
   runSel.innerHTML = '';
-  if (!date) {
+  if (!sess) {
     runSel.disabled = true;
     runSel.innerHTML = '<option value="">— select session first —</option>';
     return;
   }
-  const sess = SESSION_RUNS.find(s => s.d === date);
   runSel.disabled = false;
   if (sess && sess.runs.length > 1) {
     runSel.innerHTML = '<option value="">All runs (session)</option>' +
@@ -325,20 +330,21 @@ function showNotice(id, msg, type) {
 }
 
 async function generateReport() {
-  const date = document.getElementById('selDate').value;
+  const sess = selectedSession();
   const runVal = document.getElementById('selRun').value;
   const templateId = document.getElementById('selTemplate').value;
   const model = document.getElementById('selModel').value;
   const thinking = document.getElementById('selThinking').value;
 
-  if (!date) { showNotice('genNotice', 'Please select a session.', 'err'); return; }
+  if (!sess) { showNotice('genNotice', 'Please select a session.', 'err'); return; }
 
   const btn = document.getElementById('btnGenerate');
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner"></span> Generating…';
   showNotice('genNotice', '', 'info');
 
-  const body = {session_date: date, template_id: parseInt(templateId), model, thinking_level: thinking};
+  const body = {session_date: sess.d, serial: sess.serial || '',
+                template_id: parseInt(templateId), model, thinking_level: thinking};
   if (runVal) {
     body.run_number = parseInt(runVal);
     // The run's stable identity (PROJ folder); run_number alone moves on re-import.

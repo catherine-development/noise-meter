@@ -806,13 +806,18 @@ def main(meas_root):
         _tpl = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                  'templates', 'assessments.html'), encoding='utf-8').read()
         _keyline = [l for l in _tpl.split('\n') if 'const key = ' in l]
-        check(len(_keyline) == 1 and 'r.source_file' in _keyline[0],
-              'the pool key carries source_file, not just the position',
+        # WP8: the key also carries the instrument serial — two meters can hold
+        # a same-numbered run (even the same PROJ folder) on one date.
+        check(len(_keyline) == 1 and 'r.source_file' in _keyline[0]
+              and 'r.instrument_serial' in _keyline[0],
+              'the pool key carries source_file and the serial, not just the position',
               _keyline[0].strip() if _keyline else 'not found')
-        check('const [date, rn, srcFile] = key.split' in _tpl,
-              'and the click handler destructures all three')
+        check('const [date, rn, srcFile, serial] = key.split' in _tpl,
+              'and the click handler destructures all four')
         check('source_file: srcFile || null' in _tpl,
               'and posts source_file to the server')
+        check("serial: serial || ''" in _tpl,
+              'and posts the serial to the server')
 
         # ── 4e. migration from hostile starting schemas ───────────────────────
         print('\n4e. migration on databases unlike the ones it was written against')

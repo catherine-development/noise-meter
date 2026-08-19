@@ -491,12 +491,18 @@ function renderPool() {
   const runs = [...S.current.runs].sort((a, b) =>
     b.session_date !== a.session_date
       ? b.session_date.localeCompare(a.session_date)
-      : b.run_number - a.run_number
+      : (a.instrument_serial || '') !== (b.instrument_serial || '')
+        ? (a.instrument_serial || '').localeCompare(b.instrument_serial || '')
+        : b.run_number - a.run_number
   );
+  // Sessions are keyed on (date, instrument serial); the serial disambiguates
+  // two meters' same-numbered runs on one date, and is shown only when the
+  // pool actually holds more than one.
+  const poolMultiSerial = new Set(runs.map(r => r.instrument_serial || '')).size > 1;
   const html = runs.map(r => {
     // Carries the stable identity as well as the position: the run number this
     // was rendered with may be stale by the time the click posts.
-    const key = `${r.session_date}|${r.run_number}|${r.source_file || ''}`;
+    const key = `${r.session_date}|${r.run_number}|${r.source_file || ''}|${r.instrument_serial || ''}`;
     const p = timePeriod(r.start_time, a.standard);
     const pk = periodKey(p);
     const isAssigned = r.ar_id !== null;
@@ -507,7 +513,7 @@ function renderPool() {
     if (!hidden) visible++;
     return `<div class="run-item p-${pk}${isAssigned ? ' assigned' : ''}${canAdd ? ' add-mode' : ''}${hidden ? ' hidden' : ''}"
       data-key="${key}"${canAdd ? ` onclick="doAssignOne('${key}')"` : ''}>
-      <span class="ri-date">${fmtDate(r.session_date)}</span>
+      <span class="ri-date">${fmtDate(r.session_date)}${poolMultiSerial && r.instrument_serial ? ` <span style="font-size:9px;color:var(--text3,#888)" title="Instrument serial">${esc(r.instrument_serial)}</span>` : ''}</span>
       <span class="ri-n">R${r.run_number}</span>
       <span class="ri-time">${r.start_time.slice(0,5)}${r.end_time ? '–' + r.end_time.slice(0,5) : ''}</span>
       <span class="ri-dur">${fmtDur(r.n_samples, r.step)}</span>
@@ -639,12 +645,13 @@ function clearActiveLoc() {
 async function doAssignOne(key) {
   if (!S.activeLoc) return;
   const locId = S.activeLoc;
-  const [date, rn, srcFile] = key.split('|');
+  const [date, rn, srcFile, serial] = key.split('|');
   await fetch(`/api/assessments/${S.currentId}/assign`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ location_id: locId,
-        runs: [{ date, run_number: parseInt(rn), source_file: srcFile || null }] }),
+        runs: [{ date, run_number: parseInt(rn), source_file: srcFile || null,
+                 serial: serial || '' }] }),
   });
   S.activeLoc = locId;
   await reloadCurrent();
