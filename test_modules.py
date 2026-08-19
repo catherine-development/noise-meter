@@ -22,6 +22,7 @@ import os
 import shutil
 import sys
 import tempfile
+import types
 
 REPO = os.path.dirname(os.path.abspath(__file__))
 MEAS_DEFAULT = os.path.join(REPO, 'MEAS118')
@@ -38,6 +39,15 @@ os.environ.setdefault('ALLOW_UNAUTHENTICATED', '1')
 # session rather than scraped out of a rendered page.
 SUITE_CSRF = 'suite-csrf-token'
 CSRF_HDR = {'X-CSRF-Token': SUITE_CSRF}
+
+# Half-up rounding, reimplemented rather than imported: the point of the
+# rounding checks in section 11 is that the app rounds .x5 away from zero, and
+# importing the app's own helper to compute the expected value would assert
+# nothing. Matches nor140_format.round_half_up by construction.
+def _rhu(value, digits=1):
+    import math as _m
+    scale = 10 ** digits
+    return _m.floor(value * scale + 0.5) / scale
 
 _checks = 0
 
@@ -996,10 +1006,23 @@ def main(meas_root):
         sr = _sess_row(pi)
         check(sr['run_count'] == N - 1, 'session run_count recomputed after the delete',
               str(dict(sr)))
-        exp_avg = round(10 * __import__('math').log10(
-            sum(10 ** (r[2] / 10) for r in after) / len(after)), 2)
+        # WP5/D2: duration-weighted, not the equal-weight mean this check used
+        # to recompute. The runs of this date differ in length, so the two
+        # formulas give genuinely different answers (~1 dB apart here).
+        _rows = pi.sql(
+            'SELECT r.avg_laeq, r.duration_s, r.n_samples FROM runs r '
+            'JOIN sessions s ON s.id=r.session_id WHERE s.date=? ORDER BY r.run_number',
+            SESSION_DATE)
+        _w = [(r['avg_laeq'], r['duration_s'] or r['n_samples']) for r in _rows]
+        exp_avg = _rhu(10 * __import__('math').log10(
+            sum(w * 10 ** (v / 10) for v, w in _w) / sum(w for _, w in _w)), 2)
         check(sr['avg_laeq'] == exp_avg, 'session avg recomputed from the remaining runs',
               f'{sr["avg_laeq"]} vs {exp_avg}')
+        _flat = round(10 * __import__('math').log10(
+            sum(10 ** (r[2] / 10) for r in after) / len(after)), 2)
+        check(abs(_flat - exp_avg) > 0.05,
+              'and the equal-weight mean it replaced is a different number',
+              f'weighted={exp_avg}, equal-weight={_flat}')
 
         # (e) PROJ0001 comes back (full re-import): restored at run 1, the rest
         # move down, the link follows again.
@@ -1728,6 +1751,379 @@ def main(meas_root):
               'a run with no stored series falls back to the chart profile')
         check('chart profile' in _render,
               'and the fallback says so on the rows it produced')
+
+        # ── 11. WP5 — calculation conventions (F8, F10, F11, F12, F13) ────────
+        print('\n11. session LAeq is duration-weighted (F8 / decision D2)')
+
+        # A session whose runs are deliberately of very different lengths, with
+        # round LAeq values so the expected figure can be computed by hand:
+        #   run A: LAeq 70.0 dB over  100 s
+        #   run B: LAeq 80.0 dB over  900 s
+        # duration-weighted: 10*log10((100*10^7 + 900*10^8)/1000) = 79.5904... dB
+        #        equal-weight: 10*log10((10^7 + 10^8)/2)          = 77.4036... dB
+        # 2.2 dB apart, so the two conventions cannot be confused for each other.
+        # n_samples is left at 900 for BOTH runs: if the weight came from the
+        # record count rather than the meter's duration_s, the answer would be
+        # the equal-weight one and this section would fail.
+        WD = '2026-08-13'
+        w = Side(os.path.join(tmp, 'weighted.db'))
+        wsess = _copy.deepcopy(sessions[0])
+        wsess['d'] = WD
+        wsess['complete_date'] = False
+        wsess['skipped_files'] = []
+        wsess['projects'] = _copy.deepcopy(sessions[0]['projects'][:2])
+        for _p, (_avg, _dur) in zip(wsess['projects'], ((70.0, 100), (80.0, 900))):
+            _p['avg'], _p['duration_s'], _p['n'] = _avg, _dur, 900
+        w.db.import_sessions([wsess], metadata=META)
+
+        EXPECT_W = 79.59      # hand-computed above, half-up to 2 dp
+        EXPECT_FLAT = 77.4    # what the equal-weight mean would have given
+        wrow = w.sql('SELECT avg_laeq, run_count FROM sessions WHERE date=?', WD)[0]
+        check(wrow['avg_laeq'] == EXPECT_W,
+              'import_sessions stores the duration-weighted session LAeq',
+              f'{wrow["avg_laeq"]} vs {EXPECT_W}')
+        check(abs(wrow['avg_laeq'] - EXPECT_FLAT) > 2.0,
+              'and it is not the equal-weight mean of the two run LAeqs',
+              f'{wrow["avg_laeq"]} vs {EXPECT_FLAT}')
+
+        # The same number must come back out of a recompute, or a backfill would
+        # silently move every session it touched.
+        check(w.db.recompute_session_aggregates([WD]) == [],
+              'recompute agrees with import — nothing to change')
+        w.exec('UPDATE sessions SET avg_laeq=1.0 WHERE date=?', WD)
+        w.db.recompute_session_aggregates([WD])
+        check(w.sql('SELECT avg_laeq FROM sessions WHERE date=?', WD)[0]['avg_laeq'] == EXPECT_W,
+              'recompute_session_aggregates rebuilds the same weighted value',
+              str(EXPECT_W))
+
+        # And the report block, which is where the weighted figure already came
+        # from, must now be the same number to its own (1 dp) rounding.
+        _prep = w.reports._prepare_session_for_report(WD)
+        check(_prep is not None, 'the weighted session prepares for a report')
+        _ws, _wrows, _wall, _wtot = _prep
+        _, _wstats = w.reports._build_session_data_block(_ws, _wrows, _wall, _wtot)
+        check(_wstats['session_leq'] == _rhu(EXPECT_W, 1),
+              'the report block agrees with the stored session LAeq',
+              f'{_wstats["session_leq"]} vs {_rhu(EXPECT_W, 1)}')
+        check(_wtot == 1000, 'total duration sums the real duration_s', str(_wtot))
+        check([r.get('duration_s') for r in _wrows] == [100, 900],
+              'run rows carry duration_s for the weighting',
+              str([r.get('duration_s') for r in _wrows]))
+
+        # duration_s is the preferred weight, n_samples the fallback. With the
+        # durations removed, the same two runs weight equally (n is 900 for
+        # both) and the session LAeq becomes the equal-weight figure.
+        w.exec('UPDATE runs SET duration_s=NULL WHERE session_id='
+               '(SELECT id FROM sessions WHERE date=?)', WD)
+        w.db.recompute_session_aggregates([WD])
+        _fallback = w.sql('SELECT avg_laeq FROM sessions WHERE date=?', WD)[0]['avg_laeq']
+        check(abs(_fallback - EXPECT_FLAT) < 0.01,
+              'with no duration_s the weight falls back to n_samples',
+              f'{_fallback} vs {EXPECT_FLAT}')
+
+        print('\n11b. BS 4142 has two periods, and boundary crossings are flagged (F10)')
+        _tp = w.assess._time_period
+        check(_tp('07:00:00', 'bs4142') == 'Day', 'BS 4142: 07:00 is Day')
+        check(_tp('22:59:59', 'bs4142') == 'Day', 'BS 4142: 22:59 is still Day')
+        check(_tp('23:00:00', 'bs4142') == 'Night', 'BS 4142: 23:00 is Night')
+        check(_tp('06:59:59', 'bs4142') == 'Night', 'BS 4142: 06:59 is Night')
+        # The defect: 19:00–23:00 used to be reported as a third period the
+        # standard does not define.
+        check(_tp('19:00:00', 'bs4142') == 'Day',
+              'BS 4142: 19:00 is Day, not the old "Evening"', _tp('19:00:00', 'bs4142'))
+        _all_bs = {_tp(f'{h:02d}:30:00', 'bs4142') for h in range(24)}
+        check(_all_bs == {'Day', 'Night'},
+              'BS 4142 yields only Day and Night, at every hour of the day', str(_all_bs))
+        # assessments.html carries its own copy of this classification for the
+        # run chips, so the page and the CSV would otherwise disagree.
+        _ah = open(os.path.join(REPO, 'templates', 'assessments.html'), encoding='utf-8').read()
+        _ajs = _ah.split('function timePeriod(')[1].split('\nfunction ')[0]
+        check("'Evening'" not in _ajs,
+              'the assessments.html copy of timePeriod() has no Evening either')
+        check("['Day','Night']" in _ah,
+              'and the BS 4142 period list on the page is Day/Night')
+        check('Day/Evening/Night' not in _ah,
+              'the standard picker no longer advertises three BS 4142 periods')
+        # The Noise Act split is a different scheme and is unchanged.
+        check(_tp('19:00:00', 'noise_act') == 'Pre 23:00', 'Noise Act: 19:00 is Pre 23:00')
+        check(_tp('23:30:00', 'noise_act') == 'Post 23:00', 'Noise Act: 23:30 is Post 23:00')
+        check(_tp('nonsense', 'bs4142') == 'unknown', 'an unparseable start time is unknown')
+
+        _sb = w.assess._spans_boundary
+        check(_sb('22:30:00', '23:30:00') is True, 'a run over 23:00 spans a boundary')
+        check(_sb('06:30:00', '07:30:00') is True, 'a run over 07:00 spans a boundary')
+        check(_sb('07:30:00', '08:30:00') is False, 'a run inside the day does not')
+        check(_sb('22:00:00', '23:00:00') is False,
+              'a run ending exactly on the boundary has not crossed it')
+        check(_sb('23:30:00', '07:30:00') is True,
+              'a run through midnight and past 07:00 spans a boundary')
+        check(_sb('23:30:00', '06:00:00') is False,
+              'a run through midnight that stops before 07:00 does not')
+        # No arithmetic fallback: without the meter's end time this is unknown,
+        # and unknown is reported as such rather than guessed from n_samples.
+        check(_sb('22:30:00', None) is None, 'no end time means the answer is None')
+        check(_sb('22:30:00', '') is None, 'an empty end time is also None')
+
+        print('\n11c. assessment fallback percentiles read the stored 1 s series (F11)')
+        # A run with no GLOB percentiles — the pre-backfill case the fallback
+        # exists for. Everything else about run 9 is left alone.
+        af = Side(os.path.join(tmp, 'fallback.db'))
+        af.db.import_sessions(_copy.deepcopy(sessions), metadata=META)
+        aid11 = af.assess.create_assessment('F11 fallback', standard='bs4142')
+        lid11 = af.assess.add_assessment_location(aid11, 'L')
+        af.assess.assign_runs(aid11, lid11, [(SESSION_DATE, 9)])
+        _r9 = af.db.get_full_run_row(SESSION_DATE, 9)
+        _series = json.loads(_r9['prof_lafspl_json'])
+        _chart = json.loads(_r9['laeq_json'])
+        af.exec('UPDATE runs SET la_l10=NULL, la_l50=NULL, la_l90=NULL WHERE id=?', _r9['id'])
+
+        _fb = af.assess.prepare_assessment_report_data(aid11)['locations'][0]['runs'][0]
+        _sv = sorted(_series)
+        check(_fb['la10'] == af.db.percentile(_sv, 90),
+              'fallback LA10 is the interpolated 90th percentile of prof_lafspl_json',
+              f'{_fb["la10"]} vs {af.db.percentile(_sv, 90)}')
+        check(_fb['la50'] == af.db.percentile(_sv, 50), 'fallback LA50 likewise')
+        check(_fb['la90'] == af.db.percentile(_sv, 10),
+              'fallback LA90 is the 10th percentile (the level exceeded 90% of the time)')
+        check(_fb['la90'] < _fb['la50'] < _fb['la10'], 'fallback LA90 < LA50 < LA10',
+              f'{_fb["la90"]} / {_fb["la50"]} / {_fb["la10"]}')
+        # The old computation: nearest-rank over laeq_json, the downsampled chart
+        # profile whose points are window maxima. It read high, and disagreed
+        # with the figure the report gave for the same run.
+        _old_sv = sorted(_chart, reverse=True)
+        _old_la10 = round(_old_sv[max(0, int(len(_old_sv) * 0.1) - 1)], 1)
+        check(_fb['la10'] != _old_la10,
+              'and it is not the old chart-profile nearest-rank value',
+              f'now {_fb["la10"]}, was {_old_la10}')
+        check(_fb['la10'] < _old_la10,
+              'the chart profile read high, as windows of maxima must',
+              f'{_fb["la10"]} < {_old_la10}')
+        # One implementation, so an assessment and a report cannot disagree.
+        check(af.reports._percentile is af.db.percentile,
+              'reports and assessments share one percentile implementation')
+        check(af.reports._percentile(_sv, 90) == _fb['la10'],
+              'the report and the assessment give the same LA10 for the run')
+        # No stored series and no GLOB percentiles: report nothing, guess nothing.
+        af.exec('UPDATE runs SET prof_lafspl_json=NULL WHERE id=?', _r9['id'])
+        _none = af.assess.prepare_assessment_report_data(aid11)['locations'][0]['runs'][0]
+        check(_none['la10'] is None and _none['la50'] is None and _none['la90'] is None,
+              'with neither source the percentiles are None, not an estimate',
+              str([_none['la10'], _none['la50'], _none['la90']]))
+
+        print('\n11d. model pricing and per-model parameters (F12)')
+        _P = w.reports._MODEL_PRICING
+        check(_P['claude-haiku-4-5'] == (1.00, 5.00),
+              'Haiku 4.5 is $1.00/$5.00 per MTok (was 0.80/4.00)', str(_P['claude-haiku-4-5']))
+        check(_P['claude-sonnet-5'] == (3.00, 15.00),
+              'Sonnet 5 is $3.00/$15.00 per MTok', str(_P['claude-sonnet-5']))
+        check(_P['claude-opus-5'] == (5.00, 25.00),
+              'Opus 5 is $5.00/$25.00 per MTok (was 15.00/75.00, an Opus 4.x figure)',
+              str(_P['claude-opus-5']))
+        check(_P['claude-haiku-4-5-20251001'] == _P['claude-haiku-4-5'],
+              'the dated Haiku id is kept as an alias, so stored reports still price')
+        for _mid in ('claude-haiku-4-5', 'claude-sonnet-5', 'claude-opus-5'):
+            check(_mid in _P, f'canonical id {_mid} is priced')
+        # The dropdowns must send ids the pricing table knows.
+        for _tpl in ('index.html', 'reports.html'):
+            _h = open(os.path.join(REPO, 'templates', _tpl), encoding='utf-8').read()
+            _opts = [l.split('value="')[1].split('"')[0] for l in _h.split('\n')
+                     if '<option value="claude-' in l]
+            check(_opts and all(o in _P for o in _opts),
+                  f'{_tpl}: every model option is a priced id', str(_opts))
+        _rep_html = open(os.path.join(REPO, 'templates', 'report.html'), encoding='utf-8').read()
+        check('API usage (claude-sonnet-5)' not in _rep_html,
+              'report footer no longer names claude-sonnet-5 whatever model ran')
+        check('usage_info.model' in _rep_html,
+              'report footer names the model that actually generated it')
+
+        # A stand-in for the anthropic SDK: records the kwargs it was called
+        # with, so the per-model parameter rules can be asserted without a
+        # network call or an API key.
+        class _FakeBadRequest(Exception):
+            pass
+
+        _calls = []
+
+        class _FakeAnthropic:
+            def __init__(self, **kw):
+                self.messages = self
+
+            def create(self, **kwargs):
+                _calls.append(kwargs)
+                # Reproduce the real 400: Haiku 4.5 accepts neither parameter.
+                if kwargs['model'].startswith('claude-haiku') and (
+                        'thinking' in kwargs or 'output_config' in kwargs):
+                    raise _FakeBadRequest(
+                        'thinking.type: Input should be \'enabled\' or \'disabled\'')
+
+                class _Block:
+                    type = 'tool_use'
+                    input = {k: '<p>x</p>' for k in SECTIONS}
+
+                class _Usage:
+                    input_tokens, output_tokens = 1_000_000, 1_000_000
+
+                class _Msg:
+                    content = [_Block()]
+                    usage = _Usage()
+                return _Msg()
+
+        _fake_mod = types.ModuleType('anthropic')
+        _fake_mod.Anthropic = _FakeAnthropic
+        _fake_mod.BadRequestError = _FakeBadRequest
+        _real_anthropic = sys.modules.get('anthropic')
+        _real_key = os.environ.get('ANTHROPIC_API_KEY')
+        sys.modules['anthropic'] = _fake_mod
+        os.environ['ANTHROPIC_API_KEY'] = 'test-key-not-a-real-one'
+        try:
+            _calls.clear()
+            _sections, _ti, _to, _cost = w.reports._call_claude('p', 'claude-sonnet-5', 'standard')
+            check('thinking' in _calls[0] and 'output_config' in _calls[0],
+                  'Sonnet 5 still gets adaptive thinking and an effort setting',
+                  str(sorted(_calls[0])))
+            # 1M in + 1M out at 3.00/15.00 = $18.0000 exactly.
+            check(_cost == 18.0, 'cost is priced from the table', str(_cost))
+
+            _calls.clear()
+            _sections, _ti, _to, _cost = w.reports._call_claude('p', 'claude-haiku-4-5', 'standard')
+            check('thinking' not in _calls[0] and 'output_config' not in _calls[0],
+                  'Haiku 4.5 is sent neither thinking nor output_config (both are 400s)',
+                  str(sorted(_calls[0])))
+            check(_cost == 6.0, 'and is priced at 1.00/5.00', str(_cost))
+            _calls.clear()
+            w.reports._call_claude('p', 'claude-haiku-4-5', 'extended')
+            check('thinking' not in _calls[0],
+                  'the extended level is dropped for Haiku too, not just standard')
+
+            check(w.reports._supports_thinking('claude-sonnet-5')
+                  and not w.reports._supports_thinking('claude-haiku-4-5'),
+                  '_supports_thinking classifies the two families')
+        finally:
+            if _real_anthropic is not None:
+                sys.modules['anthropic'] = _real_anthropic
+            else:
+                sys.modules.pop('anthropic', None)
+            if _real_key is None:
+                os.environ.pop('ANTHROPIC_API_KEY', None)
+            else:
+                os.environ['ANTHROPIC_API_KEY'] = _real_key
+
+        # The route maps a BadRequestError to 400 and anything else to 500.
+        _errs = []
+
+        def _boom(exc):
+            def _f(prompt, model, thinking_level):
+                raise exc
+            return _f
+
+        _real_call = rt.reports._call_claude
+        _real_anthropic = sys.modules.get('anthropic')
+        sys.modules['anthropic'] = _fake_mod
+        try:
+            _tid = rt.reports_db.save_report_template(
+                'WP5 error-path template', '', 'x {{session_data}} y')
+            _body = {'session_date': SESSION_DATE, 'template_id': _tid,
+                     'model': 'claude-haiku-4-5'}
+            rt.reports._call_claude = _boom(_FakeBadRequest('unsupported parameter'))
+            _resp = _client.post('/api/generate-report', json=_body, headers=CSRF_HDR)
+            check(_resp.status_code == 400,
+                  'a rejected request returns 400, not 500', str(_resp.status_code))
+            check('unsupported parameter' in _resp.get_json()['error'],
+                  'and the API message reaches the caller')
+            rt.reports._call_claude = _boom(RuntimeError('the roof is on fire'))
+            _resp = _client.post('/api/generate-report', json=_body, headers=CSRF_HDR)
+            check(_resp.status_code == 500,
+                  'any other failure is still a 500', str(_resp.status_code))
+        finally:
+            rt.reports._call_claude = _real_call
+            if _real_anthropic is not None:
+                sys.modules['anthropic'] = _real_anthropic
+            else:
+                sys.modules.pop('anthropic', None)
+
+        print('\n11e. one rounding convention for displayed dB (F13)')
+        # 72.25 is exactly representable, so this is a genuine .x5 boundary and
+        # not a float artefact: half-up gives 72.3, Python's banker's round 72.2.
+        check(round(72.25, 1) == 72.2, 'Python round() is banker\'s at .x5 (the thing to avoid)')
+        check(_rhu(72.25, 1) == 72.3, 'half-up rounds .x5 away from zero')
+        check(w.db.percentile([72.0, 72.5], 50) == 72.3,
+              'percentile() rounds half-up at a .x5 boundary (banker\'s would give 72.2)',
+              str(w.db.percentile([72.0, 72.5], 50)))
+        check(af.reports._percentile([72.0, 72.5], 50) == 72.3,
+              'and so does the reports alias')
+        check(w.db.percentile([], 50) is None, 'percentile of nothing is None')
+        check(w.db.percentile([42.0], 90) == 42.0, 'percentile of one value is that value')
+
+        # The same boundary through the assessment display path.
+        _rb = Side(os.path.join(tmp, 'rounding.db'))
+        _rb.db.import_sessions(_copy.deepcopy(sessions), metadata=META)
+        _aid = _rb.assess.create_assessment('F13 rounding', standard='bs4142')
+        _lid = _rb.assess.add_assessment_location(_aid, 'L')
+        _rb.assess.assign_runs(_aid, _lid, [(SESSION_DATE, 9)])
+        _rb.exec('UPDATE runs SET la_l10=72.25, avg_laeq=65.35 WHERE id='
+                 '(SELECT r.id FROM runs r JOIN sessions s ON s.id=r.session_id '
+                 ' WHERE s.date=? AND r.run_number=9)', SESSION_DATE)
+        _rr = _rb.assess.prepare_assessment_report_data(_aid)['locations'][0]['runs'][0]
+        check(_rr['la10'] == 72.3, 'assessment LA10 rounds half-up', str(_rr['la10']))
+        check(_rr['avg_laeq'] == 65.4, 'assessment LAeq rounds half-up', str(_rr['avg_laeq']))
+        check(_rb.reports._run_stats({'avg': 72.25, 'n': 1})['leq'] == 72.3,
+              'the report run stats round half-up too',
+              str(_rb.reports._run_stats({'avg': 72.25, 'n': 1})['leq']))
+        # The decoder's convention, now shared: nothing should still be using
+        # Python's round() on a value headed for a report or a stored dB. Two
+        # uses of round() are not dB and stay — a compass index and a USD cost —
+        # so they are named here rather than left to widen the pattern.
+        _NOT_DB = ('deg / 45', 'cost_usd')
+        for _mod in ('reports.py', 'assessments_db.py', 'noise_parser.py'):
+            _src = open(os.path.join(REPO, _mod), encoding='utf-8').read()
+            _bankers = [l.strip() for l in _src.split('\n')
+                        if 'round(' in l and 'round_half_up' not in l
+                        and '_round' not in l and not l.strip().startswith('#')
+                        and not any(x in l for x in _NOT_DB)]
+            check(not _bankers, f'{_mod}: no bare round() left on a dB value',
+                  str(_bankers[:2]))
+
+        print('\n11f. the spectrum reconstruction is kept, but not run on every import')
+        # The handoff verifies the spectral decode by energy-summing the stored
+        # 1/3-octave Lfeq table with IEC weighting and comparing to the meter's
+        # own LAeq/LCeq. That check still passes — it is just no longer computed
+        # 36 times per run on a value nothing read.
+        _spec9 = json.loads(_r9['spec_lfeq'])
+        _recon = parser.spectrum_broadband('spec_lfeq', _spec9)
+        close(_recon['laeq'], 70.8, 0.06,
+              'Lfeq spectrum reconstructs run 9 LAeq = 70.8 (handoff)')
+        close(_recon['lceq'], 78.7, 0.06,
+              'Lfeq spectrum reconstructs run 9 LCeq = 78.7 (handoff)')
+        check(abs(parser._F4_HZ - 12194.217) < 1e-6,
+              'the IEC 61672 f4 pole is 12194.217 Hz, not the rounded 12200',
+              str(parser._F4_HZ))
+        _pd, _pr = parser._parse_session_files(
+            open(os.path.join(meas_root, DATE_FOLDER, 'PART0000', 'PROJ0009',
+                              'GLOB0009.DAT'), 'rb').read(),
+            open(os.path.join(meas_root, DATE_FOLDER, 'PART0000', 'PROJ0009',
+                              'PROF0009.DAT'), 'rb').read())
+        check(not [k for k in _pr if k.endswith('_from_spectrum')],
+              'no *_from_spectrum value is computed on import any more',
+              str([k for k in _pr if k.endswith('_from_spectrum')]))
+
+        print('\n11g. the assessment CSV carries the boundary flag (F10)')
+        _aid12 = rt.assess.create_assessment('F10 CSV', standard='bs4142')
+        _lid12 = rt.assess.add_assessment_location(_aid12, 'L')
+        rt.assess.assign_runs(_aid12, _lid12, [(SESSION_DATE, 9)])
+        _resp = _client.get(f'/export/assessment/{_aid12}.csv')
+        check(_resp.status_code == 200, 'assessment CSV downloads', _resp.status_code)
+        _lines = _resp.get_data(as_text=True).split('\r\n')
+        _hdr = _lines[0].split(',')
+        check('spans_boundary' in _hdr, 'assessment CSV has a spans_boundary column', str(_hdr))
+        _row = _lines[1].split(',')
+        check(len(_row) == len(_hdr), 'CSV data row width still matches the header',
+              f'{len(_row)} vs {len(_hdr)}')
+        # Run 9 is 23:27:36–23:42:36, wholly inside the night period.
+        check(_row[_hdr.index('time_period')] == 'Night', 'run 9 is a Night measurement',
+              _row[_hdr.index('time_period')])
+        check(_row[_hdr.index('spans_boundary')] == 'no', 'and it crosses no boundary',
+              _row[_hdr.index('spans_boundary')])
+        rt.assess.delete_assessment(_aid12)
 
         print(f'\nAll {_checks} checks passed.')
     finally:

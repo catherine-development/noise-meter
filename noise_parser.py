@@ -30,7 +30,10 @@ _THIRD_OCTAVE_FREQS = (
     6300.0, 8000.0, 10000.0, 12500.0, 16000.0, 20000.0,
 )
 # Maps each spectral table's canonical DB column to the A/C-weighted scalar
-# key pair used for the informational *_from_spectrum energy sums below.
+# key pair it reconstructs. Used by spectrum_broadband() below, the verification
+# path documented in NOR140_handoff.md ("Check scalar LAeq/LCeq against the
+# A/C-weighted Lfeq spectrum") — not by the import path, which stores the
+# meter's own scalars.
 _SPECTRAL_KEY_PAIRS = {
     'spec_lfeq':    ('laeq',   'lceq'),
     'spec_lffmax':  ('lafmax', 'lcfmax'),
@@ -57,14 +60,20 @@ _DATE_RE = re.compile(r'^\d{6}$')
 _PROJ_RE = re.compile(r'^PROJ', re.IGNORECASE)
 
 
+# IEC 61672-1 pole frequency f4. Was 12200.0 here, a rounded-off value that put
+# a small error into the top bands of every reconstruction; the standard's own
+# figure is 12194.217 Hz.
+_F4_HZ = 12194.217
+
+
 def _freq_weight_a(freq_hz):
     f2 = freq_hz * freq_hz
     ra = (
-        (12200.0 ** 2) * f2 * f2
+        (_F4_HZ ** 2) * f2 * f2
         / (
             (f2 + 20.6 ** 2)
             * math.sqrt((f2 + 107.7 ** 2) * (f2 + 737.9 ** 2))
-            * (f2 + 12200.0 ** 2)
+            * (f2 + _F4_HZ ** 2)
         )
     )
     return 20.0 * math.log10(ra) + 2.0
@@ -72,7 +81,7 @@ def _freq_weight_a(freq_hz):
 
 def _freq_weight_c(freq_hz):
     f2 = freq_hz * freq_hz
-    rc = (12200.0 ** 2) * f2 / ((f2 + 20.6 ** 2) * (f2 + 12200.0 ** 2))
+    rc = (_F4_HZ ** 2) * f2 / ((f2 + 20.6 ** 2) * (f2 + _F4_HZ ** 2))
     return 20.0 * math.log10(rc) + 0.06
 
 
@@ -81,6 +90,29 @@ def _spectrum_total(levels, weight_fn):
         sum(10.0 ** ((level + weight_fn(freq)) / 10.0)
             for freq, level in zip(_THIRD_OCTAVE_FREQS, levels))
     )
+
+
+def spectrum_broadband(col, levels):
+    """Reconstruct the A- and C-weighted broadband totals from one spectral table.
+
+    Returns {scalar_key: dB} for the A/C pair that `col` reconstructs, e.g.
+    spectrum_broadband('spec_lfeq', bands) -> {'laeq': ..., 'lceq': ...}.
+
+    This is the verification path from NOR140_handoff.md — energy-summing the
+    stored 1/3-octave table with IEC weighting reproduces the meter's own
+    broadband scalar, which is how the spectral decode was confirmed in the
+    first place. It is deliberately *not* called on import: the stored values
+    are the meter's own scalars, and computing 36 of these per run bought
+    nothing but time. Kept so the check can still be run (and is, in the suite).
+
+    A caveat for anyone using it on the impulse or Lfmin tables: bands the meter
+    had no data for decode to -20.0 dB, which is a real level to an energy sum
+    and drags a reconstruction down. The Lfeq table is the one the handoff
+    verified, and the one worth trusting here.
+    """
+    key_a, key_c = _SPECTRAL_KEY_PAIRS[col]
+    return {key_a: _spectrum_total(levels, _freq_weight_a),
+            key_c: _spectrum_total(levels, _freq_weight_c)}
 
 
 def _read_glob_spectrum(data, offset):
@@ -113,9 +145,11 @@ def _read_glob(data):
     for col, offset in SPECTRAL_TABLES:
         spec = _read_glob_spectrum(data, offset)
         if spec is not None:
-            key_a, key_c = _SPECTRAL_KEY_PAIRS[col]
-            metrics[f'{key_a}_from_spectrum'] = _spectrum_total(spec, _freq_weight_a)
-            metrics[f'{key_c}_from_spectrum'] = _spectrum_total(spec, _freq_weight_c)
+            # The *_from_spectrum reconstructions that used to be computed here
+            # were written into `metrics` and then read by nothing at all — 36
+            # weighted energy sums per run, every import, for a value no caller
+            # ever asked for. The reconstruction itself is worth keeping, so it
+            # now lives in spectrum_broadband() and is called on demand.
             metrics[col] = [round_half_up(v, 2) for v in spec]
     return date, start, metrics
 
@@ -141,6 +175,39 @@ def _downsample(arr, step):
 
 def _energy_avg(values):
     return 10 * math.log10(sum(10 ** (v / 10) for v in values) / len(values))
+
+
+def _energy_avg_weighted(pairs):
+    """Duration-weighted energy average of (level_dB, weight) pairs.
+
+    The physically meaningful way to combine the LAeq of runs that ran for
+    different lengths of time: LAeq,T over the whole set is the total sound
+    energy divided by the total time, so a 15-minute run must not carry the
+    same weight as a 15-second one. The equal-weight mean this replaced could
+    sit a couple of dB out on a day of mixed-length runs.
+
+    Weights are meter-stored durations (see run_weight_s); a zero or missing
+    total falls back to the unweighted mean rather than dividing by zero.
+    """
+    total_w = sum(w for _, w in pairs)
+    if not pairs or total_w <= 0:
+        return _energy_avg([v for v, _ in pairs]) if pairs else None
+    return 10 * math.log10(
+        sum(w * 10 ** (v / 10) for v, w in pairs) / total_w)
+
+
+def run_weight_s(run):
+    """The duration, in seconds, that a run contributes to a session LAeq.
+
+    The meter's own duration_s where it recorded one, else the 1-second record
+    count n — the two agree except where a run was stopped mid-period. Accepts
+    either a parsed run dict ('n') or a stored DB row ('n_samples').
+    """
+    for key in ('duration_s', 'n', 'n_samples'):
+        v = run.get(key) if hasattr(run, 'get') else None
+        if v:
+            return v
+    return 1
 
 
 _round_db = round_half_up
@@ -447,11 +514,15 @@ def parse_zip(zip_bytes):
         projects = [{**run, 'source_file': pf} for pf, run in sorted(by_date[date])]
         if not projects:
             continue
-        avg = round(_energy_avg([p['avg'] for p in projects]), 2)
+        # Duration-weighted (see _energy_avg_weighted); noise_db's
+        # _recompute_session_aggregates() computes the identical figure from the
+        # stored runs, so an import and a later recompute agree exactly.
+        avg = _round_db(_energy_avg_weighted(
+            [(p['avg'], run_weight_s(p)) for p in projects]), 2)
         result.append({
             'd':        date,
             'avg':      avg,
-            'mx':       round(max(p['mx'] for p in projects), 1),
+            'mx':       _round_db(max(p['mx'] for p in projects), 1),
             'complete_date': all(from_date_folder[date]),
             'skipped_files': sorted(unparsed.get(date, ())),
             'projects': projects,

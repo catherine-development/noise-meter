@@ -11,7 +11,8 @@ created by noise_db._migrate(), which remains the single schema authority.
 """
 import json
 
-from noise_db import get_db
+from nor140_format import round_half_up
+from noise_db import get_db, percentile
 
 
 def _with_end(row):
@@ -23,18 +24,71 @@ def _with_end(row):
     return row
 
 
+# Both standards divide the day at the same two clock times, so one set of
+# boundaries serves both: 07:00 and 23:00.
+_PERIOD_BOUNDARY_H = (7, 23)
+
+
+def _hms_to_s(hms):
+    """'HH:MM:SS' -> seconds since midnight, or None if it will not parse."""
+    try:
+        parts = [int(p) for p in str(hms).split(':')]
+    except (ValueError, AttributeError):
+        return None
+    if len(parts) < 2:
+        return None
+    h, m = parts[0], parts[1]
+    s = parts[2] if len(parts) > 2 else 0
+    return h * 3600 + m * 60 + s
+
+
 def _time_period(start_time, standard):
+    """The assessment period a run's *start* falls in.
+
+    BS 4142:2014+A1:2019 defines two periods only — day 07:00–23:00 and night
+    23:00–07:00. This used to return a third, 'Evening' (19:00–23:00), which the
+    standard does not define: evening is a Noise Act / planning-guidance idea,
+    and reporting it as a BS 4142 period put a category in the evidence that the
+    cited standard has no meaning for. The Noise Act split is unchanged.
+
+    The period is decided by the start time alone; a run that crosses a boundary
+    is flagged separately — see _spans_boundary().
+    """
     try:
         h = int(start_time.split(':')[0])
     except Exception:
         return 'unknown'
     if standard == 'bs4142':
-        if 7 <= h < 19:
-            return 'Day'
-        if 19 <= h < 23:
-            return 'Evening'
-        return 'Night'
+        return 'Day' if 7 <= h < 23 else 'Night'
     return 'Post 23:00' if (h >= 23 or h < 7) else 'Pre 23:00'
+
+
+def _spans_boundary(start_time, end_time):
+    """True when a run crosses 07:00 or 23:00, False when it does not.
+
+    None when it cannot be known — i.e. the meter recorded no end time. There is
+    deliberately no arithmetic fallback to start + n_samples (see _run_to_dict
+    in noise_db): a run that was paused or stopped mid-period would be judged on
+    a time it never ran to.
+
+    Matters because _time_period() classifies on the start time alone, so a run
+    from 22:30 to 23:30 is reported as a Day measurement while an hour of it is
+    night. A run that ends exactly on a boundary has not crossed it.
+    """
+    if not end_time:
+        return None
+    s, e = _hms_to_s(start_time), _hms_to_s(end_time)
+    if s is None or e is None:
+        return None
+    if e <= s:
+        e += 86400          # ran through midnight
+    for h in _PERIOD_BOUNDARY_H:
+        b = h * 3600
+        while b <= s:       # first occurrence of this boundary after the start
+            b += 86400
+        if b < e:           # strictly inside the run, so it was crossed
+            return True
+    return False
 
 
 def create_assessment(name, purpose='', standard='noise_act', address='',
@@ -384,7 +438,7 @@ def prepare_assessment_report_data(aid):
             SELECT ar.conditions, ar.notes as run_notes,
                    r.run_number, r.start_time, r.end_time, r.n_samples, r.step, r.duration_s,
                    r.avg_laeq, r.min_laeq, r.max_laeq, r.max_lcpeak, r.max_laimax,
-                   r.la_l10, r.la_l50, r.la_l90, r.laeq_json, ar.session_date
+                   r.la_l10, r.la_l50, r.la_l90, r.prof_lafspl_json, ar.session_date
             FROM assessment_runs ar
             JOIN sessions s ON s.date = ar.session_date
             JOIN runs r ON r.session_id = s.id AND (
@@ -396,24 +450,30 @@ def prepare_assessment_report_data(aid):
 
         runs_data = []
         for r in assigned:
-            # Prefer GLOB-derived percentiles; fall back to profile computation
+            # Prefer the meter's own percentiles. The fallback, for runs
+            # imported before the GLOB scalars were decoded, is now the stored
+            # 1-second LAFspl series through the same interpolating percentile()
+            # the reports use. It was computed from laeq_json — the downsampled
+            # *chart* profile, whose every point is the maximum of its window —
+            # with a nearest-rank index, so the same run could be given one
+            # LA10 in an assessment CSV and a different, lower one in its
+            # report. Where there is no stored series, nothing is reported:
+            # there is no honest estimate to be had from the chart profile.
             if r['la_l10'] is not None:
                 la_stats = {
-                    'la10': round(r['la_l10'], 1),
-                    'la50': round(r['la_l50'], 1) if r['la_l50'] is not None else None,
-                    'la90': round(r['la_l90'], 1) if r['la_l90'] is not None else None,
+                    'la10': round_half_up(r['la_l10'], 1),
+                    'la50': round_half_up(r['la_l50'], 1) if r['la_l50'] is not None else None,
+                    'la90': round_half_up(r['la_l90'], 1) if r['la_l90'] is not None else None,
                 }
             else:
-                laeq_vals = json.loads(r['laeq_json']) if r['laeq_json'] else []
-                la_stats = {}
-                if laeq_vals:
-                    sv = sorted(laeq_vals, reverse=True)
-                    n = len(sv)
-                    la_stats = {
-                        'la10': round(sv[max(0, int(n * 0.1) - 1)], 1),
-                        'la50': round(sv[max(0, int(n * 0.5) - 1)], 1),
-                        'la90': round(sv[max(0, int(n * 0.9) - 1)], 1),
-                    }
+                prof = json.loads(r['prof_lafspl_json']) if r['prof_lafspl_json'] else []
+                la_stats = {'la10': None, 'la50': None, 'la90': None}
+                if prof:
+                    sv = sorted(prof)
+                    # LA90 is the level exceeded 90% of the time = 10th percentile.
+                    la_stats = {'la10': percentile(sv, 90),
+                                'la50': percentile(sv, 50),
+                                'la90': percentile(sv, 10)}
             runs_data.append({
                 'date': r['session_date'],
                 'start_time': r['start_time'],
@@ -425,11 +485,13 @@ def prepare_assessment_report_data(aid):
                 'duration_s': r['duration_s'],
                 'n_samples': r['n_samples'],
                 'time_period': _time_period(r['start_time'], assessment['standard']),
-                'avg_laeq': round(r['avg_laeq'], 1) if r['avg_laeq'] is not None else None,
-                'min_laeq': round(r['min_laeq'], 1) if r['min_laeq'] is not None else None,
-                'max_laeq': round(r['max_laeq'], 1) if r['max_laeq'] is not None else None,
-                'max_lcpeak': round(r['max_lcpeak'], 1) if r['max_lcpeak'] is not None else None,
-                'max_laimax': round(r['max_laimax'], 1) if r['max_laimax'] is not None else None,
+                # True/False, or None where the meter recorded no end time.
+                'spans_boundary': _spans_boundary(r['start_time'], r['end_time']),
+                'avg_laeq': round_half_up(r['avg_laeq'], 1) if r['avg_laeq'] is not None else None,
+                'min_laeq': round_half_up(r['min_laeq'], 1) if r['min_laeq'] is not None else None,
+                'max_laeq': round_half_up(r['max_laeq'], 1) if r['max_laeq'] is not None else None,
+                'max_lcpeak': round_half_up(r['max_lcpeak'], 1) if r['max_lcpeak'] is not None else None,
+                'max_laimax': round_half_up(r['max_laimax'], 1) if r['max_laimax'] is not None else None,
                 'conditions': r['conditions'],
                 'notes': r['run_notes'],
                 **la_stats,
