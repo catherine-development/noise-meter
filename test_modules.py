@@ -1099,7 +1099,9 @@ def main(meas_root):
         with _c2.session_transaction() as _s2:
             _s2['user'] = 'test'
             _s2['logged_in'] = True
-        r = _c2.post('/upload', data={'file': (_io.BytesIO(corrupt_zip), 'x.zip')},
+            _s2['_csrf_token'] = SUITE_CSRF   # WP2: every POST is CSRF-checked
+        r = _c2.post('/upload', data={'file': (_io.BytesIO(corrupt_zip), 'x.zip'),
+                                      'csrf_token': SUITE_CSRF},
                      content_type='multipart/form-data', follow_redirects=True)
         page = r.get_data(as_text=True)
         check(r.status_code == 200 and 'could not be read and were skipped' in page
