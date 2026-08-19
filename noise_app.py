@@ -23,7 +23,7 @@ from noise_db import (init_db, import_sessions, get_all_sessions_json,
                       get_all_sessions_list, update_session_metadata, delete_session,
                       save_weather, get_weather,
                       update_run_location_tag, purge_sessions_before,
-                      get_sessions_export_format,
+                      get_sessions_export_format, get_run_prof_by_source,
                       get_setting, set_setting, get_full_run_row)
 from sync_db import (get_import_log, get_full_sync_payload,
                      apply_full_sync, apply_sync_event)
@@ -563,6 +563,27 @@ def fetch_weather_route(date):
 @login_required
 def api_existing_dates():
     return jsonify(sorted(get_existing_dates()))
+
+
+@app.route('/api/run/<date>/<source_file>/prof')
+@login_required
+def api_run_prof(date, source_file):
+    """The stored 1-second PROF series for one run, for the run modal.
+
+    The session browser payload carries only the downsampled chart profile,
+    whose every point is the maximum of its window. Counting that against a
+    threshold, binning it, or reading percentiles off it describes a series the
+    meter never recorded: time above 85 dB is overstated by up to the step and
+    the minimum is biased high. The modal fetches the real series from here.
+
+    Keyed on source_file (the NOR140 project folder), not run_number, so a
+    re-import between page render and fetch cannot swap the measurement under
+    the modal. ~3,600 floats for a one-hour run.
+    """
+    prof = get_run_prof_by_source(date, source_file)
+    if prof is None:
+        return jsonify({'status': 'error', 'message': 'Run not found'}), 404
+    return jsonify({'status': 'ok', **prof})
 
 
 if __name__ == '__main__':

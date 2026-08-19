@@ -45,8 +45,12 @@ def _energy_avg_db(values):
 
 def _expand_run(proj):
     """Expand the downsampled LAeq,1s profile back to approximate per-second values.
-    Uses laeq_profile (PROF field 1 = LAeq,1s).  Use GLOB-derived scalar metrics for
-    absolute accuracy; the profile is used for chart shape and pct85 only."""
+
+    Uses laeq_profile (PROF field 1 = LAeq,1s).  Each point is the maximum of its
+    window, so the expansion is a step function, not the measured series: use it
+    for chart shape and as a percentile fallback only.  Absolute values come from
+    the GLOB scalars, and anything counting samples against a threshold — pct85 —
+    reads the stored 1-s series via get_run_prof_laeq instead."""
     step = proj.get('step', 1)
     las = []
     for v in proj.get('laeq_profile', []):

@@ -163,6 +163,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--font-ui);font-size
 .mstat{display:flex;justify-content:space-between;align-items:baseline;padding:5px 0;border-bottom:1px solid var(--grid-border);gap:8px}
 .mstat:last-child{border-bottom:none}
 .mstat-n{font-size:11px;color:var(--text3);flex-shrink:0}
+.mstat-src{font-size:10px;color:var(--text3);opacity:.75;font-style:italic}
 .mstat-v{font-family:var(--font-data);font-size:13px;font-weight:500;font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap}
 .mstat-v.hi{color:var(--accent)}
 .modal-chart-box{background:var(--panel);border:1px solid var(--border);border-radius:4px;padding:10px 10px 0;overflow:hidden}
@@ -399,11 +400,11 @@ body{background:var(--bg);color:var(--text);font-family:var(--font-ui);font-size
       <div class="modal-bottom">
         <div class="modal-stats" id="modalStats"></div>
         <div class="modal-chart-box">
-          <div class="modal-chart-lbl">Level distribution &middot; counts per 5&thinsp;dB bin</div>
+          <div class="modal-chart-lbl">Level distribution &middot; counts per 5&thinsp;dB bin<span class="mstat-src" id="modalHistSrc"></span></div>
           <div class="modal-chart-cnv"><canvas id="modalHistCanvas"></canvas></div>
         </div>
         <div class="modal-chart-box">
-          <div class="modal-chart-lbl">Exceedance &middot; % time above level (LA<sub>x</sub>)</div>
+          <div class="modal-chart-lbl">Exceedance &middot; % time above level (LA<sub>x</sub>)<span class="mstat-src" id="modalExcSrc"></span></div>
           <div class="modal-chart-cnv"><canvas id="modalExcCanvas"></canvas></div>
         </div>
       </div>
@@ -834,8 +835,10 @@ function drawRunChart(canvas, proj) {
   const ctx = setupCanvas(canvas, W, H);
   const PAD = {t:8, r:8, b:22, l:34};
   const cW = W-PAD.l-PAD.r, cH = H-PAD.t-PAD.b;
-  // Client asked to show only LAeq and LAFmax; LCpeak and LAImax are still
-  // stored (and still in the CSV export) but no longer plotted here.
+  // Client asked to show only LAeq and LAFmax. The other two profile channels
+  // are still stored (and still in the run CSV export) but no longer plotted
+  // here; note that they are the LApeak and LAE channels, whatever the column
+  // names say — the meter's LCpeak and LAImax are GLOB scalars, not profiles.
   const laeq = proj.laeq_profile, lafmax = proj.lafmax_profile, n = laeq.length;
   if (!n) return;
   const Y_MIN = dynYMin(laeq);
@@ -1246,18 +1249,27 @@ obs.observe(document.documentElement,{attributes:true,attributeFilter:['data-the
 window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change',renderAll);
 
 // ── Statistics ────────────────────────────────────────────
-function computeStats(laeq, lapeak, lafmax, laimax) {
-  const n = laeq.length;
-  const sorted = [...laeq].sort((a,b)=>b-a);
-  const leq = 10*Math.log10(laeq.reduce((s,v)=>s+Math.pow(10,v/10),0)/n);
+// Derived from an LAeq time series and nothing else. Every quantity the meter
+// itself stored — LAeq, LAFmax/LAFmin, LAImax, LCpeak, LA10/50/90 — is read
+// from the GLOB record in renderModalStats; only the LA-percentile fallback and
+// the time-above-threshold come from here.
+//
+// `series` must be the real 1-second series (fetched from
+// /api/run/<date>/<source_file>/prof), not the chart profile. The chart profile
+// holds the maximum of each `step`-second window, so counting it against a
+// threshold overstates the time above by up to the step, and its minimum is
+// biased high. Where no 1-s series is stored the caller may pass the chart
+// profile, but must then label the rows as coming from it.
+function computeStats(series) {
+  const n = series.length;
+  if (!n) return null;
+  const sorted = [...series].sort((a,b)=>b-a);
+  const leq = 10*Math.log10(series.reduce((s,v)=>s+Math.pow(10,v/10),0)/n);
   const at = pct => sorted[Math.max(0,Math.ceil(n*pct/100)-1)];
-  const above85 = laeq.filter(v=>v>=85).length;
+  const above85 = series.filter(v=>v>=85).length;
   return {
     leq: leq.toFixed(1), la10: at(10).toFixed(1), la50: at(50).toFixed(1),
-    la90: at(90).toFixed(1), lmax: sorted[0].toFixed(1), lmin: sorted[n-1].toFixed(1),
-    pmx:  Math.max(...lapeak).toFixed(1),   // LApeak from PROF; overridden below by GLOB LCpeak
-    pmxf: lafmax ? Math.max(...lafmax).toFixed(1) : null,
-    pmxi: laimax ? Math.max(...laimax).toFixed(1) : null,
+    la90: at(90).toFixed(1),
     pct85: (above85/n*100).toFixed(1),
   };
 }
@@ -1330,14 +1342,16 @@ function drawModalTimeSeries(canvas, proj) {
 }
 
 // ── Modal: histogram ──────────────────────────────────────
-function drawHistogram(canvas, laeq) {
+// `series` is the real 1-second LAeq series where one is stored; binning the
+// max-of-window chart profile instead shifts every bin upward.
+function drawHistogram(canvas, series) {
   const W=canvas.parentElement.offsetWidth, H=160;
   const ctx=setupCanvas(canvas,W,H);
   const PAD={t:8,r:10,b:26,l:36};
   const cW=W-PAD.l-PAD.r, cH=H-PAD.t-PAD.b;
   const BLO=20,BWI=5,NBIN=Math.ceil((120-BLO)/BWI);
   const bins=new Array(NBIN).fill(0);
-  laeq.forEach(v=>{const b=Math.floor((clamp(v,BLO,119.9)-BLO)/BWI);bins[Math.max(0,Math.min(b,NBIN-1))]++;});
+  series.forEach(v=>{const b=Math.floor((clamp(v,BLO,119.9)-BLO)/BWI);bins[Math.max(0,Math.min(b,NBIN-1))]++;});
   const mx=Math.max(...bins,1);
   ctx.fillStyle=css('--panel');ctx.fillRect(0,0,W,H);
   const bW=cW/NBIN;
@@ -1358,16 +1372,18 @@ function drawHistogram(canvas, laeq) {
 }
 
 // ── Modal: exceedance curve ───────────────────────────────
-function drawExceedance(canvas, laeq) {
+// `series` is the real 1-second LAeq series where one is stored — the curve is
+// a distribution, and the chart profile is not the measured distribution.
+function drawExceedance(canvas, series) {
   const W=canvas.parentElement.offsetWidth, H=160;
   const ctx=setupCanvas(canvas,W,H);
   const PAD={t:8,r:14,b:26,l:36};
   const cW=W-PAD.l-PAD.r, cH=H-PAD.t-PAD.b;
-  const XLO=dynYMin(laeq), XHI=dynYMax(laeq,[]);
+  const XLO=dynYMin(series), XHI=dynYMax(series,[]);
   const xP=db=>PAD.l+(db-XLO)/(XHI-XLO)*cW;
   const yP=pct=>PAD.t+cH*(1-pct/100);
-  const n=laeq.length;
-  const sorted=[...laeq].sort((a,b)=>a-b);
+  const n=series.length;
+  const sorted=[...series].sort((a,b)=>a-b);
   ctx.fillStyle=css('--panel');ctx.fillRect(0,0,W,H);
   // Grid
   [10,25,50,75,90].forEach(pct=>{
@@ -1393,19 +1409,19 @@ function drawExceedance(canvas, laeq) {
     pts.push({db,pct:exc/n*100});
   }
   // Fill
-  ctx.fillStyle=css('--laeq-fill');
+  ctx.fillStyle=css('--series-fill');
   ctx.beginPath();ctx.moveTo(xP(XLO),yP(100));
   pts.forEach(p=>ctx.lineTo(xP(p.db),yP(p.pct)));
   ctx.lineTo(xP(XHI),yP(0));ctx.lineTo(xP(XLO),yP(0));ctx.closePath();ctx.fill();
   // Curve
-  ctx.strokeStyle=css('--laeq');ctx.lineWidth=2;
+  ctx.strokeStyle=css('--series');ctx.lineWidth=2;
   ctx.beginPath();pts.forEach((p,i)=>{const x=xP(p.db),y=yP(p.pct);i?ctx.lineTo(x,y):ctx.moveTo(x,y);});ctx.stroke();
   // LA10/LA50/LA90 dots + labels
   [[10,'LA10'],[50,'LA50'],[90,'LA90']].forEach(([pct,lbl])=>{
     const pt=pts.find(p=>p.pct<=pct)||pts[pts.length-1];
     if(!pt)return;
     const x=xP(pt.db),y=yP(pct);
-    ctx.fillStyle=css('--laeq');ctx.beginPath();ctx.arc(x,y,3,0,Math.PI*2);ctx.fill();
+    ctx.fillStyle=css('--series');ctx.beginPath();ctx.arc(x,y,3,0,Math.PI*2);ctx.fill();
     ctx.fillStyle=css('--text2');ctx.font='9px '+css('--font-ui');
     ctx.textAlign=pct<=50?'right':'left';ctx.fillText(lbl+' '+pt.db.toFixed(0)+'dB',x+(pct>50?5:-5),y-4);
   });
@@ -1413,14 +1429,84 @@ function drawExceedance(canvas, laeq) {
 }
 
 // ── Open / close modal ────────────────────────────────────
+// The run modal is evidence-facing, so every row names the quantity it actually
+// shows. The series-derived rows wait for the real 1-second series, fetched by
+// the run's stable identity; the meter's own scalars need no fetch and render
+// straight away.
+let modalProfSeq = 0;         // guards against a late response for a closed run
+const modalProfCache = {};    // date/source_file -> {series, source}
+
+// Resolve to {series, source}: the stored 1-s LAeq series ('prof'), or the
+// downsampled chart profile ('chart') when the run has none — peer-synced
+// sessions predating the PROF columns, or a run whose stable key is missing.
+// A 'chart' result is labelled wherever it is displayed; it is never passed off
+// as the 1-s series.
+async function loadRunProf(proj, date) {
+  const fallback = {series: proj.laeq_profile || [], source: 'chart'};
+  if (!proj.source_file) return fallback;
+  const key = date + '/' + proj.source_file;
+  if (modalProfCache[key]) return modalProfCache[key];
+  let result = fallback;
+  try {
+    const r = await fetch(`/api/run/${encodeURIComponent(date)}/${encodeURIComponent(proj.source_file)}/prof`);
+    if (r.ok) {
+      const j = await r.json();
+      if (j.prof_laeq && j.prof_laeq.length) result = {series: j.prof_laeq, source: 'prof'};
+    }
+  } catch (e) { /* leave the labelled fallback in place */ }
+  modalProfCache[key] = result;
+  return result;
+}
+
+// prof is null while the series is in flight — the scalar rows still render,
+// the series-derived ones show a placeholder.
+function renderModalStats(proj, prof) {
+  const stats = prof ? computeStats(prof.series) : null;
+  // Still waiting, versus a run that has no series at all: the second must not
+  // sit on the loading placeholder for ever.
+  const PENDING = prof ? '–' : '…';
+  const d1 = v => v == null ? '–' : v.toFixed(1);
+  // Only a fallback series carries a provenance note; the fetched 1-s series is
+  // what the rows claim to be.
+  const noteText = prof && prof.source === 'chart'
+    ? `(from 1/${proj.step} s chart profile)` : '';
+  const note = noteText ? ` <span class="mstat-src">${noteText}</span>` : '';
+  // The two distribution charts change source with the series, so they say so
+  // as well; a reader should not have to infer it from a row above.
+  ['modalHistSrc', 'modalExcSrc'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = noteText ? ' ' + noteText : '';
+  });
+  // The meter's own GLOB percentile where it stored one; the series percentile
+  // only as a fallback, and then labelled with where it came from.
+  const pctl = (glob, key) => proj[glob] != null
+    ? {v: d1(proj[glob]), note: ''}
+    : {v: stats ? stats[key] : PENDING, note: stats ? note : ''};
+  const la10 = pctl('la_l10', 'la10'),
+        la50 = pctl('la_l50', 'la50'),
+        la90 = pctl('la_l90', 'la90');
+  const pct85 = stats ? stats.pct85 : PENDING;
+  // LAeq, LAFmax/LAFmin, LAImax and LCpeak are the meter's own GLOB scalars.
+  // They were once maxima of downsampled PROF channels, which put the LApeak
+  // series under an "LCpeak max" label and the LAE series under "LAImax peak",
+  // and read LAmax/LAmin off a max-of-window profile whose minimum is biased
+  // high. Nothing here may be derived from a profile again.
+  document.getElementById('modalStats').innerHTML = [
+    ['LA<sub>eq</sub> (energy avg)', d1(proj.avg), 'dB', false],
+    ...(proj.lceq != null ? [['LC<sub>eq</sub>', d1(proj.lceq), 'dB', false]] : []),
+    ['LA10' + la10.note, la10.v, 'dB', false],
+    ['LA50 (median)' + la50.note, la50.v, 'dB', false],
+    ['LA90 (background)' + la90.note, la90.v, 'dB', false],
+    ...(proj.mx != null ? [['LA<sub>Fmax</sub>', d1(proj.mx), 'dB', false]] : []),
+    ...(proj.mn != null ? [['LA<sub>Fmin</sub>', d1(proj.mn), 'dB', false]] : []),
+    ...(proj.laimax != null ? [['LA<sub>Imax</sub>', d1(proj.laimax), 'dB', false]] : []),
+    ...(proj.pmx != null ? [['LC<sub>peak</sub> max', d1(proj.pmx), 'dB', true]] : []),
+    ['Time ≥ 85 dB' + (stats ? note : ''), pct85, '%', parseFloat(pct85) > 5],
+  ].map(([n,v,u,hi])=>`<div class="mstat"><span class="mstat-n">${n}</span><span class="mstat-v${hi?' hi':''}">${v}&thinsp;${u}</span></div>`).join('');
+}
+
 function openRunModal(proj, runNum, date) {
   const runIdx = runNum - 1;
-  const stats = computeStats(proj.laeq_profile, proj.lcpeak_profile, proj.lafmax_profile, proj.laimax_profile);
-  if (proj.avg    != null) stats.leq  = proj.avg.toFixed(1);
-  if (proj.la_l10 != null) stats.la10 = proj.la_l10.toFixed(1);
-  if (proj.la_l50 != null) stats.la50 = proj.la_l50.toFixed(1);
-  if (proj.la_l90 != null) stats.la90 = proj.la_l90.toFixed(1);
-  if (proj.lafmax != null) stats.pmxf = proj.lafmax.toFixed(1);
   const sess = DATA.sessions.find(s => s.d === date);
   const tagLabel = proj.loc_tag ? `  ·  Location ${proj.loc_tag}` : '';
   document.getElementById('modalTitle').textContent = `Run ${runIdx+1}${tagLabel}  ·  ${proj.start}${proj.end ? '–' + proj.end : ''}`;
@@ -1440,27 +1526,26 @@ function openRunModal(proj, runNum, date) {
   document.getElementById('modal-mf-notes').value = sess.notes || '';
   closeModalMetaEdit();
 
-  document.getElementById('modalStats').innerHTML = [
-    ['LA<sub>eq</sub> (energy avg)', stats.leq, 'dB', false],
-    ...(proj.lceq != null ? [['LC<sub>eq</sub>', proj.lceq.toFixed(1), 'dB', false]] : []),
-    ['LA10', stats.la10, 'dB', false],
-    ['LA50 (median)', stats.la50, 'dB', false],
-    ['LA90 (background)', stats.la90, 'dB', false],
-    ['LA<sub>max</sub>', stats.lmax, 'dB', false],
-    ['LA<sub>min</sub>', stats.lmin, 'dB', false],
-    ...(stats.pmxf ? [['LA<sub>Fmax</sub> peak', stats.pmxf, 'dB', false]] : []),
-    ...(stats.pmxi ? [['LA<sub>Imax</sub> peak', stats.pmxi, 'dB', false]] : []),
-    ['LC<sub>peak</sub> max', stats.pmx, 'dB', true],
-    ['Time ≥ 85 dB', stats.pct85, '%', parseFloat(stats.pct85)>5],
-  ].map(([n,v,u,hi])=>`<div class="mstat"><span class="mstat-n">${n}</span><span class="mstat-v${hi?' hi':''}">${v}&thinsp;${u}</span></div>`).join('');
+  renderModalStats(proj, null);
   document.getElementById('modalExportBtn').onclick = () => exportRunCSV(proj, runIdx, date);
   document.getElementById('modalReportBtn').onclick = () => openReportOpt(date, runIdx + 1, `${date} — Run ${runIdx + 1}`);
   document.getElementById('modalOverlay').classList.add('open');
   document.body.style.overflow='hidden';
+  // The time series chart stays on the chart profile: it is a picture of the
+  // run, drawn against the LAFmax profile beside it, and the two must be
+  // sampled alike. The counting and binning below must not be.
   requestAnimationFrame(()=>{
     drawModalTimeSeries(document.getElementById('modalMainCanvas'), proj);
-    drawHistogram(document.getElementById('modalHistCanvas'), proj.laeq_profile);
-    drawExceedance(document.getElementById('modalExcCanvas'), proj.laeq_profile);
+  });
+  // The histogram, the exceedance curve and the time above 85 dB all count
+  // samples, so they wait for the real 1-second series rather than counting the
+  // max-of-window chart profile.
+  const seq = ++modalProfSeq;
+  loadRunProf(proj, date).then(prof => {
+    if (seq !== modalProfSeq) return;   // another run was opened meanwhile
+    renderModalStats(proj, prof);
+    drawHistogram(document.getElementById('modalHistCanvas'), prof.series);
+    drawExceedance(document.getElementById('modalExcCanvas'), prof.series);
   });
 }
 function openModalMetaEdit() {

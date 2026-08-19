@@ -816,6 +816,40 @@ def get_run_prof_laeq(date, run_number):
     return json.loads(row['prof_laeq_json'])
 
 
+def get_run_prof_by_source(date, source_file):
+    """Return the stored 1-second PROF series for one run, keyed on the stable
+    identity (`source_file`, e.g. 'PROJ0003') rather than its position.
+
+    `run_number` is assigned from the session order and moves when a session is
+    re-imported or a run is inserted; `source_file` is the NOR140 project folder
+    and does not. Anything a page fetches after render must use the stable key,
+    or a re-import between render and fetch silently swaps the measurement.
+
+    Returns None when the run does not exist, so the caller can 404 rather than
+    present an empty chart as if it were data. Returns a dict whose
+    'prof_laeq'/'prof_lafspl' are [] when the run exists but the series was
+    never stored (peer-synced sessions predating the PROF columns) — the caller
+    must then say so rather than substituting the downsampled chart profile
+    unlabelled.
+    """
+    conn = get_db()
+    row = conn.execute(
+        'SELECT r.run_number, r.n_samples, r.step, r.prof_laeq_json, r.prof_lafspl_json '
+        'FROM runs r JOIN sessions s ON r.session_id = s.id '
+        'WHERE s.date = ? AND r.source_file = ?', (date, source_file)).fetchone()
+    conn.close()
+    if row is None:
+        return None
+    return {
+        'source_file': source_file,
+        'run_number':  row['run_number'],
+        'n':           row['n_samples'],
+        'step':        row['step'],
+        'prof_laeq':   json.loads(row['prof_laeq_json']) if row['prof_laeq_json'] else [],
+        'prof_lafspl': json.loads(row['prof_lafspl_json']) if row['prof_lafspl_json'] else [],
+    }
+
+
 def update_run_location_tag(date, run_number, tag):
     conn = get_db()
     conn.execute(
