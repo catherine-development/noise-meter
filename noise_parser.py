@@ -147,11 +147,32 @@ _round_db = round_half_up
 
 
 def _parse_session_files(glob_data, prof_data):
-    """Parse one GLOB+PROF pair. Returns (date_str, run_dict) or (None, None)."""
+    """Parse one GLOB+PROF pair. Returns (date_str, run_dict) or (None, None).
+
+    Thin wrapper kept for the existing callers; the reason a pair was refused
+    comes from _parse_session_files_ex(), which parse_zip() uses so that
+    skipped files are reported rather than silently dropped.
+    """
+    date, run, _reason = _parse_session_files_ex(glob_data, prof_data)
+    return date, run
+
+
+# Profile levels above this are not sound — the meter's own ceiling is
+# CAP_PEAK (145 dB) and the A-weighted channels cap at CAP_LAEQ (130 dB) — so a
+# record beyond it means the PROF bytes are misaligned or damaged.
+_CORRUPT_ABOVE_DB = 140.0
+
+
+def _parse_session_files_ex(glob_data, prof_data):
+    """Parse one GLOB+PROF pair. Returns (date_str, run_dict, reason).
+
+    reason is None on success and a short human-readable string otherwise;
+    date_str is filled in whenever the GLOB decoded, even if the PROF did not.
+    """
     try:
         date, start, glob_metrics = _read_glob(glob_data)
-    except Exception:
-        return None, None
+    except Exception as e:
+        return None, None, f'GLOB could not be decoded ({type(e).__name__}: {e})'
 
     # Records are 10 bytes on most files but 8 on the 1069-byte GLOB variant, and
     # the size cannot be read from the PROF file itself — it is resolved against
@@ -160,17 +181,26 @@ def _parse_session_files(glob_data, prof_data):
                                 glob_metrics.get('duration_s'), len(glob_data))
     if rec_size is None:
         # Unclassifiable layout — skip rather than misdecode. See prof_record_size.
-        return date, None
+        return date, None, ('PROF record layout could not be resolved '
+                            f'({len(prof_data)} bytes, GLOB {len(glob_data)} bytes, '
+                            f'duration {glob_metrics.get("duration_s")})')
     recs = _read_prof(prof_data, rec_size)
     if not recs:
-        return date, None
-
-    if max(r[1] for r in recs) > 140:  # corrupted record — check before clamping
-        return date, None
+        return date, None, 'PROF holds no records'
 
     # The 8-byte layout omits the LAE channel and moves LApeak into slot 3.
     peak_ch = 4 if rec_size == PROF_RECORD_SIZE else 3
     has_lae = rec_size == PROF_RECORD_SIZE
+
+    # Corruption check, before clamping, on every channel that is capped below.
+    # A misaligned record puts its garbage in whichever slot it lands in, and
+    # checking only the LAeq channel let such files through with the other
+    # channels wrong.
+    n_ch = 5 if has_lae else 4
+    worst = max(max(r[ch] for r in recs) for ch in range(n_ch))
+    if worst > _CORRUPT_ABOVE_DB:
+        return date, None, (f'PROF values reach {worst:.1f} dB, above '
+                            f'{_CORRUPT_ABOVE_DB:.0f} dB — corrupt or misaligned')
 
     # Capped above only. A lower clamp at 20 dB used to raise every quieter
     # reading to exactly 20.0, which Nortfr does not do — see nor140_format.
@@ -274,7 +304,7 @@ def _parse_session_files(glob_data, prof_data):
         'laimax_profile': [_round_db(v, 1) for v in _downsample(lae_raw, step)] if lae_raw else None,
         'lapeak_profile': [_round_db(v, 1) for v in _downsample(lapeak_raw, step)],
         'lcpeak_profile': [_round_db(v, 1) for v in _downsample(lapeak_raw, step)],  # LApeak alias; true LCpeak is GLOB 0x03ef
-    }
+    }, None
 
 
 def _classify_filename(fname):
@@ -326,7 +356,20 @@ def parse_zip(zip_bytes):
     The ZIP may start at any level: SD root, MEAS118, a date folder, PART folder,
     a single PROJ folder, or even a flat ZIP of just the two DAT files.
 
-    Returns a list of session dicts: [{d, avg, mx, projects:[...]}, ...]
+    Returns a ParseResult — a list of session dicts
+        [{d, avg, mx, complete_date, skipped_files, projects:[...]}, ...]
+    whose `.skipped` attribute lists every GLOB/PROF pair that was found but
+    not imported, as {path, reason, date}. It used to drop those silently, so
+    the user was told "Added N session(s)" with no hint that a run was missing.
+
+    complete_date is True when every run of that session came from under a
+    date folder (YYMMDD/...), i.e. the upload contained the whole day as the
+    SD card holds it. import_sessions() only ever deletes stored runs that are
+    absent from the payload when this is set; a single PROJ folder or flat DAT
+    pair is a partial upload and can only add or refresh runs. skipped_files
+    names the PROJ folders on that date that were present but could not be
+    parsed, so a complete-date re-import never deletes a stored run just
+    because its file has since become unreadable.
     """
     zf = zipfile.ZipFile(io.BytesIO(zip_bytes))
     files = {n: zf.read(n) for n in zf.namelist() if not n.endswith('/')}
@@ -334,7 +377,7 @@ def parse_zip(zip_bytes):
     # Collect GLOB/PROF pairs keyed by (date_folder_or_sentinel, proj_key).
     # date_folder: a 6-digit string from the path, or '__from_glob__' if absent.
     # proj_key:    a 'PROJnnnn' string from the path, or synthesised from filename.
-    pairs = {}  # (date_folder, proj_key) -> {'glob': bytes, 'prof': bytes}
+    pairs = {}  # (date_folder, proj_key) -> {'glob': bytes, 'prof': bytes, 'dir': str}
 
     for path, data in files.items():
         parts = [p for p in path.replace('\\', '/').split('/') if p]
@@ -359,23 +402,44 @@ def parse_zip(zip_bytes):
 
         date_key = date_folder if date_folder else '__from_glob__'
         key = (date_key, proj_folder)
-        pairs.setdefault(key, {})
-        pairs[key][kind] = data
+        entry = pairs.setdefault(key, {'dir': '/'.join(parts[:-1]) or proj_folder})
+        entry[kind] = data
+
+    skipped = []
+    # date -> set of PROJ keys that were present on that date but not parsed.
+    unparsed = {}
+
+    def _skip(date_key, proj_folder, entry, date, reason):
+        if date is None and date_key != '__from_glob__':
+            # The GLOB did not decode, but the SD card folder names the day.
+            date = f'20{date_key[:2]}-{date_key[2:4]}-{date_key[4:6]}'
+        skipped.append({'path': entry['dir'], 'reason': reason, 'date': date})
+        if date is not None and date_key != '__from_glob__':
+            unparsed.setdefault(date, set()).add(proj_folder)
 
     # Parse each complete GLOB+PROF pair and group by resolved date.
     by_date = {}
+    from_date_folder = {}  # date -> [bool per run]
     for (date_key, proj_folder), pair in sorted(pairs.items()):
         if 'glob' not in pair or 'prof' not in pair:
+            have = 'GLOB' if 'glob' in pair else 'PROF'
+            _skip(date_key, proj_folder, pair, None,
+                  f'only the {have} file is present — a GLOB/PROF pair is needed')
             continue
-        date, run = _parse_session_files(pair['glob'], pair['prof'])
+        date, run, reason = _parse_session_files_ex(pair['glob'], pair['prof'])
         if not date or not run:
+            _skip(date_key, proj_folder, pair, date, reason or 'unparseable')
             continue
         if date in ('2001-01-01', '2000-01-01'):  # factory/unset dates
+            skipped.append({'path': pair['dir'], 'date': date,
+                            'reason': f'factory/unset date {date}'})
             continue
         by_date.setdefault(date, []).append((proj_folder, run))
+        from_date_folder.setdefault(date, []).append(date_key != '__from_glob__')
 
     # Assemble into per-day session dicts.
-    result = []
+    result = ParseResult()
+    result.skipped = skipped
     for date in sorted(by_date):
         projects = [{**run, 'source_file': pf} for pf, run in sorted(by_date[date])]
         if not projects:
@@ -385,7 +449,20 @@ def parse_zip(zip_bytes):
             'd':        date,
             'avg':      avg,
             'mx':       round(max(p['mx'] for p in projects), 1),
+            'complete_date': all(from_date_folder[date]),
+            'skipped_files': sorted(unparsed.get(date, ())),
             'projects': projects,
         })
 
     return result
+
+
+class ParseResult(list):
+    """The list parse_zip()/parse_files() return, plus a `skipped` report.
+
+    A list subclass rather than a tuple so that every existing caller — which
+    indexes, iterates and json-dumps the result — keeps working unchanged.
+    `skipped` is a list of {'path', 'reason', 'date'} for every GLOB/PROF pair
+    that was found in the upload but not turned into a run.
+    """
+    skipped = ()
