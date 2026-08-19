@@ -1,0 +1,33 @@
+{#
+  CSRF plumbing, included from the <head> of every page.
+
+  The token is in a meta tag rather than inlined at each call site, and fetch is
+  wrapped once here rather than edited in forty places, so a fetch() added
+  anywhere in the app later is protected without anyone remembering to do it.
+  HTML forms still carry their own hidden csrf_token field — a form posts
+  without touching JavaScript.
+
+  Only same-origin, state-changing requests get the header: an outbound call to
+  Open-Meteo or anywhere else must not leak the token.
+#}
+<meta name="csrf-token" content="{{ csrf_token() }}">
+<script>
+(function () {
+  var TOKEN = document.querySelector('meta[name="csrf-token"]').content;
+  window.CSRF_TOKEN = TOKEN;
+  var SAFE = {GET: 1, HEAD: 1, OPTIONS: 1, TRACE: 1};
+  var nativeFetch = window.fetch.bind(window);
+  window.fetch = function (input, init) {
+    init = init || {};
+    var url = (typeof input === 'string') ? input : (input && input.url) || '';
+    var method = (init.method || (input && input.method) || 'GET').toUpperCase();
+    var sameOrigin = !/^[a-z][a-z0-9+.-]*:/i.test(url) || url.indexOf(location.origin) === 0;
+    if (!SAFE[method] && sameOrigin) {
+      var headers = new Headers(init.headers || (input && input.headers) || {});
+      if (!headers.has('X-CSRF-Token')) headers.set('X-CSRF-Token', TOKEN);
+      init = Object.assign({}, init, {headers: headers});
+    }
+    return nativeFetch(input, init);
+  };
+})();
+</script>

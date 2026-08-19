@@ -32,6 +32,7 @@ input:focus{outline:none;border-color:var(--accent)}
 .method-toggle label{flex:1;text-align:center;padding:8px 12px;cursor:pointer;font-size:13px;font-weight:600;color:var(--accent);transition:all .15s}
 .method-toggle input:checked + label{background:var(--accent);color:#fff}
 </style>
+{% include '_csrf.html' %}
 </head>
 <body>
 <div class="card">
@@ -46,6 +47,7 @@ input:focus{outline:none;border-color:var(--accent)}
     <h1>Sign in</h1>
     <p class="sub">Enter your email address to receive a one-time login code.</p>
     <form method="POST" action="/login">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
       <input type="hidden" name="step" value="email">
       <div class="field">
         <label for="email">Email address</label>
@@ -59,6 +61,7 @@ input:focus{outline:none;border-color:var(--accent)}
     <h1>How to receive your code?</h1>
     <p class="sub">Choose how you'd like us to send your one-time login code.</p>
     <form method="POST" action="/login">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
       <input type="hidden" name="step" value="send">
       <input type="hidden" name="email" value="{{ email }}">
       <div class="method-toggle">
@@ -82,6 +85,7 @@ input:focus{outline:none;border-color:var(--accent)}
     <div class="info">Code sent to <strong>{{ destination }}</strong>. Valid for 10 minutes.</div>
     {% endif %}
     <form method="POST" action="/login">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
       <input type="hidden" name="step" value="otp">
       <input type="hidden" name="email" value="{{ email }}">
       <div class="field">
