@@ -353,7 +353,7 @@ def export_sessions_csv():
     buf = io.StringIO()
     w = csv.writer(buf)
     w.writerow(['date', 'location', 'recorder', 'postcode', 'lat', 'lng',
-                'laeq_avg_db', 'laeq_max_db', 'lcpeak_max_db', 'run_count', 'notes'])
+                'laeq_avg_db', 'lafmax_max_db', 'lcpeak_max_db', 'run_count', 'notes'])
     for s in sessions:
         projects = s.get('projects', [])
         lcpeak_max = round(max((p['pmx'] for p in projects), default=0), 1) if projects else ''

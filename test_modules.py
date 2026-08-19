@@ -1043,6 +1043,75 @@ def main(meas_root):
         print('\n7. xlsx export matches the Nortfr references')
         check_references(meas_root, tmp)
 
+        # ── 8. WP4/F9 — CSV headers name the channel actually written ─────────
+        # Reuses the Flask test client and 'rt' Side set up in section 4d — its
+        # DB has the real SD-card sessions imported and noise_app is already
+        # bound to it (the first import of noise_app in this process binds its
+        # `from noise_db import ...` names to whichever noise_db module is
+        # current at that moment, which was rt's).
+        print('\n8. CSV export headers match their contents (F9)')
+
+        resp = _client.get('/export/sessions.csv')
+        check(resp.status_code == 200, 'sessions CSV downloads', resp.status_code)
+        sess_header = resp.get_data(as_text=True).split('\r\n')[0].split(',')
+        check('lafmax_max_db' in sess_header,
+              'sessions CSV: lafmax_max_db header present (was laeq_max_db, held LAFmax)',
+              sess_header)
+        check('laeq_max_db' not in sess_header,
+              'sessions CSV: stale laeq_max_db header gone', sess_header)
+        check('laeq_avg_db' in sess_header,
+              'sessions CSV: laeq_avg_db kept (WP5 changes its definition, not its name)',
+              sess_header)
+
+        aid8 = rt.assess.create_assessment('F9 CSV test')
+        lid8 = rt.assess.add_assessment_location(aid8, 'L')
+        rt.assess.assign_runs(aid8, lid8, [(SESSION_DATE, 9)])
+        resp = _client.get(f'/export/assessment/{aid8}.csv')
+        check(resp.status_code == 200, 'assessment CSV downloads', resp.status_code)
+        lines = resp.get_data(as_text=True).split('\r\n')
+        assess_header = lines[0].split(',')
+        check('lafmin_db' in assess_header and 'lafmax_db' in assess_header,
+              'assessment CSV: lafmin_db/lafmax_db headers present '
+              '(were min_laeq_db/max_laeq_db, held LAFmin/LAFmax)', assess_header)
+        check('min_laeq_db' not in assess_header and 'max_laeq_db' not in assess_header,
+              'assessment CSV: stale min/max_laeq_db headers gone', assess_header)
+        check('n_samples' in assess_header,
+              'assessment CSV: n_samples header present (was mislabelled duration_s)',
+              assess_header)
+        check('duration_s' in assess_header,
+              'assessment CSV: duration_s is now the real meter-stored value', assess_header)
+        row1 = lines[1].split(',')
+        check(len(row1) == len(assess_header),
+              'assessment CSV: data row width matches header',
+              f'{len(row1)} vs {len(assess_header)}')
+        rt.assess.delete_assessment(aid8)
+
+        # Per-run CSV headers are built client-side in index.html — assert the
+        # source names the real fields (grep, since it's JS, not testable via
+        # the Python data layer).
+        idx_html = open(os.path.join(REPO, 'templates', 'index.html'), encoding='utf-8').read()
+        run_hdr_line = [l for l in idx_html.split('\n') if "'run', 'start_time'" in l]
+        check(len(run_hdr_line) == 1, 'exportSessionRuns header row found once',
+              str(len(run_hdr_line)))
+        hl = run_hdr_line[0]
+        check('lafmin_db' in hl and 'lafmax_db' in hl,
+              'exportSessionRuns: lafmin_db/lafmax_db headers present '
+              '(were laeq_min_db/laeq_max_db, held LAFmin/LAFmax)', hl.strip())
+        check('laeq_min_db' not in hl and 'laeq_max_db' not in hl,
+              'exportSessionRuns: stale laeq_min_db/laeq_max_db gone', hl.strip())
+        check("'duration_s'" in hl,
+              'exportSessionRuns: duration_s header present (was p.n, the record count)',
+              hl.strip())
+
+        run_csv_fn = idx_html.split('function exportRunCSV(')[1].split('\nfunction ')[0]
+        check("'lae_db'" in run_csv_fn,
+              'exportRunCSV: lae_db header present (was laimax_db, holds the LAE channel)',
+              run_csv_fn[:300])
+        check("'lapeak_db'" in run_csv_fn,
+              'exportRunCSV: lapeak_db header present (was lcpeak_db, holds LApeak, not true LCpeak)')
+        check("'laimax_db'" not in run_csv_fn, 'exportRunCSV: stale laimax_db header gone')
+        check("'lcpeak_db'" not in run_csv_fn, 'exportRunCSV: stale lcpeak_db header gone')
+
         print(f'\nAll {_checks} checks passed.')
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

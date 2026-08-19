@@ -185,14 +185,16 @@ def export_assessment_csv(aid):
     output = io.StringIO()
     w = csv.writer(output)
     w.writerow(['sub_location', 'description', 'date', 'start_time', 'end_time', 'duration_s',
-                'time_period', 'avg_laeq_db', 'min_laeq_db', 'max_laeq_db',
+                'n_samples', 'time_period', 'avg_laeq_db', 'lafmin_db', 'lafmax_db',
                 'la10_db', 'la90_db', 'max_lcpeak_db', 'max_laimax_db',
                 'conditions', 'notes'])
     for loc in data['locations']:
         for r in loc['runs']:
             w.writerow([
                 loc['label'], loc['description'] or '', r['date'], r['start_time'],
-                r.get('end_time') or '', r['duration_s'], r['time_period'],
+                r.get('end_time') or '',
+                r['duration_s'] if r.get('duration_s') is not None else '',
+                r.get('n_samples', ''), r['time_period'],
                 r.get('avg_laeq', ''), r.get('min_laeq', ''), r.get('max_laeq', ''),
                 r.get('la10', ''), r.get('la90', ''),
                 r.get('max_lcpeak', ''), r.get('max_laimax', ''),
