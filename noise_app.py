@@ -13,6 +13,13 @@ import urllib.request
 import threading
 from datetime import timedelta
 
+# Configured once, as early as possible: every log call below this line — our
+# own, and the import-time warnings from webauth and peer_client — goes
+# through it. Under gunicorn this module is only ever imported, never run as
+# __main__, so this can't live behind an `if __name__ == '__main__':` guard.
+logging.basicConfig(level=logging.INFO,
+                    format='%(asctime)s %(levelname)s %(name)s: %(message)s')
+
 # Imported before noise_db on purpose: importing config is what loads .env, and
 # noise_db reads NOISE_DB_PATH at module scope.
 from config import PI_NAME, IMPORT_KEY, UPLOAD_PASS
@@ -74,6 +81,53 @@ app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SECURE=_env_flag('SESSION_COOKIE_SECURE', True),
 )
+
+# Uploads and /import bodies are read fully into memory and any ZIP among them
+# is extracted in memory too (noise_parser.parse_zip / parse_files) — an
+# unbounded request body is a memory-exhaustion vector on a Pi with 4-8 GB of
+# RAM running other services besides this one. 64 MB comfortably covers a full
+# SD-card ZIP with headroom; override in .env if a card ever needs more.
+app.config['MAX_CONTENT_LENGTH'] = (
+    int(os.environ.get('MAX_CONTENT_LENGTH_MB', '64')) * 1024 * 1024)
+
+
+@app.errorhandler(413)
+def _request_too_large(_e):
+    """A request over MAX_CONTENT_LENGTH — readable rather than Werkzeug's
+    bare "413 Request Entity Too Large" text page, and JSON for the machine
+    clients (import_sdcard.py, the peer Pi, the folder-upload fetch() call)
+    that would otherwise have to parse HTML to find out what happened. Renders
+    the upload page inline instead of redirecting so the 413 status survives —
+    a redirect response is always a 3xx, which would hide the failure from a
+    client checking the status code."""
+    limit_mb = app.config['MAX_CONTENT_LENGTH'] // (1024 * 1024)
+    msg = (f'Upload too large — the limit is {limit_mb} MB. Split the upload '
+           f'into fewer sessions per pass, or raise MAX_CONTENT_LENGTH_MB in .env.')
+    wants_json = (request.path.startswith('/import') or
+                 request.path.startswith('/api/') or
+                 request.headers.get('X-Requested-With') == 'XMLHttpRequest')
+    if wants_json:
+        return jsonify({'status': 'error', 'error': msg, 'message': msg}), 413
+    flash(msg, 'error')
+    return render_template('upload.html', pi_name=PI_NAME, log=get_import_log(),
+                           needs_password=bool(UPLOAD_PASS),
+                           last_push_error=get_last_push_error()), 413
+
+
+# init_db() (all migrations) and startup_sync_from_peer() used to run only
+# under `if __name__ == '__main__':`, below. That is never reached under
+# gunicorn, which imports this module and calls the WSGI `app` object
+# directly — a fresh Pi would come up serving requests against a database with
+# no tables at all. Running them here means every path that imports this
+# module (gunicorn, `python3 noise_app.py`, the test suite's importlib
+# import) gets a migrated database before the first request. Both are safe to
+# repeat: init_db() is CREATE-TABLE-IF-NOT-EXISTS plus additive, guarded
+# ALTERs, and startup_sync_from_peer() is a no-op whenever PEER_URL/
+# IMPORT_API_KEY are unset — true for sync_peer.py and import_sdcard.py, which
+# import noise_db directly and never import this module, and for the test
+# suite, which never sets PEER_URL.
+init_db()
+startup_sync_from_peer()
 
 # One hook for the whole app, blueprints included: every non-GET request that
 # is not API-key authenticated must carry the session's CSRF token.
@@ -156,9 +210,9 @@ def _auto_fetch_weather(sessions):
         try:
             w = _fetch_weather_for_session(date, s['lat'], s['lng'])
             save_weather(date, w)
-            print(f"Weather fetched for {date}")
+            log.info('Weather fetched for %s', date)
         except Exception as e:
-            print(f"Weather fetch failed for {date}: {e}")
+            log.warning('Weather fetch failed for %s: %s', date, e)
 
 
 # ── Auth routes ───────────────────────────────────────────────────────────────
@@ -250,9 +304,26 @@ def api_sync():
                     'pi_name': PI_NAME, 'since': since})
 
 
+def _read_version():
+    """The short commit hash deploy_to_pis.sh writes to VERSION after copying
+    files, so /health can say what's actually running on a Pi. Read once at
+    import time — a real change here always comes with a service restart
+    (deploy_to_pis.sh's last step), so there is never a stale in-process value
+    to worry about. 'dev' when there is no VERSION file, e.g. this worktree,
+    or a checkout run directly with `python3 noise_app.py`."""
+    try:
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'VERSION')) as f:
+            return f.read().strip() or 'dev'
+    except OSError:
+        return 'dev'
+
+
+APP_VERSION = _read_version()
+
+
 @app.route('/health')
 def health():
-    return jsonify({'status': 'ok', 'pi': PI_NAME})
+    return jsonify({'status': 'ok', 'pi': PI_NAME, 'version': APP_VERSION})
 
 
 # ── Upload page ────────────────────────────────────────────────────────────────
@@ -678,7 +749,9 @@ def api_run_prof(date, source_file):
 
 
 if __name__ == '__main__':
-    init_db()
-    startup_sync_from_peer()
+    # init_db() and startup_sync_from_peer() already ran above, at import
+    # time — this dev entry point just starts the server. Not used in
+    # production: gunicorn (under systemd, see setup.sh) imports the module
+    # and serves `app` directly, and never runs this block.
     port = int(os.environ.get('PORT', 5001))
     app.run(host='0.0.0.0', port=port, debug=False, threaded=True)

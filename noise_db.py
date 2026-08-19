@@ -9,9 +9,22 @@ DB_PATH = os.environ.get('NOISE_DB_PATH', '/home/flightdata/noise-meter/noise.db
 
 
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
+    # timeout=15: seconds sqlite3 will retry (busy_timeout) before raising
+    # "database is locked" — request threads, the weather-fetch thread and the
+    # peer-push thread can all be writing around the same time.
+    conn = sqlite3.connect(DB_PATH, timeout=15)
     conn.row_factory = sqlite3.Row
     conn.execute('PRAGMA foreign_keys = ON')
+    # WAL: readers no longer block writers (or vice versa), which is what the
+    # concurrent writers above actually need — the default rollback journal
+    # serialises everyone. Idempotent: SQLite records the journal mode in the
+    # database file itself, so this is a no-op after the first connection ever
+    # made it. It does mean a running database is three files on disk
+    # (noise.db, noise.db-wal, noise.db-shm) instead of one — a plain `cp` of
+    # noise.db alone can miss committed data still sitting in -wal, so the
+    # nightly backup (backup_db.py) uses sqlite3's own online backup API
+    # instead, which checkpoints correctly regardless of journal mode.
+    conn.execute('PRAGMA journal_mode=WAL')
     return conn
 
 

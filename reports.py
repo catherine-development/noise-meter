@@ -11,6 +11,7 @@ scalars stored per run; these helpers only fall back to profile-derived
 estimates for older sessions imported before those columns existed.
 """
 import json
+import logging
 import math
 import os
 
@@ -23,6 +24,8 @@ from reports_db import (get_report_templates, get_report_template, save_report_t
                         update_report_template, delete_report_template,
                         save_generated_report, get_generated_reports,
                         get_generated_report, delete_generated_report)
+
+log = logging.getLogger('noise.reports')
 
 bp = Blueprint('reports', __name__)
 
@@ -402,8 +405,9 @@ def api_generate_report():
         run_number=run_number,
         run_label=run_label,
     )
-    print(f"Report generated [{date}] template={tmpl['name']} model={model} "
-          f"thinking={thinking_level}: {tok_in}/{tok_out} tokens ≈ ${cost_usd:.4f}")
+    log.info("Report generated [%s] template=%s model=%s thinking=%s: "
+            "%s/%s tokens ~ $%.4f",
+            date, tmpl['name'], model, thinking_level, tok_in, tok_out, cost_usd)
     return jsonify({'report_id': rid, 'cost_usd': cost_usd,
                     'input_tokens': tok_in, 'output_tokens': tok_out})
 

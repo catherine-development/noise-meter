@@ -1729,6 +1729,81 @@ def main(meas_root):
         check('chart profile' in _render,
               'and the fallback says so on the rows it produced')
 
+        # ── 11. WP6 — serving and operations (F16, F17) ────────────────────────
+        print('\n11. serving and operations (F16/F17)')
+        import subprocess as _sp6
+
+        # 11a. init_db() (all migrations) runs at import time now, not only
+        # under `if __name__ == '__main__':` — gunicorn imports this module
+        # and calls the WSGI `app` object directly, it never executes
+        # __main__, so a fresh Pi used to come up serving requests against a
+        # database with no tables at all. A real interpreter, a fresh
+        # NOISE_DB_PATH nothing else has touched, and nothing but `import
+        # noise_app` — the decisive version of this check, same shape as the
+        # startup-security one in section 9a.
+        _wp6_fresh_db = os.path.join(tmp, 'wp6-fresh.db')
+        _wp6_env = dict(os.environ)
+        _wp6_env['NOISE_DB_PATH'] = _wp6_fresh_db
+        _wp6_check = (
+            "import noise_app, sqlite3\n"
+            "c = sqlite3.connect(%r)\n"
+            "names = {r[0] for r in c.execute(\"SELECT name FROM sqlite_master WHERE type='table'\")}\n"
+            "assert {'sessions', 'runs'} <= names, names\n"
+        ) % _wp6_fresh_db
+        _wp6_proc = _sp6.run([sys.executable, '-c', _wp6_check], cwd=REPO,
+                             env=_wp6_env, capture_output=True, text=True)
+        check(_wp6_proc.returncode == 0,
+              'importing noise_app alone creates the schema (no __main__ needed)',
+              (_wp6_proc.stderr or '').strip()[-300:])
+
+        # 11b. get_db() puts the database in WAL mode — readers and writers
+        # (request threads, the weather-fetch thread, the peer-push thread)
+        # no longer block each other the way the default rollback journal did.
+        sys.modules.pop('noise_app', None)
+        wp6 = Side(os.path.join(tmp, 'wp6.db'))
+        _mode = wp6.sql('PRAGMA journal_mode')[0][0]
+        check(str(_mode).lower() == 'wal', 'get_db() puts the database in WAL mode', _mode)
+
+        # 11c/d. MAX_CONTENT_LENGTH is set (env-overridable — a small value
+        # here so the test doesn't need to build a real 64 MB body), and a
+        # request over it gets a 413 with a readable body instead of
+        # Werkzeug's bare "413 Request Entity Too Large" error page.
+        os.environ['MAX_CONTENT_LENGTH_MB'] = '1'
+        try:
+            sys.modules.pop('noise_app', None)
+            wp6app = importlib.import_module('noise_app')
+            check(wp6app.app.config['MAX_CONTENT_LENGTH'] == 1024 * 1024,
+                  'MAX_CONTENT_LENGTH honours MAX_CONTENT_LENGTH_MB',
+                  wp6app.app.config['MAX_CONTENT_LENGTH'])
+            wp6app.app.config['TESTING'] = True
+            wp6cl = wp6app.app.test_client()
+            _big = b'x' * (2 * 1024 * 1024)
+            _resp413 = wp6cl.post('/upload', data={'file': (_io.BytesIO(_big), 'big.zip')},
+                                  content_type='multipart/form-data')
+            check(_resp413.status_code == 413,
+                  'a request over MAX_CONTENT_LENGTH gets 413', _resp413.status_code)
+            check(b'too large' in _resp413.get_data().lower(),
+                  'and the 413 body is readable, not a bare Werkzeug error page',
+                  _resp413.get_data()[:200])
+            # The machine clients (import_sdcard.py, the peer Pi) get JSON,
+            # not an HTML page, on the same failure.
+            _resp413b = wp6cl.post('/import', data={'file': (_io.BytesIO(_big), 'big.zip')},
+                                   content_type='multipart/form-data',
+                                   headers={'X-Import-Key': 'whatever'})
+            check(_resp413b.status_code == 413 and
+                  'too large' in (_resp413b.get_json() or {}).get('message', '').lower(),
+                  '/import gets the same 413 as JSON', _resp413b.get_data()[:200])
+
+            # 11e. /health reports a version, falling back to 'dev' with no
+            # VERSION file — there is none in this checkout; deploy_to_pis.py
+            # writes one after copying files on a real Pi.
+            _health = wp6cl.get('/health').get_json()
+            check(_health.get('status') == 'ok' and _health.get('version') == 'dev',
+                  "/health reports status and version ('dev' with no VERSION file)",
+                  _health)
+        finally:
+            os.environ.pop('MAX_CONTENT_LENGTH_MB', None)
+
         print(f'\nAll {_checks} checks passed.')
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

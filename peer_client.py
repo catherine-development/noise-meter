@@ -99,7 +99,7 @@ def sync_event_to_peer(entity, action, data):
             )
             urllib.request.urlopen(req, timeout=10)
         except Exception as e:
-            print(f'Peer sync ({entity}/{action}) failed: {e}', flush=True)
+            log.warning('Peer sync (%s/%s) failed: %s', entity, action, e)
     threading.Thread(target=_do, daemon=True).start()
 
 
@@ -119,7 +119,7 @@ def startup_sync_from_peer():
             with urllib.request.urlopen(req, timeout=15) as resp:
                 data = json.loads(resp.read())
             apply_full_sync(data)
-            print('Startup peer sync: applied full payload from peer', flush=True)
+            log.info('Startup peer sync: applied full payload from peer')
         except Exception as e:
-            print(f'Startup peer sync failed: {e}', flush=True)
+            log.warning('Startup peer sync failed: %s', e)
     threading.Thread(target=_do, daemon=True).start()

@@ -2,3 +2,8 @@ flask>=3.0
 flask-limiter>=3.0
 openpyxl>=3.1
 anthropic>=0.121
+# Production WSGI server (setup.sh's systemd unit). 1 worker, 4 threads: see
+# the comment above the ExecStart line in setup.sh for why more workers would
+# be wrong here (SQLite writers, the in-memory rate limiter). Not needed by
+# the test suite, which talks to the Flask app object directly.
+gunicorn>=21.2

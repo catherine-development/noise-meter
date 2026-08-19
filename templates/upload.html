@@ -324,7 +324,8 @@ h2{font-size:14px;font-weight:600;color:var(--text2);margin-bottom:14px}
       formData.append('files', f, f.webkitRelativePath || f.name);
     });
 
-    fetch('/upload', { method: 'POST', body: formData })
+    fetch('/upload', { method: 'POST', body: formData,
+                       headers: { 'X-Requested-With': 'XMLHttpRequest' } })
       .then(function (r) { return r.json(); })
       .then(function (data) {
         if (data.status === 'ok') {
