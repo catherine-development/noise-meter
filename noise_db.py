@@ -135,9 +135,30 @@ def _migrate(conn):
         if col not in run_cols:
             conn.execute(f'ALTER TABLE runs ADD COLUMN {col} {typ}')
     gr_cols = {row[1] for row in conn.execute('PRAGMA table_info(generated_reports)').fetchall()}
-    for col, typ in [('run_number', 'INTEGER'), ('run_label', 'TEXT')]:
+    # source_file / input_snapshot_json: report provenance (WP3). A report is
+    # an evidence document, so it pins the run it was generated from by its
+    # stable identity (the PROJ folder, not the position, which is renumbered
+    # on every import) and carries a snapshot of every input it was rendered
+    # from, so a later backfill or re-import cannot make it disagree with
+    # itself.
+    for col, typ in [('run_number', 'INTEGER'), ('run_label', 'TEXT'),
+                     ('source_file', 'TEXT'), ('input_snapshot_json', 'TEXT')]:
         if col not in gr_cols:
             conn.execute(f'ALTER TABLE generated_reports ADD COLUMN {col} {typ}')
+    if 'source_file' not in gr_cols:
+        # Backfill through the run_number join. As with assessment_runs below,
+        # this is the one moment the positional join is still trustworthy: the
+        # numbers only go stale once a re-import shifts them, and this runs
+        # before any such import can. Whole-session reports (run_number NULL)
+        # have no single run to pin and stay NULL.
+        conn.execute('''
+            UPDATE generated_reports SET source_file = (
+                SELECT r.source_file FROM runs r
+                JOIN sessions s ON s.id = r.session_id
+                WHERE s.date = generated_reports.session_date
+                  AND r.run_number = generated_reports.run_number
+            ) WHERE source_file IS NULL AND run_number IS NOT NULL
+        ''')
     if not conn.execute('SELECT COUNT(*) FROM report_templates').fetchone()[0]:
         # Imported here rather than at module scope: reports_db imports get_db
         # from this module, so a top-level import would be circular.

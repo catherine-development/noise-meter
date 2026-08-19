@@ -1537,7 +1537,7 @@ function openRunModal(proj, runNum, date) {
 
   renderModalStats(proj, null);
   document.getElementById('modalExportBtn').onclick = () => exportRunCSV(proj, runIdx, date);
-  document.getElementById('modalReportBtn').onclick = () => openReportOpt(date, runIdx + 1, `${date} — Run ${runIdx + 1}`);
+  document.getElementById('modalReportBtn').onclick = () => openReportOpt(date, runIdx + 1, `${date} — Run ${runIdx + 1}`, proj.source_file);
   document.getElementById('modalOverlay').classList.add('open');
   document.body.style.overflow='hidden';
   // The time series chart stays on the chart profile: it is a picture of the
@@ -1670,11 +1670,15 @@ function fetchWeather(date) {
 
 <script>
 // ── Report options modal ───────────────────────────────────────────────────
-let _roptDate = null, _roptRun = null;
+let _roptDate = null, _roptRun = null, _roptSrc = null;
 
-async function openReportOpt(date, runNumber, label) {
+// sourceFile is the run's stable identity (its PROJ folder); run_number is
+// its position, which moves when the session is re-imported, so the report is
+// pinned by source_file and the number is only a label.
+async function openReportOpt(date, runNumber, label, sourceFile) {
   _roptDate = date;
   _roptRun  = runNumber || null;
+  _roptSrc  = sourceFile || null;
   document.getElementById('roptTitle').textContent = 'Report — ' + label;
   document.getElementById('roptNotice').textContent = '';
   document.getElementById('roptNotice').className = 'ropt-notice';
@@ -1721,6 +1725,7 @@ async function submitReportOpt() {
     thinking_level: document.getElementById('roptThinking').value,
   };
   if (_roptRun) body.run_number = _roptRun;
+  if (_roptRun && _roptSrc) body.source_file = _roptSrc;
 
   try {
     const res  = await fetch('/api/generate-report', {
