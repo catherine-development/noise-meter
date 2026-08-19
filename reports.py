@@ -22,7 +22,7 @@ from nor140_format import round_half_up
 from noise_parser import _energy_avg_weighted, run_weight_s
 from webauth import login_required
 from noise_db import (get_all_sessions_json, get_session_prof_lafspl,
-                      get_run_prof_laeq, percentile as _percentile)
+                      get_run_prof_laeq, percentile as _percentile, resolve_serial)
 from reports_db import (get_report_templates, get_report_template, save_report_template,
                         update_report_template, delete_report_template,
                         save_generated_report, get_generated_reports,
@@ -169,7 +169,8 @@ def _build_session_data_block(sess, run_rows, all_laeq, total_duration_s):
     # sizes), and not LAeq,1s (a different, energy-averaged quantity). Falls
     # back to PROF-expanded percentiles only for older sessions without full
     # 1s data.
-    pooled_lafspl = get_session_prof_lafspl(sess['d'], [r['run'] for r in run_rows])
+    pooled_lafspl = get_session_prof_lafspl(sess['d'], [r['run'] for r in run_rows],
+                                            serial=sess.get('serial'))
     if pooled_lafspl:
         s = sorted(pooled_lafspl)
         session_la90 = _percentile(s, 10)
@@ -194,6 +195,7 @@ def _build_session_data_block(sess, run_rows, all_laeq, total_duration_s):
     stat_label = f"RUN {run_rows[0]['run']} STATISTICS" if len(run_rows) == 1 else "SESSION STATISTICS"
     return (
         f"Instrument: Norsonic NOR140 Class 1 precision sound level meter (IEC 61672-1:2013).\n"
+        f"Instrument serial: {sess.get('serial') or 'Not recorded'}\n"
         f"Measurement date: {sess['d']}\n"
         f"Report scope: {scope}\n"
         f"Location: {location_str}\n"
@@ -287,18 +289,22 @@ def _call_claude(prompt, model, thinking_level):
     return sections, tok_in, tok_out, round(cost_usd, 4)
 
 
-def _prepare_session_for_report(date, run_number=None, source_file=None):
+def _prepare_session_for_report(date, run_number=None, source_file=None, serial=None):
     """Fetch session + compute stats. Returns (sess, run_rows, all_laeq, total_s)
     or None.
 
+    The session is (date, serial); None or blank serial means the default
+    instrument, so every pre-WP8 caller and stored report still resolves.
     A single run is selected by `source_file` (its stable identity — the
     NOR140 PROJ folder) when one is given; `run_number` is the position in the
     session, which is renumbered on every import, and is honoured only for
     legacy reports that recorded nothing else. Neither means all runs. Each
     run_row carries the run's current number and its source_file.
     """
+    serial = resolve_serial(serial)
     all_sessions = get_all_sessions_json()['sessions']
-    sess = next((s for s in all_sessions if s['d'] == date), None)
+    sess = next((s for s in all_sessions
+                 if s['d'] == date and s.get('serial', '') == serial), None)
     if not sess:
         return None
     all_projects = sess.get('projects', [])
@@ -318,7 +324,7 @@ def _prepare_session_for_report(date, run_number=None, source_file=None):
         # the position agree; prefer the stored one and fall back to the
         # position only for a payload that carries none.
         rn = proj.get('run_number') or (all_projects.index(proj) + 1)
-        st = _run_stats(proj, true_laeq=get_run_prof_laeq(date, rn))
+        st = _run_stats(proj, true_laeq=get_run_prof_laeq(date, rn, serial=serial))
         run_rows.append({'run': rn, 'source_file': proj.get('source_file'),
                          'start': proj['start'], 'end': proj.get('end'), **st})
         all_laeq.extend(_expand_run(proj))
@@ -336,6 +342,7 @@ def reports_page():
     sessions_with_runs = [
         {
             'd': s['d'],
+            'serial': s.get('serial', ''),
             'runs': [{'n': p.get('run_number') or i + 1, 'src': p.get('source_file'),
                       'start': p['start'], 'end': p.get('end'), 'dur': p.get('n', 0)}
                      for i, p in enumerate(s.get('projects', []))],
@@ -404,6 +411,7 @@ def api_delete_template(tid):
 def api_generate_report():
     data = request.get_json(force=True) or {}
     date           = data.get('session_date', '').strip()
+    serial         = resolve_serial(data.get('serial'))
     template_id    = data.get('template_id')
     model          = data.get('model', 'claude-sonnet-5')
     thinking_level = data.get('thinking_level', 'none')
@@ -419,11 +427,11 @@ def api_generate_report():
     # run_number; when only the number arrives (an older client) it is
     # resolved to the source_file now, while the number is still current.
     if source_file is None and run_number is not None:
-        result = _prepare_session_for_report(date, run_number=run_number)
+        result = _prepare_session_for_report(date, run_number=run_number, serial=serial)
         if result:
             source_file = result[1][0].get('source_file')
     result = _prepare_session_for_report(date, run_number=run_number,
-                                         source_file=source_file)
+                                         source_file=source_file, serial=serial)
     if not result:
         return jsonify({'error': f'Session {date} not found'}), 404
     sess, run_rows, all_laeq, total_s = result
@@ -468,11 +476,13 @@ def api_generate_report():
         'total_s': total_s,
         'generated_from': {
             'dates': [date],
+            'serials': [serial],
             'source_files': [r.get('source_file') for r in run_rows],
         },
     }
     rid = save_generated_report(
         session_date=date,
+        instrument_serial=serial,
         template_id=tmpl['id'],
         template_name=tmpl['name'],
         model=model,
@@ -493,7 +503,7 @@ def api_generate_report():
                     'input_tokens': tok_in, 'output_tokens': tok_out})
 
 
-_SESS_SNAPSHOT_KEYS = ('d', 'name', 'loc', 'post', 'lat', 'lng', 'notes', 'wx')
+_SESS_SNAPSHOT_KEYS = ('d', 'serial', 'name', 'loc', 'post', 'lat', 'lng', 'notes', 'wx')
 
 
 def _snapshot_sess(sess):
@@ -550,17 +560,19 @@ def view_report(rid):
 
     sections = json.loads(stored['sections_json'])
     date = stored['session_date']
+    serial = stored.get('instrument_serial')
 
     # Live figures, by the pinned identity where the report recorded one. A
     # legacy row (generated before provenance was stored) has only the
     # position, and that is all it can be resolved by.
     result = _prepare_session_for_report(date, run_number=stored.get('run_number'),
-                                         source_file=stored.get('source_file'))
+                                         source_file=stored.get('source_file'),
+                                         serial=serial)
     if result:
         sess, run_rows, all_laeq, total_s = result
         _, stats = _build_session_data_block(sess, run_rows, all_laeq, total_s)
     else:
-        sess, run_rows, stats = {'d': date}, [], {}
+        sess, run_rows, stats = {'d': date, 'serial': serial}, [], {}
         total_s = 0
 
     # The snapshot is what the report is rendered from when it has one; the
@@ -583,7 +595,7 @@ def view_report(rid):
             provenance['message'] = (
                 'The measurement this report was generated from is no longer stored; '
                 'the figures shown are the ones used when the report was generated.')
-        sess     = snap.get('sess') or {'d': date}
+        sess     = snap.get('sess') or {'d': date, 'serial': serial}
         run_rows = snap.get('run_rows') or []
         stats    = snap.get('stats') or {}
         total_s  = snap.get('total_s') or 0

@@ -8,6 +8,13 @@ Usage:
   python3 import_sdcard.py --output noise_data.json # save JSON file
   python3 import_sdcard.py --push https://noise.ives.org.uk  # push to Pi
   python3 import_sdcard.py --push https://... --since 2026-08-01  # only new sessions
+  python3 import_sdcard.py --serial 6899108 --push https://...   # name the meter
+
+Sessions are keyed on (date, instrument serial) on the Pi, and the NOR140
+writes no serial into its files, so one card = one meter and --serial (or the
+INSTRUMENT_SERIAL env var) names it. Left blank, the Pi files the sessions
+under its default serial (the instrument_serial app setting) — right for a
+one-meter setup, wrong the moment a second meter measures on the same date.
 
 Parsing is delegated entirely to noise_parser.parse_files() — the same
 canonical, Nortfr-verified decoder used for web uploads and the Pi backfill
@@ -26,6 +33,7 @@ from noise_parser import parse_files
 
 SD_ROOT    = os.environ.get('SD_ROOT', '/Volumes/NO LABEL/MEAS118')
 IMPORT_KEY = os.environ.get('IMPORT_API_KEY', '')
+SERIAL     = os.environ.get('INSTRUMENT_SERIAL', '')
 EXCLUDE_DIRS = {'000101'}
 
 
@@ -57,7 +65,7 @@ def _collect_files(sd_root, since=None):
     return pairs
 
 
-def parse_all(sd_root=None, since=None):
+def parse_all(sd_root=None, since=None, serial=None):
     root = sd_root or SD_ROOT
     if not os.path.isdir(root):
         print(f"ERROR: SD card not found at {root}", file=sys.stderr)
@@ -65,7 +73,7 @@ def parse_all(sd_root=None, since=None):
     pairs = _collect_files(root, since=since)
     if not pairs:
         return []
-    return parse_files(pairs)
+    return parse_files(pairs, serial=serial)
 
 
 def latest_date_on_pi(url, key=None):
@@ -117,12 +125,17 @@ def main():
     parser.add_argument('--key',     help='Import API key (or set IMPORT_API_KEY env var)')
     parser.add_argument('--since',   help='Only import sessions on/after YYYY-MM-DD')
     parser.add_argument('--sd-root', help='SD card root (default: /Volumes/NO LABEL/MEAS118)')
+    parser.add_argument('--serial',  default=SERIAL,
+                        help='Instrument serial this card came from (or set INSTRUMENT_SERIAL); '
+                             'blank = the Pi\'s default serial')
     args = parser.parse_args()
 
     sd_root = args.sd_root or SD_ROOT
     since = args.since
-    print(f"Reading SD card from {sd_root}" + (f" (since {since})" if since else ""))
-    sessions = parse_all(sd_root=sd_root, since=since)
+    serial = (args.serial or '').strip()
+    print(f"Reading SD card from {sd_root}" + (f" (since {since})" if since else "")
+          + (f" for instrument {serial}" if serial else " (no --serial: the Pi's default instrument)"))
+    sessions = parse_all(sd_root=sd_root, since=since, serial=serial)
 
     # Pairs the parser found but could not read. Printed before anything else
     # so a corrupt PROJ folder is never mistaken for a day with one run fewer.

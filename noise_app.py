@@ -33,7 +33,8 @@ from noise_db import (init_db, import_sessions, get_all_sessions_json,
                       save_weather, get_weather,
                       update_run_location_tag, purge_sessions_before,
                       get_sessions_export_format, get_run_prof_by_source,
-                      get_setting, set_setting, get_full_run_row)
+                      get_setting, set_setting, get_full_run_row,
+                      default_serial, resolve_serial)
 from sync_db import (get_import_log, get_full_sync_payload,
                      apply_full_sync, apply_sync_event, get_last_push_error)
 from noise_parser import parse_zip, parse_files
@@ -111,7 +112,8 @@ def _request_too_large(_e):
     flash(msg, 'error')
     return render_template('upload.html', pi_name=PI_NAME, log=get_import_log(),
                            needs_password=bool(UPLOAD_PASS),
-                           last_push_error=get_last_push_error()), 413
+                           last_push_error=get_last_push_error(),
+                           upload_serial=_upload_serial_default()), 413
 
 
 # init_db() (all migrations) and startup_sync_from_peer() used to run only
@@ -197,12 +199,14 @@ def _fetch_weather_for_session(date, lat, lng):
 
 
 def _auto_fetch_weather(sessions):
-    """Background thread: fetch weather for any new sessions that have coordinates."""
+    """Background thread: fetch weather for any new sessions that have coordinates.
+    Weather stays keyed by date (reference data); the coordinates come from
+    the (date, serial) session that was just imported."""
     all_data = get_all_sessions_json()['sessions']
-    sess_map = {s['d']: s for s in all_data}
+    sess_map = {(s['d'], s.get('serial', '')): s for s in all_data}
     for sess in sessions:
         date = sess['d']
-        s = sess_map.get(date, sess)
+        s = sess_map.get((date, resolve_serial(sess.get('serial'))), sess)
         if s.get('lat') is None or s.get('lng') is None:
             continue
         if get_weather(date):
@@ -282,6 +286,24 @@ def logout():
 
 # ── Main routes ───────────────────────────────────────────────────────────────
 
+def _req_serial():
+    """The instrument a session route is about: `serial` from the query
+    string, the form body or a JSON body, else the default. Existing links and
+    clients that name only the date therefore keep working."""
+    raw = request.args.get('serial')
+    if raw is None:
+        raw = request.form.get('serial')
+    if raw is None and request.is_json:
+        raw = (request.get_json(silent=True) or {}).get('serial')
+    return resolve_serial(raw)
+
+
+def _redirect_serial(serial):
+    """The serial to put in a redirect: blank when it is the default, so URLs
+    stay date-shaped for the one-meter case."""
+    return serial if serial != default_serial() else None
+
+
 @app.route('/')
 @login_required
 def index():
@@ -335,7 +357,14 @@ def upload_page():
     needs_password = bool(UPLOAD_PASS)
     return render_template('upload.html', pi_name=PI_NAME, log=log,
                            needs_password=needs_password,
-                           last_push_error=get_last_push_error())
+                           last_push_error=get_last_push_error(),
+                           upload_serial=_upload_serial_default())
+
+
+def _upload_serial_default():
+    """What the upload form's serial field starts with: the serial last used
+    on this Pi, else the instrument_serial setting."""
+    return get_setting('last_upload_serial') or get_setting('instrument_serial', '') or ''
 
 
 @app.route('/upload', methods=['POST'])
@@ -361,18 +390,28 @@ def do_upload():
     def _json_info(msg):
         return jsonify({'status': 'info', 'message': msg})
 
+    # The instrument this card came from. One upload is one meter; the field
+    # defaults to the last serial used here, and blank means the default
+    # serial. Resolved before parsing so the payload pushed to the peer names
+    # the serial this Pi actually stored it under.
+    serial = resolve_serial(request.form.get('serial'))
     try:
         if is_folder_upload:
             pairs = [(f.filename, f.read()) for f in folder_files]
-            parsed = parse_files(pairs)
+            parsed = parse_files(pairs, serial=serial)
         elif single_file and single_file.filename:
             raw   = single_file.read()
             fname = single_file.filename.lower()
             if fname.endswith('.zip'):
-                parsed = parse_zip(raw)
+                parsed = parse_zip(raw, serial=serial)
             elif fname.endswith('.json'):
                 data = json.loads(raw)
                 parsed = data.get('sessions', [data] if 'd' in data else [])
+                # A JSON export carries its own serial per session; one that
+                # predates the field is filed under the form's serial.
+                for sess in parsed:
+                    if not (sess.get('serial') or '').strip():
+                        sess['serial'] = serial
             else:
                 flash('Please upload a .zip of the SD card or a .json export.', 'error')
                 return redirect(url_for('upload_page'))
@@ -423,7 +462,7 @@ def do_upload():
     existing_starts = get_existing_run_starts()
 
     def _has_new_runs(s):
-        known = existing_starts.get(s['d'], set())
+        known = existing_starts.get((s['d'], resolve_serial(s.get('serial'))), set())
         return any(p['start'] not in known for p in s.get('projects', []))
 
     new_sessions = [s for s in parsed if _has_new_runs(s)]
@@ -440,6 +479,8 @@ def do_upload():
     # Import sessions. Runs are keyed on their PROJ folder, so a partial upload
     # refreshes or adds runs and never overwrites a different one.
     import_sessions(new_sessions, metadata=metadata)
+    if request.form.get('serial') is not None:
+        set_setting('last_upload_serial', serial)
 
     # Push to peer Pi and fetch weather in background
     push_to_peer(new_sessions)
@@ -504,13 +545,14 @@ def export_sessions_csv():
 
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(['date', 'location', 'recorder', 'postcode', 'lat', 'lng',
+    w.writerow(['date', 'serial', 'location', 'recorder', 'postcode', 'lat', 'lng',
                 'laeq_avg_db', 'lafmax_max_db', 'lcpeak_max_db', 'run_count', 'notes'])
     for s in sessions:
         projects = s.get('projects', [])
         lcpeak_max = round(max((p['pmx'] for p in projects), default=0), 1) if projects else ''
         w.writerow([
             s['d'],
+            s.get('serial') or '',
             s.get('loc') or '',
             s.get('name') or '',
             s.get('post') or '',
@@ -538,8 +580,12 @@ def export_sessions_csv():
 def manage_page():
     sessions = get_all_sessions_list()
     open_date = request.args.get('open')
+    # The serial is shown per row only when the database holds more than one.
+    serials = {s['instrument_serial'] for s in sessions}
     return render_template('manage.html', pi_name=PI_NAME,
                            sessions=sessions, open_date=open_date,
+                           multi_serial=len(serials) > 1,
+                           default_serial=default_serial(),
                            instrument_serial=get_setting('instrument_serial', ''))
 
 
@@ -567,20 +613,34 @@ def edit_session(date):
         lng            = _float('lng'),
         notes          = request.form.get('notes', '').strip(),
     )
-    update_session_metadata(date, **meta)
-    sync_event_to_peer('session_meta', 'upsert', {'date': date, **meta})
+    serial = _req_serial()
+    update_session_metadata(date, serial=serial, **meta)
+    sync_event_to_peer('session_meta', 'upsert', {'date': date, 'serial': serial, **meta})
     if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
-        return jsonify({'status': 'ok', 'date': date})
+        return jsonify({'status': 'ok', 'date': date, 'serial': serial})
     flash(f'Session {date} updated.', 'success')
-    return redirect(url_for('manage_page', open=date))
+    return redirect(url_for('manage_page', open=_manage_key(date, serial)))
+
+
+def _manage_key(date, serial):
+    """The row handle manage.html uses — see get_all_sessions_list()."""
+    return date + (('-' + serial) if serial else '')
 
 
 @app.route('/session/<date>/run/<int:run_number>/tag', methods=['POST'])
 @login_required
 def edit_run_tag(date, run_number):
-    tag = (request.json or {}).get('tag', '').strip().upper()
-    update_run_location_tag(date, run_number, tag)
-    sync_event_to_peer('run_tag', 'upsert', {'session_date': date, 'run_number': run_number, 'location_tag': tag or None})
+    body = request.json or {}
+    tag = body.get('tag', '').strip().upper()
+    serial = _req_serial()
+    # source_file, when the page sends it, is the run's stable identity; the
+    # number it was rendered with may be stale by the time this posts, and the
+    # peer's numbering can differ while it is missing a run for the date.
+    source_file = (body.get('source_file') or '').strip() or None
+    update_run_location_tag(date, run_number, tag, serial=serial, source_file=source_file)
+    sync_event_to_peer('run_tag', 'upsert', {
+        'session_date': date, 'serial': serial, 'run_number': run_number,
+        'source_file': source_file, 'location_tag': tag or None})
     return jsonify({'status': 'ok', 'tag': tag or None})
 
 
@@ -590,10 +650,12 @@ def export_nor140(date, run_number, report_type):
     if report_type not in ('GLOBAL', 'PROFILE'):
         return 'Invalid report type', 400
     from nor140_exporter import build_global_xlsx, build_profile_xlsx, export_filename
-    run = get_full_run_row(date, run_number)
+    run = get_full_run_row(date, run_number, serial=_req_serial())
     if run is None:
         return 'Run not found', 404
-    serial = get_setting('instrument_serial', '')
+    # The session's own serial names the file; the setting only as a fallback
+    # for a session filed under a blank one.
+    serial = run.get('instrument_serial') or get_setting('instrument_serial', '')
     if not run.get('spec_lfeq'):
         return ('Spectral data not available for this session. '
                 'It was received via peer sync and has not been locally backfilled. '
@@ -613,8 +675,9 @@ def export_nor140(date, run_number, report_type):
 @app.route('/session/<date>/delete', methods=['POST'])
 @login_required
 def delete_session_route(date):
-    delete_session(date)
-    sync_event_to_peer('session', 'delete', {'date': date})
+    serial = _req_serial()
+    delete_session(date, serial)
+    sync_event_to_peer('session', 'delete', {'date': date, 'serial': serial})
     flash(f'Session {date} deleted.', 'success')
     return redirect(url_for('manage_page'))
 
@@ -633,7 +696,10 @@ def do_import():
     if request.files.get('file'):
         raw = request.files['file'].read()
         if raw[:2] == b'PK':  # ZIP magic bytes
-            sessions = parse_zip(raw)
+            # A ZIP names no instrument itself; ?serial= / form `serial` does,
+            # else the default. JSON payloads carry `serial` per session.
+            sessions = parse_zip(raw, serial=request.args.get('serial')
+                                 or request.form.get('serial'))
             skipped = list(sessions.skipped)
         else:
             data = json.loads(raw)
@@ -706,8 +772,9 @@ def admin_push_to_peer():
 @app.route('/session/<date>/fetch-weather', methods=['POST'])
 @login_required
 def fetch_weather_route(date):
+    serial = _req_serial()
     all_data = get_all_sessions_json()['sessions']
-    sess = next((s for s in all_data if s['d'] == date), None)
+    sess = next((s for s in all_data if s['d'] == date and s.get('serial') == serial), None)
     if not sess or sess.get('lat') is None or sess.get('lng') is None:
         return jsonify({'status': 'error', 'message': 'No GPS coordinates for this session — add them via Edit metadata first.'})
     try:
@@ -724,7 +791,12 @@ def fetch_weather_route(date):
 @app.route('/api/existing-dates')
 @login_required
 def api_existing_dates():
-    return jsonify(sorted(get_existing_dates()))
+    """Dates already stored — for the instrument named by ?serial= (blank
+    meaning the default), so a second meter's card for a date the first
+    already covered is not filtered out of a folder upload; every
+    instrument's dates when the parameter is absent."""
+    serial = request.args.get('serial')
+    return jsonify(sorted(get_existing_dates(serial)))
 
 
 @app.route('/api/run/<date>/<source_file>/prof')
@@ -742,7 +814,7 @@ def api_run_prof(date, source_file):
     re-import between page render and fetch cannot swap the measurement under
     the modal. ~3,600 floats for a one-hour run.
     """
-    prof = get_run_prof_by_source(date, source_file)
+    prof = get_run_prof_by_source(date, source_file, serial=_req_serial())
     if prof is None:
         return jsonify({'status': 'error', 'message': 'Run not found'}), 404
     return jsonify({'status': 'ok', **prof})

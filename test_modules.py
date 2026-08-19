@@ -1813,8 +1813,12 @@ def main(meas_root):
               'the snapshot carries every input view_report renders', str(sorted(snap5)))
         check(snap5['run_rows'][0]['source_file'] == 'PROJ0005' and snap5['run_rows'][0]['run'] == 5,
               'snapshot run row names the run by source_file and number')
-        check(snap5['generated_from'] == {'dates': [SESSION_DATE], 'source_files': ['PROJ0005']},
-              'generated_from records the date and source_file', str(snap5['generated_from']))
+        # WP8: generated_from also names the instrument (the default serial,
+        # '' on this Side, since the request named none).
+        check(snap5['generated_from'] == {'dates': [SESSION_DATE], 'serials': [''],
+                                          'source_files': ['PROJ0005']},
+              'generated_from records the date, serial and source_file',
+              str(snap5['generated_from']))
         check(snap5['session_data_block'] == _prompts[-1].split('\n\n', 1)[1]
               .rsplit('\n\nProduce a professional', 1)[0]
               or snap5['session_data_block'] in _prompts[-1],

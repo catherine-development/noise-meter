@@ -10,7 +10,8 @@ peer_client.py; this module is only the database half.
 Note that get_sessions_since() stays in noise_db: it is a core session/run read
 that the sync protocol happens to call, not part of the protocol itself.
 """
-from noise_db import get_db, delete_session, purge_sessions_before, _record_tombstones
+from noise_db import (get_db, delete_session, purge_sessions_before, _record_tombstones,
+                      resolve_serial)
 
 
 def _apply_tombstones(conn, tombstones):
@@ -21,19 +22,25 @@ def _apply_tombstones(conn, tombstones):
     (e.g. off the SD card), and the peer will pick it up again on its next
     /api/sync pull. Both timestamps come from SQLite's datetime('now'), so a
     string comparison is chronological.
+
+    A tombstone names the session by (date, serial); one from a pre-WP8 peer
+    carries the date alone and applies to the default serial only.
     """
     for ts in tombstones:
         date = ts.get('date')
         deleted_at = ts.get('deleted_at')
         if not date or not deleted_at:
             continue
+        serial = resolve_serial(ts.get('serial'), conn)
         row = conn.execute(
-            'SELECT imported_at FROM sessions WHERE date=?', (date,)).fetchone()
+            'SELECT imported_at FROM sessions WHERE date=? AND instrument_serial=?',
+            (date, serial)).fetchone()
         if row is not None and row['imported_at'] and row['imported_at'] >= deleted_at:
             continue  # re-imported here after the peer's delete — keep ours
-        conn.execute('DELETE FROM assessment_runs WHERE session_date=?', (date,))
-        conn.execute('DELETE FROM sessions WHERE date=?', (date,))
-        _record_tombstones(conn, [date], deleted_at=deleted_at)
+        conn.execute('DELETE FROM assessment_runs WHERE session_date=? AND instrument_serial=?',
+                     (date, serial))
+        conn.execute('DELETE FROM sessions WHERE date=? AND instrument_serial=?', (date, serial))
+        _record_tombstones(conn, [(date, serial)], deleted_at=deleted_at)
 
 
 def get_last_sync_time():
@@ -96,16 +103,21 @@ def get_full_sync_payload():
     assessments  = [dict(r) for r in conn.execute('SELECT * FROM assessments').fetchall()]
     locations    = [dict(r) for r in conn.execute('SELECT * FROM assessment_locations').fetchall()]
     assess_runs  = [dict(r) for r in conn.execute('SELECT * FROM assessment_runs').fetchall()]
+    # Every session-keyed row carries `serial` beside its date; a receiver on
+    # the older schema ignores the key, an older sender omits it and the
+    # receiver files the row under its default serial.
     sess_meta    = [dict(r) for r in conn.execute(
-        'SELECT date, recorder_name, location_label, postcode, lat, lng, notes FROM sessions'
+        'SELECT date, instrument_serial AS serial, recorder_name, location_label, '
+        'postcode, lat, lng, notes FROM sessions'
     ).fetchall()]
     run_tags     = [dict(r) for r in conn.execute(
-        'SELECT s.date AS session_date, r.run_number, r.location_tag '
+        'SELECT s.date AS session_date, s.instrument_serial AS serial, '
+        'r.run_number, r.source_file, r.location_tag '
         'FROM runs r JOIN sessions s ON r.session_id=s.id '
         'WHERE r.location_tag IS NOT NULL'
     ).fetchall()]
     deleted_sess = [dict(r) for r in conn.execute(
-        'SELECT date, deleted_at FROM deleted_sessions').fetchall()]
+        'SELECT date, instrument_serial AS serial, deleted_at FROM deleted_sessions').fetchall()]
     conn.close()
     return {'assessments': assessments, 'assessment_locations': locations,
             'assessment_runs': assess_runs, 'sessions_meta': sess_meta,
@@ -144,18 +156,20 @@ def apply_full_sync(payload):
         # A peer on the older schema sends no source_file. Default it so the
         # named parameter binds, and let COALESCE keep any value we already
         # hold — an old peer's silence must not erase the stable key.
-        ar = dict(ar)
-        ar.setdefault('source_file', None)
+        ar = _with_serial(conn, ar)
         conn.execute('''
             INSERT INTO assessment_runs
-                (id,assessment_id,location_id,session_date,run_number,source_file,conditions,notes)
-            VALUES (:id,:assessment_id,:location_id,:session_date,:run_number,:source_file,:conditions,:notes)
+                (id,assessment_id,location_id,session_date,instrument_serial,run_number,
+                 source_file,conditions,notes)
+            VALUES (:id,:assessment_id,:location_id,:session_date,:instrument_serial,:run_number,
+                    :source_file,:conditions,:notes)
             ON CONFLICT(id) DO UPDATE SET
                 location_id=excluded.location_id,
                 source_file=COALESCE(excluded.source_file, assessment_runs.source_file),
                 conditions=excluded.conditions, notes=excluded.notes
         ''', ar)
     for sm in payload.get('sessions_meta', []):
+        sm = _with_serial(conn, sm, key='serial')
         # COALESCE: never overwrite existing non-null with null from peer
         conn.execute('''
             UPDATE sessions SET
@@ -165,16 +179,40 @@ def apply_full_sync(payload):
                 lat=COALESCE(:lat, lat),
                 lng=COALESCE(:lng, lng),
                 notes=COALESCE(:notes, notes)
-            WHERE date=:date
+            WHERE date=:date AND instrument_serial=:serial
         ''', sm)
     for rt in payload.get('run_tags', []):
-        conn.execute('''
-            UPDATE runs SET location_tag=COALESCE(:location_tag, location_tag)
-            WHERE session_id=(SELECT id FROM sessions WHERE date=:session_date)
-              AND run_number=:run_number
-        ''', rt)
+        _apply_run_tag(conn, rt, coalesce=True)
     conn.commit()
     conn.close()
+
+
+def _with_serial(conn, row, key='instrument_serial'):
+    """Copy of a peer row with its serial normalised: missing or blank (an
+    older peer) becomes this Pi's default. Also defaults source_file, which
+    a peer on the older schema does not send."""
+    row = dict(row)
+    row[key] = resolve_serial(row.get(key), conn)
+    row.setdefault('source_file', None)
+    return row
+
+
+def _apply_run_tag(conn, rt, coalesce=False):
+    """Apply one run_tag row: session by (session_date, serial), run by
+    source_file when the row carries one (the stable identity), else by
+    run_number (older peer)."""
+    rt = _with_serial(conn, rt, key='serial')
+    rt.setdefault('source_file', None)
+    set_sql = ('location_tag=COALESCE(:location_tag, location_tag)' if coalesce
+               else 'location_tag=:location_tag')
+    run_match = ('source_file=:source_file' if rt['source_file']
+                 else 'run_number=:run_number')
+    conn.execute(f'''
+        UPDATE runs SET {set_sql}
+        WHERE session_id=(SELECT id FROM sessions
+                          WHERE date=:session_date AND instrument_serial=:serial)
+          AND {run_match}
+    ''', rt)
 
 
 def apply_sync_event(entity, action, data):
@@ -185,7 +223,7 @@ def apply_sync_event(entity, action, data):
     # They take their own connection, hence the early return.
     if entity == 'session':
         if action == 'delete' and data.get('date'):
-            delete_session(data['date'])
+            delete_session(data['date'], data.get('serial'))
         elif action == 'purge_before' and data.get('before'):
             purge_sessions_before(data['before'])
         return
@@ -220,12 +258,13 @@ def apply_sync_event(entity, action, data):
             conn.execute('DELETE FROM assessment_locations WHERE id=?', (data['id'],))
     elif entity == 'assessment_run':
         if action == 'upsert':
-            data = dict(data)
-            data.setdefault('source_file', None)   # older peer — see above
+            data = _with_serial(conn, data)   # older peer — see above
             conn.execute('''
                 INSERT INTO assessment_runs
-                    (id,assessment_id,location_id,session_date,run_number,source_file,conditions,notes)
-                VALUES (:id,:assessment_id,:location_id,:session_date,:run_number,:source_file,:conditions,:notes)
+                    (id,assessment_id,location_id,session_date,instrument_serial,run_number,
+                     source_file,conditions,notes)
+                VALUES (:id,:assessment_id,:location_id,:session_date,:instrument_serial,:run_number,
+                        :source_file,:conditions,:notes)
                 ON CONFLICT(id) DO UPDATE SET
                     location_id=excluded.location_id,
                     source_file=COALESCE(excluded.source_file, assessment_runs.source_file),
@@ -238,15 +277,11 @@ def apply_sync_event(entity, action, data):
             conn.execute('''
                 UPDATE sessions SET recorder_name=:recorder_name, location_label=:location_label,
                     postcode=:postcode, lat=:lat, lng=:lng, notes=:notes
-                WHERE date=:date
-            ''', data)
+                WHERE date=:date AND instrument_serial=:serial
+            ''', _with_serial(conn, data, key='serial'))
     elif entity == 'run_tag':
         if action == 'upsert':
-            conn.execute('''
-                UPDATE runs SET location_tag=:location_tag
-                WHERE session_id=(SELECT id FROM sessions WHERE date=:session_date)
-                  AND run_number=:run_number
-            ''', data)
+            _apply_run_tag(conn, data)
     conn.commit()
     conn.close()
 
@@ -254,8 +289,8 @@ def apply_sync_event(entity, action, data):
 def get_import_log(limit=20):
     conn = get_db()
     rows = conn.execute(
-        'SELECT date, run_count, avg_laeq, max_laeq, location_label, imported_at '
-        'FROM sessions ORDER BY imported_at DESC LIMIT ?', (limit,)
+        'SELECT date, instrument_serial, run_count, avg_laeq, max_laeq, location_label, '
+        'imported_at FROM sessions ORDER BY imported_at DESC LIMIT ?', (limit,)
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]

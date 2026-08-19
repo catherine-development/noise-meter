@@ -144,8 +144,10 @@ def api_assign_runs(aid):
     location_id = data.get('location_id')
     runs = data.get('runs', [])
     # Carry source_file when the client sends it: the run number it was
-    # rendered with may already be stale by the time this posts.
-    pairs = [(r['date'], r['run_number'], r.get('source_file')) for r in runs]
+    # rendered with may already be stale by the time this posts. `serial`
+    # names the instrument; absent (an older client) means the default.
+    pairs = [(r['date'], r['run_number'], r.get('source_file'), r.get('serial'))
+             for r in runs]
     # assign_runs returns the rows it touched. The previous positional re-query
     # took (date, run_number) pairs and blew up on the three-element tuples built
     # above — after assign_runs had already committed, so the local write landed,
@@ -187,7 +189,7 @@ def export_assessment_csv(aid):
     # time_period classifies on the start time alone, so spans_boundary says
     # whether the run ran on past 07:00 or 23:00 and is therefore only partly in
     # the period named. Blank where the meter recorded no end time.
-    w.writerow(['sub_location', 'description', 'date', 'start_time', 'end_time', 'duration_s',
+    w.writerow(['sub_location', 'description', 'date', 'serial', 'start_time', 'end_time', 'duration_s',
                 'n_samples', 'time_period', 'spans_boundary', 'avg_laeq_db',
                 'lafmin_db', 'lafmax_db',
                 'la10_db', 'la90_db', 'max_lcpeak_db', 'max_laimax_db',
@@ -195,7 +197,7 @@ def export_assessment_csv(aid):
     for loc in data['locations']:
         for r in loc['runs']:
             w.writerow([
-                loc['label'], loc['description'] or '', r['date'], r['start_time'],
+                loc['label'], loc['description'] or '', r['date'], r.get('serial', ''), r['start_time'],
                 r.get('end_time') or '',
                 r['duration_s'] if r.get('duration_s') is not None else '',
                 r.get('n_samples', ''), r['time_period'],
