@@ -66,6 +66,7 @@ h2{font-size:14px;font-weight:600;color:var(--text2);margin-bottom:14px}
 .mf{font-family:'SF Mono','Cascadia Code','Consolas',monospace;font-size:11px}
 .loc-chip{display:inline-block;font-size:11px;color:var(--text3);font-style:italic}
 </style>
+{% include '_csrf.html' %}
 </head>
 <body>
 <nav class="site-nav">
@@ -91,6 +92,7 @@ h2{font-size:14px;font-weight:600;color:var(--text2);margin-bottom:14px}
 
   <div class="card">
     <form id="uploadForm" method="POST" action="/upload" enctype="multipart/form-data">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
       {% if needs_password %}
       <div class="field">
         <label>Upload password</label>

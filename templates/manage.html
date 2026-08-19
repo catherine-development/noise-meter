@@ -84,6 +84,7 @@ h1{font-size:20px;font-weight:700;margin-bottom:4px}
 .inst-save:hover{opacity:.9}
 .inst-hint{font-size:12px;color:var(--text3);line-height:1.5}
 </style>
+{% include '_csrf.html' %}
 </head>
 <body>
 <nav class="site-nav">
@@ -109,6 +110,7 @@ h1{font-size:20px;font-weight:700;margin-bottom:4px}
   <div class="inst-card">
     <div class="inst-title">Instrument</div>
     <form method="post" action="/settings/instrument" class="inst-form">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
       <label class="inst-label" for="inst-serial">Serial number</label>
       <input class="inst-input" id="inst-serial" name="instrument_serial"
              value="{{ instrument_serial }}" placeholder="e.g. 6899108" maxlength="20">
@@ -141,6 +143,7 @@ h1{font-size:20px;font-weight:700;margin-bottom:4px}
       <div class="del-confirm" id="del-{{ s.date }}">
         <span class="del-msg">Delete {{ s.date }} and all its runs? This cannot be undone.</span>
         <form method="POST" action="/session/{{ s.date }}/delete" style="display:inline">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
           <button type="submit" class="btn-del-confirm">Yes, delete</button>
         </form>
         <button class="btn-cancel" onclick="closeDel('{{ s.date }}')">Cancel</button>
@@ -148,6 +151,7 @@ h1{font-size:20px;font-weight:700;margin-bottom:4px}
 
       <div class="sess-edit" id="edit-{{ s.date }}">
         <form method="POST" action="/session/{{ s.date }}/edit">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
           <div class="edit-grid">
             <div class="field">
               <label>Recorded by</label>

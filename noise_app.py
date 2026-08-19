@@ -5,6 +5,7 @@ Runs on Raspberry Pi; data uploaded via web interface or import_sdcard.py
 """
 import csv
 import io
+import logging
 import os
 import json
 import urllib.request
@@ -29,11 +30,14 @@ from sync_db import (get_import_log, get_full_sync_payload,
                      apply_full_sync, apply_sync_event)
 from noise_parser import parse_zip, parse_files
 from webauth import (AUTH_AVAILABLE, login_required, require_api_key,
-                     login_or_api_key, check_upload_auth)
+                     login_or_api_key, check_upload_auth,
+                     check_startup_security, csrf_protect, csrf_token)
 from peer_client import push_to_peer, sync_event_to_peer, startup_sync_from_peer
 import reports
 import assessments
 import helpdocs
+
+log = logging.getLogger('noise.app')
 
 if AUTH_AVAILABLE:
     # webauth put the flight tracker's directory on sys.path when it imported
@@ -42,9 +46,59 @@ if AUTH_AVAILABLE:
                       send_otp_email, send_otp_sms, get_user_phone,
                       activate_user)
 
+# Raises InsecureConfiguration if the auth module is missing and the operator
+# has not set ALLOW_UNAUTHENTICATED=1. Deliberately before the app object is
+# built: nothing should be able to serve a request from this module afterwards.
+check_startup_security()
+
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', os.urandom(24))
 app.permanent_session_lifetime = timedelta(days=7)
+
+
+def _env_flag(name, default=True):
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == '':
+        return default
+    return raw.strip().lower() in ('1', 'true', 'yes', 'on')
+
+
+# SESSION_COOKIE_SECURE defaults on: both Pis are served over HTTPS through
+# Cloudflare. It is an env flag rather than a constant because deploy_to_pis.sh
+# documents plain-http LAN access on http://192.168.x.x:5001, where a Secure
+# cookie is never sent and nobody can log in — such an instance must set
+# SESSION_COOKIE_SECURE=0 and accept that the cookie crosses the LAN in clear.
+app.config.update(
+    SESSION_COOKIE_SAMESITE='Lax',
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SECURE=_env_flag('SESSION_COOKIE_SECURE', True),
+)
+
+# One hook for the whole app, blueprints included: every non-GET request that
+# is not API-key authenticated must carry the session's CSRF token.
+app.before_request(csrf_protect)
+app.context_processor(lambda: {'csrf_token': csrf_token})
+
+# Rate limiting. Optional at import: the Pis install from requirements.txt so
+# it is there, but a bare venv (the test one, say) should degrade rather than
+# fail to start. In-memory storage is correct here — one gunicorn worker.
+try:
+    from flask_limiter import Limiter
+    from flask_limiter.util import get_remote_address
+    limiter = Limiter(get_remote_address, app=app, storage_uri='memory://',
+                      default_limits=[])
+except ImportError:
+    limiter = None
+    log.warning('Flask-Limiter is not installed — /login and /upload are not '
+                'rate limited. pip install -r requirements.txt to enable it.')
+
+
+def rate_limit(*args, **kwargs):
+    """limiter.limit(), or a no-op when the package is absent."""
+    if limiter is None:
+        return lambda f: f
+    return limiter.limit(*args, **kwargs)
+
 
 app.register_blueprint(reports.bp)
 app.register_blueprint(assessments.bp)
@@ -109,6 +163,7 @@ def _auto_fetch_weather(sessions):
 # ── Auth routes ───────────────────────────────────────────────────────────────
 
 @app.route('/login', methods=['GET', 'POST'])
+@rate_limit('10 per minute', methods=['POST'])
 def login():
     if flask_session.get('authenticated'):
         return redirect(url_for('index'))
@@ -211,6 +266,7 @@ def upload_page():
 
 
 @app.route('/upload', methods=['POST'])
+@rate_limit('30 per hour', methods=['POST'])
 @login_required
 def do_upload():
     if not check_upload_auth():
