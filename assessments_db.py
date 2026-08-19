@@ -382,7 +382,7 @@ def prepare_assessment_report_data(aid):
     for loc in locs:
         assigned = conn.execute('''
             SELECT ar.conditions, ar.notes as run_notes,
-                   r.run_number, r.start_time, r.end_time, r.n_samples, r.step,
+                   r.run_number, r.start_time, r.end_time, r.n_samples, r.step, r.duration_s,
                    r.avg_laeq, r.min_laeq, r.max_laeq, r.max_lcpeak, r.max_laimax,
                    r.la_l10, r.la_l50, r.la_l90, r.laeq_json, ar.session_date
             FROM assessment_runs ar
@@ -418,7 +418,12 @@ def prepare_assessment_report_data(aid):
                 'date': r['session_date'],
                 'start_time': r['start_time'],
                 'end_time': r['end_time'],
-                'duration_s': r['n_samples'],
+                # Meter-stored duration; no arithmetic fallback — blank rather
+                # than a plausible-looking wrong value when the meter didn't
+                # record one (older imports). n_samples is the separate,
+                # always-present 1-second record count.
+                'duration_s': r['duration_s'],
+                'n_samples': r['n_samples'],
                 'time_period': _time_period(r['start_time'], assessment['standard']),
                 'avg_laeq': round(r['avg_laeq'], 1) if r['avg_laeq'] is not None else None,
                 'min_laeq': round(r['min_laeq'], 1) if r['min_laeq'] is not None else None,
