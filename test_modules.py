@@ -28,6 +28,17 @@ MEAS_DEFAULT = os.path.join(REPO, 'MEAS118')
 DATE_FOLDER = '260812'
 SESSION_DATE = '2026-08-12'
 
+# noise_app refuses to start when the flight tracker's auth module is missing,
+# which it always is on a development Mac. Sections 4d and 8 import the real
+# app, so the suite declares itself a development instance. Section 8 checks
+# that a *subprocess* without this variable is still refused.
+os.environ.setdefault('ALLOW_UNAUTHENTICATED', '1')
+
+# The CSRF token the suite's test clients present. Seeded straight into the
+# session rather than scraped out of a rendered page.
+SUITE_CSRF = 'suite-csrf-token'
+CSRF_HDR = {'X-CSRF-Token': SUITE_CSRF}
+
 _checks = 0
 
 
@@ -707,12 +718,13 @@ def main(meas_root):
         with _client.session_transaction() as _sess:
             _sess['user'] = 'test'
             _sess['logged_in'] = True
+            _sess['_csrf_token'] = SUITE_CSRF   # every POST below is CSRF-checked
 
         aid4 = rt.assess.create_assessment('Route test')
         lid4 = rt.assess.add_assessment_location(aid4, 'L')
         src5 = rt.sql('SELECT r.source_file FROM runs r JOIN sessions s ON s.id=r.session_id '
                       'WHERE s.date=? AND r.run_number=5', SESSION_DATE)[0]['source_file']
-        _resp = _client.post(f'/api/assessments/{aid4}/assign', json={
+        _resp = _client.post(f'/api/assessments/{aid4}/assign', headers=CSRF_HDR, json={
             'location_id': lid4,
             'runs': [{'date': SESSION_DATE, 'run_number': 5, 'source_file': src5}]})
         check(_resp.status_code == 200, 'assign route returns 200, not 500',
@@ -725,7 +737,7 @@ def main(meas_root):
         sid4 = rt.sql('SELECT id FROM sessions WHERE date=?', SESSION_DATE)[0]['id']
         rt.exec('UPDATE runs SET run_number=run_number+1000 WHERE session_id=? AND run_number>=3', sid4)
         rt.exec('UPDATE runs SET run_number=run_number-999 WHERE session_id=? AND run_number>=1000', sid4)
-        _resp = _client.post(f'/api/assessments/{aid4}/assign', json={
+        _resp = _client.post(f'/api/assessments/{aid4}/assign', headers=CSRF_HDR, json={
             'location_id': lid4,
             'runs': [{'date': SESSION_DATE, 'run_number': 5, 'source_file': src5}]})
         check(_resp.status_code == 200, 'a stale run number still assigns cleanly',
@@ -735,7 +747,7 @@ def main(meas_root):
         check(_srcs == [src5], 'the stable key won over the stale position', str(_srcs))
 
         # A source_file that is not in this session is refused, not guessed at.
-        _resp = _client.post(f'/api/assessments/{aid4}/assign', json={
+        _resp = _client.post(f'/api/assessments/{aid4}/assign', headers=CSRF_HDR, json={
             'location_id': lid4,
             'runs': [{'date': SESSION_DATE, 'run_number': 5, 'source_file': 'PROJ7777'}]})
         check(_resp.status_code == 400, 'a foreign source_file is rejected',
@@ -1042,6 +1054,186 @@ def main(meas_root):
         # ── 7. NOR140 xlsx parity with every Nortfr reference present ─────────
         print('\n7. xlsx export matches the Nortfr references')
         check_references(meas_root, tmp)
+
+        # ── 8. security: startup, CSRF, API key, rate limiting ────────────────
+        # Everything here drives the real app through the Flask test client.
+        # `rt` (section 4d) is the Side noise_app is bound to: the module was
+        # imported while that binding was current and captured its functions by
+        # value, so the app reads and writes route.db no matter which Side was
+        # constructed since.
+        import logging as _lg
+        import subprocess as _sp
+        _wa = importlib.import_module('webauth')
+        _napp = importlib.import_module('noise_app')
+        _sapp = _napp.app
+
+        print('\n8a. the app refuses to start with authentication missing')
+        # The Mac has no flight-tracker auth module, which is exactly the
+        # condition that used to make every page public.
+        check(_wa.AUTH_AVAILABLE is False,
+              'the auth module is absent here, as on any dev machine')
+        _saved_allow = os.environ.pop('ALLOW_UNAUTHENTICATED', None)
+        try:
+            try:
+                _wa.check_startup_security()
+                _refused = False
+            except _wa.InsecureConfiguration:
+                _refused = True
+            check(_refused, 'check_startup_security() refuses without the override')
+        finally:
+            if _saved_allow is not None:
+                os.environ['ALLOW_UNAUTHENTICATED'] = _saved_allow
+        _wa.check_startup_security()   # with the override set: must not raise
+        check(True, 'and starts when ALLOW_UNAUTHENTICATED=1 is set')
+
+        # The decisive check: a real interpreter importing the real module.
+        # A refusal that only exists in a helper nobody calls is not a refusal.
+        _env = dict(os.environ)
+        _env.pop('ALLOW_UNAUTHENTICATED', None)
+        _env['NOISE_DB_PATH'] = os.path.join(tmp, 'refuse.db')
+        _proc = _sp.run([sys.executable, '-c', 'import noise_app'], cwd=REPO,
+                        env=_env, capture_output=True, text=True)
+        check(_proc.returncode != 0, 'importing noise_app without the override exits non-zero',
+              f'rc={_proc.returncode}')
+        check('InsecureConfiguration' in _proc.stderr,
+              'and says why', _proc.stderr.strip().split('\n')[-1][:100])
+
+        # An empty UPLOAD_PASSWORD leaves the upload form open; that must be
+        # said out loud at startup rather than discovered later.
+        _seen = []
+
+        class _Capture(_lg.Handler):
+            def emit(self, record):
+                _seen.append(record)
+
+        _cap = _Capture()
+        _lg.getLogger('noise.webauth').addHandler(_cap)
+        try:
+            _wa.check_startup_security()
+        finally:
+            _lg.getLogger('noise.webauth').removeHandler(_cap)
+        check(_wa.UPLOAD_PASS == '', 'no upload password is set in this environment')
+        check(any(r.levelno == _lg.WARNING and 'UPLOAD_PASSWORD' in r.getMessage()
+                  for r in _seen), 'an empty UPLOAD_PASSWORD is warned about at startup')
+        check(any(r.levelno == _lg.ERROR for r in _seen),
+              'and running unauthenticated is logged at ERROR')
+
+        print('\n8b. session cookie flags')
+        check(_sapp.config['SESSION_COOKIE_SAMESITE'] == 'Lax', 'SameSite=Lax')
+        check(_sapp.config['SESSION_COOKIE_HTTPONLY'] is True, 'HttpOnly')
+        check(_sapp.config['SESSION_COOKIE_SECURE'] is True,
+              'Secure (default on; SESSION_COOKIE_SECURE=0 for plain-http LAN use)')
+
+        print('\n8c. CSRF on cookie-authenticated state changes')
+        _anon = _sapp.test_client()
+        with _anon.session_transaction() as _s:
+            _s['user'] = 'test'
+            _s['logged_in'] = True          # logged in, but no token
+        _r = _anon.post(f'/session/{SESSION_DATE}/edit',
+                        data={'recorder_name': 'Mallory'})
+        check(_r.status_code == 403, 'a logged-in POST with no token is refused',
+              str(_r.status_code))
+        _name_now = rt.sql('SELECT recorder_name FROM sessions WHERE date=?',
+                           SESSION_DATE)[0]['recorder_name']
+        check(_name_now != 'Mallory', 'and the write did not land', repr(_name_now))
+
+        _r = _anon.post(f'/session/{SESSION_DATE}/edit',
+                        data={'recorder_name': 'Mallory', 'csrf_token': 'not-the-token'})
+        check(_r.status_code == 403, 'a wrong token is refused too', str(_r.status_code))
+
+        _good = _sapp.test_client()
+        with _good.session_transaction() as _s:
+            _s['user'] = 'test'
+            _s['logged_in'] = True
+            _s['_csrf_token'] = SUITE_CSRF
+        _r = _good.post(f'/session/{SESSION_DATE}/edit', headers=dict(
+            CSRF_HDR, **{'X-Requested-With': 'XMLHttpRequest'}),
+            data={'recorder_name': 'Catherine Ives-Yim'})
+        check(_r.status_code == 200, 'the token in the X-CSRF-Token header is accepted',
+              f'{_r.status_code}: {_r.get_data(as_text=True)[:80]}')
+        _r = _good.post(f'/session/{SESSION_DATE}/edit',
+                        data={'recorder_name': 'Catherine Ives-Yim',
+                              'csrf_token': SUITE_CSRF})
+        check(_r.status_code != 403, 'the token in a form field is accepted too',
+              str(_r.status_code))
+        check(rt.sql('SELECT recorder_name FROM sessions WHERE date=?',
+                     SESSION_DATE)[0]['recorder_name'] == 'Catherine Ives-Yim',
+              'and that write did land')
+        check(_anon.get('/health').status_code == 200, 'GET is not affected')
+
+        print('\n8d. the API key: header or form, never the query string')
+        _saved_key = _wa.IMPORT_KEY
+        _wa.IMPORT_KEY = 'a-long-random-import-key'
+        try:
+            _r = _anon.get(f'/api/sync?api_key={_wa.IMPORT_KEY}')
+            check(_r.status_code == 403, 'a key in the query string is not accepted',
+                  str(_r.status_code))
+            _r = _anon.get('/api/sync', headers={'X-Import-Key': _wa.IMPORT_KEY})
+            check(_r.status_code == 200, 'the same key in the header is',
+                  str(_r.status_code))
+            _r = _anon.get('/api/sync', headers={'X-Import-Key': 'a-long-random-import-kez'})
+            check(_r.status_code == 403, 'a near-miss key is refused', str(_r.status_code))
+            # An API-key request carries no cookie to ride on, so it is CSRF
+            # exempt — import_sdcard.py and the peer Pi never see a page.
+            _r = _anon.post('/import', headers={'X-Import-Key': _wa.IMPORT_KEY},
+                            json={'sessions': []})
+            check(_r.status_code == 400 and 'no sessions' in _r.get_data(as_text=True),
+                  'an API-key POST needs no CSRF token', str(_r.status_code))
+            _r = _anon.post('/import', json={'sessions': []})
+            check(_r.status_code == 403, 'and without the key it is still refused',
+                  str(_r.status_code))
+        finally:
+            _wa.IMPORT_KEY = _saved_key
+
+        print('\n8e. the templates carry the token (the client half is not Python)')
+        _tdir = os.path.join(REPO, 'templates')
+
+        def _tpl_text(name):
+            return open(os.path.join(_tdir, name), encoding='utf-8').read()
+
+        for _name in ('index.html', 'manage.html', 'upload.html',
+                      'assessments.html', 'reports.html', 'report.html', 'login.html'):
+            check("{% include '_csrf.html' %}" in _tpl_text(_name),
+                  f'{_name}: includes the CSRF partial')
+        _partial = _tpl_text('_csrf.html')
+        check("name=\"csrf-token\"" in _partial and 'X-CSRF-Token' in _partial,
+              'the partial publishes the token and sets the fetch header')
+        for _name, _n in (('manage.html', 3), ('login.html', 3), ('upload.html', 1)):
+            _txt = _tpl_text(_name)
+            _forms = _txt.lower().count('<form ')
+            _fields = _txt.count('name="csrf_token"')
+            check(_fields == _n == _forms,
+                  f'{_name}: every posting form has a hidden csrf_token field',
+                  f'{_fields} fields / {_forms} forms')
+        for _name in os.listdir(_tdir):
+            if _name.endswith('.html'):
+                check('?api_key=' not in _tpl_text(_name),
+                      f'{_name}: no API key in a query string')
+
+        # A template that fails to render is a 500 on a page nothing else in
+        # the suite visits, so every page is fetched and the token looked for.
+        for _path in ('/', '/manage', '/upload', '/login', '/assessments', '/reports'):
+            _r = _good.get(_path)
+            check(_r.status_code == 200, f'GET {_path} renders', str(_r.status_code))
+            check('name="csrf-token"' in _r.get_data(as_text=True),
+                  f'GET {_path} publishes the token')
+
+        print('\n8f. rate limiting on /login')
+        if _napp.limiter is None:
+            print('  --    Flask-Limiter not installed in this venv; limit not exercised')
+        else:
+            _lim = _sapp.test_client()
+            with _lim.session_transaction() as _s:
+                _s['_csrf_token'] = SUITE_CSRF
+            _codes = [_lim.post('/login', headers=CSRF_HDR,
+                                data={'step': 'email', 'email': f'a{i}@example.com',
+                                      'csrf_token': SUITE_CSRF}).status_code
+                      for i in range(11)]
+            check(_codes[:10] == [200] * 10, 'ten login attempts a minute are allowed',
+                  str(_codes[:10]))
+            check(_codes[10] == 429, 'the eleventh is rate limited', str(_codes[10]))
+            check(_lim.get('/login').status_code == 200,
+                  'but the login page itself is still servable — the limit is POST only')
 
         print(f'\nAll {_checks} checks passed.')
     finally:
