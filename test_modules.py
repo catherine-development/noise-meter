@@ -876,6 +876,263 @@ def main(meas_root):
         check(type(_err).__name__ == 'MigrationUnsafe',
               'duplicated run identities refuse the migration', repr(_err))
 
+        # ── 4f. run identity under partial and shifted imports ────────────────
+        print('\n4f. run identity under partial and shifted imports')
+        # Runs used to be keyed on their position in the payload, so a ZIP of
+        # just PROJ0004 became "run 1" and overwrote PROJ0001; a re-import with
+        # the first file unreadable shifted every run down one and then died on
+        # the source_file index. The key is now (session, source_file).
+        import copy as _copy
+        import zipfile as _zf
+        import io as _io
+        from nor140_format import PROF_RECORD_OFFSET, PROF_RECORD_SIZE
+        from noise_parser import parse_zip as _parse_zip
+
+        def _runs(side):
+            return [(r['run_number'], r['source_file'], r['avg_laeq'], r['start_time'])
+                    for r in side.sql(
+                        'SELECT r.run_number, r.source_file, r.avg_laeq, r.start_time '
+                        'FROM runs r JOIN sessions s ON s.id=r.session_id '
+                        'WHERE s.date=? ORDER BY r.run_number', SESSION_DATE)]
+
+        def _sess_row(side):
+            return side.sql('SELECT run_count, avg_laeq, max_laeq FROM sessions WHERE date=?',
+                            SESSION_DATE)[0]
+
+        pi = Side(os.path.join(tmp, 'identity.db'))
+        full = _copy.deepcopy(sessions)
+        pi.db.import_sessions(full, metadata=META)
+        base_runs = _runs(pi)
+        base_sess = _sess_row(pi)
+        N = len(base_runs)
+        check(N >= 5 and base_runs[0][1] == 'PROJ0001',
+              f'baseline: {N} runs, run 1 is PROJ0001', str(base_runs[:2]))
+        check([r[0] for r in base_runs] == list(range(1, N + 1)),
+              'baseline numbering is 1..n')
+        check(base_sess['run_count'] == N, 'baseline session run_count', str(dict(base_sess)))
+
+        # Link an assessment to PROJ0005 so we can watch it through the churn.
+        aid_f = pi.assess.create_assessment('Identity')
+        lid_f = pi.assess.add_assessment_location(aid_f, 'L')
+        pi.assess.assign_runs(aid_f, lid_f, [(SESSION_DATE, 5, 'PROJ0005')])
+        link_start = base_runs[4][3]
+
+        def _linked():
+            runs_ = pi.assess.get_assessment_detail(aid_f)['locations'][0]['runs']
+            return [(r['run_number'], r['start_time']) for r in runs_]
+
+        check(_linked() == [(5, link_start)], 'link on run 5 = PROJ0005')
+
+        # (a) A partial upload: just the PROJ0004 folder, as the upload page
+        # allows. No date folder in the path, so it cannot be a complete date.
+        partial_pairs = [(p.split('/', 2)[2], d) for p, d in pairs if '/PROJ0004/' in p]
+        check(len(partial_pairs) == 2 and partial_pairs[0][0].startswith('PROJ0004/'),
+              'partial upload is the two PROJ0004 files', str([p for p, _ in partial_pairs]))
+        partial = parse_files(partial_pairs)
+        check(len(partial) == 1 and partial[0]['complete_date'] is False,
+              'a PROJ-level upload is not a complete date', str(partial[0].get('complete_date')))
+        check(partial[0]['projects'][0]['source_file'] == 'PROJ0004',
+              'and names its source_file', str(partial[0]['projects'][0]['source_file']))
+        pi.db.import_sessions(partial, metadata=META)
+        after = _runs(pi)
+        check(after == base_runs,
+              'partial upload of PROJ0004 leaves every stored run exactly as it was',
+              f'{after[:4]} vs {base_runs[:4]}')
+        check(dict(_sess_row(pi)) == dict(base_sess),
+              'session aggregates still describe all stored runs, not the upload',
+              f'{dict(_sess_row(pi))} vs {dict(base_sess)}')
+
+        # (b) A shifted re-import: the first file failed to parse this time, so
+        # the payload starts at PROJ0002. Positionally that rewrote run 1's
+        # source_file to PROJ0002 while run 2 still held it -> IntegrityError.
+        shifted = _copy.deepcopy(full)
+        shifted[0]['projects'] = shifted[0]['projects'][1:]
+        shifted[0]['complete_date'] = False
+        try:
+            pi.db.import_sessions(shifted, metadata=META)
+            err = None
+        except Exception as e:   # noqa: BLE001 — the defect was an IntegrityError
+            err = e
+        check(err is None, 'a shifted partial re-import succeeds', repr(err))
+        check(_runs(pi) == base_runs, 'and changes nothing (every run already stored)')
+        check(_linked() == [(5, link_start)],
+              'assessment link untouched by the shifted re-import', str(_linked()))
+
+        # (c) Complete date, but PROJ0001 is listed as skipped (present on the
+        # card, unreadable today): it must survive the re-import.
+        protected = _copy.deepcopy(shifted)
+        protected[0]['complete_date'] = True
+        protected[0]['skipped_files'] = ['PROJ0001']
+        pi.db.import_sessions(protected, metadata=META)
+        check(_runs(pi) == base_runs,
+              'a complete-date re-import keeps a run whose file was merely unreadable')
+
+        # (d) Complete date and PROJ0001 genuinely gone from the card.
+        gone = _copy.deepcopy(shifted)
+        gone[0]['complete_date'] = True
+        gone[0]['skipped_files'] = []
+        pi.db.import_sessions(gone, metadata=META)
+        after = _runs(pi)
+        check(len(after) == N - 1 and after[0][1] == 'PROJ0002',
+              'complete-date re-import deletes the run that is no longer on the card',
+              str(after[:2]))
+        check([r[0] for r in after] == list(range(1, N)),
+              'remaining runs are renumbered 1..n-1 in stored order',
+              str([r[0] for r in after]))
+        check(_linked() == [(4, link_start)],
+              'assessment link follows PROJ0005 to its new number', str(_linked()))
+        sr = _sess_row(pi)
+        check(sr['run_count'] == N - 1, 'session run_count recomputed after the delete',
+              str(dict(sr)))
+        exp_avg = round(10 * __import__('math').log10(
+            sum(10 ** (r[2] / 10) for r in after) / len(after)), 2)
+        check(sr['avg_laeq'] == exp_avg, 'session avg recomputed from the remaining runs',
+              f'{sr["avg_laeq"]} vs {exp_avg}')
+
+        # (e) PROJ0001 comes back (full re-import): restored at run 1, the rest
+        # move down, the link follows again.
+        restore = _copy.deepcopy(full)
+        restore[0]['complete_date'] = True
+        pi.db.import_sessions(restore, metadata=META)
+        check(_runs(pi) == base_runs, 'a full re-import restores the original numbering')
+        check(_linked() == [(5, link_start)], 'and the link is back at run 5')
+        check(dict(_sess_row(pi)) == dict(base_sess), 'session aggregates back to baseline')
+
+        # (f) Legacy payload with no source_file at all (pre-column JSON export,
+        # or a peer on the old schema): positional, no duplicates, and the
+        # stored identities are not erased.
+        legacy = _copy.deepcopy(full)
+        for p_ in legacy[0]['projects']:
+            p_.pop('source_file', None)
+        legacy[0].pop('complete_date', None)
+        pi.db.import_sessions(legacy, metadata=META)
+        check(_runs(pi) == base_runs,
+              'a legacy payload without source_file neither duplicates nor re-keys runs',
+              str(_runs(pi)[:3]))
+
+        # (g) Peer payloads carry no complete_date, so a pull can only add or
+        # refresh — never delete — on the receiving side.
+        peer_payload = pi.db.get_sessions_since('1970-01-01T00:00:00')
+        check(all('complete_date' not in s for s in peer_payload),
+              'sync payload does not claim to be a complete date')
+
+        # ── skipped-file report ──
+        def _zip(entries):
+            buf = _io.BytesIO()
+            with _zf.ZipFile(buf, 'w') as z:
+                for name, data in entries:
+                    z.writestr(name, data)
+            return buf.getvalue()
+
+        good1 = [(p, d) for p, d in pairs if '/PROJ0001/' in p]
+        p2 = [(p, d) for p, d in pairs if '/PROJ0002/' in p]
+        p2_glob = next(d for p, d in p2 if 'GLOB' in p.upper())
+        p2_prof = next(d for p, d in p2 if 'PROF' in p.upper())
+        p2_glob_path = next(p for p, _ in p2 if 'GLOB' in p.upper())
+        p2_prof_path = next(p for p, _ in p2 if 'PROF' in p.upper())
+
+        # Corrupt only the LAFspl channel (slot 0) of every record: the old check
+        # looked at LAeq (slot 1) alone and would have let this through.
+        body = bytearray(p2_prof[PROF_RECORD_OFFSET:])
+        for off in range(0, len(body) - PROF_RECORD_SIZE + 1, PROF_RECORD_SIZE):
+            body[off:off + 2] = b'\xff\xff'
+        corrupt_prof = p2_prof[:PROF_RECORD_OFFSET] + bytes(body)
+        rep = _parse_zip(_zip(good1 + [(p2_glob_path, p2_glob), (p2_prof_path, corrupt_prof)]))
+        check(len(rep) == 1 and len(rep[0]['projects']) == 1,
+              'corrupt PROJ0002 is not imported as a run', str(len(rep[0]['projects'])))
+        check(len(rep.skipped) == 1 and 'PROJ0002' in rep.skipped[0]['path'],
+              'parse report names the skipped pair', str(rep.skipped))
+        check('dB' in rep.skipped[0]['reason'] and '140' in rep.skipped[0]['reason'],
+              'and says why (level above 140 dB)', rep.skipped[0]['reason'])
+        check(rep.skipped[0]['date'] == SESSION_DATE, 'skipped pair carries its date')
+        check(rep[0]['complete_date'] is True and rep[0]['skipped_files'] == ['PROJ0002'],
+              'session marks PROJ0002 as present-but-unreadable',
+              f"{rep[0]['complete_date']} {rep[0]['skipped_files']}")
+        rep2 = _parse_zip(_zip(good1 + [(p2_glob_path, p2_glob)]))
+        check(len(rep2.skipped) == 1 and 'only the GLOB' in rep2.skipped[0]['reason'],
+              'a lone GLOB file is reported, not ignored', str(rep2.skipped))
+        rep3 = _parse_zip(_zip([(p.split('/')[-1], d) for p, d in good1]))
+        check(len(rep3) == 1 and rep3[0]['complete_date'] is False and not rep3.skipped,
+              'a flat DAT pair parses as a partial upload with nothing skipped')
+
+        # Routes: /import reports the skips; /upload tells the user.
+        import importlib as _il3
+        import webauth as _wa
+        for _m in ('noise_app', 'peer_client'):
+            sys.modules.pop(_m, None)
+        _app2 = _il3.import_module('noise_app')
+        _app2._auto_fetch_weather = lambda *_a, **_k: None
+        _app2.app.config['TESTING'] = True
+        _c2 = _app2.app.test_client()
+        _wa.IMPORT_KEY = 'test-key'
+        corrupt_zip = _zip(good1 + [(p2_glob_path, p2_glob), (p2_prof_path, corrupt_prof)])
+        r = _c2.post('/import', data={'file': (_io.BytesIO(corrupt_zip), 'x.zip')},
+                     headers={'X-Import-Key': 'test-key'},
+                     content_type='multipart/form-data')
+        check(r.status_code == 200, '/import accepts the ZIP', str(r.status_code))
+        js = r.get_json()
+        check(js.get('imported') == 1 and len(js.get('skipped', [])) == 1,
+              '/import response lists the skipped pair', str(js)[:200])
+        # It went into the identity DB (the module bound to it). The ZIP held the
+        # date folder with two PROJ folders, so it is a complete date: the other
+        # eight runs are gone from the card and are deleted — but PROJ0002, which
+        # was present and merely unreadable, survives alongside PROJ0001.
+        check([r[1] for r in _runs(pi)] == ['PROJ0001', 'PROJ0002'],
+              'complete-date import over /import deletes absent runs but keeps the skipped one',
+              str([r[1] for r in _runs(pi)]))
+        _wa.IMPORT_KEY = ''
+        pi.db.import_sessions(restore, metadata=META)
+        check(_runs(pi) == base_runs, 'full re-import restores the date again')
+
+        with _c2.session_transaction() as _s2:
+            _s2['user'] = 'test'
+            _s2['logged_in'] = True
+        r = _c2.post('/upload', data={'file': (_io.BytesIO(corrupt_zip), 'x.zip')},
+                     content_type='multipart/form-data', follow_redirects=True)
+        page = r.get_data(as_text=True)
+        check(r.status_code == 200 and 'could not be read and were skipped' in page
+              and 'PROJ0002' in page,
+              'the upload page tells the user which pair was skipped and why',
+              ' '.join(page[page.find('skipped:'):page.find('skipped:') + 100].split())
+              if 'skipped:' in page else f'status {r.status_code}')
+
+        # ── peer-push failure is recorded, not printed ──
+        import urllib.error as _ue
+        pc = sys.modules['peer_client']
+        pc.PEER_URL = 'http://peer.invalid'
+        pc.IMPORT_KEY = 'k'
+        _real_urlopen = pc.urllib.request.urlopen
+
+        def _down(req, timeout=None):
+            raise _ue.URLError('connection refused (test)')
+        pc.urllib.request.urlopen = _down
+        try:
+            t = pc.push_to_peer(full)
+            check(t is not None, 'push_to_peer returns its thread')
+            t.join(10)
+            pe = pi.sync.get_last_push_error()
+            check(pe is not None and 'connection refused' in pe['error'],
+                  'a failed push is recorded in sync_state', str(pe))
+            check(pe and pe.get('at') and pe.get('dates') == SESSION_DATE,
+                  'with a timestamp and the dates it carried', str(pe))
+            r = _c2.get('/upload')
+            check('last push to the other Pi failed' in r.get_data(as_text=True),
+                  'the upload page shows the failure')
+
+            class _Resp:
+                def __enter__(self): return self
+                def __exit__(self, *a): return False
+                def read(self): return b'{"imported":1}'
+
+            pc.urllib.request.urlopen = lambda req, timeout=None: _Resp()
+            t = pc.push_to_peer(full)
+            t.join(10)
+            check(pi.sync.get_last_push_error() is None, 'a later success clears it')
+        finally:
+            pc.urllib.request.urlopen = _real_urlopen
+            pc.PEER_URL = ''
+        pi.assess.delete_assessment(aid_f)
+
         # ── 5. deletions replicate ────────────────────────────────────────────
         print('\n5. session deletions replicate to the peer')
         baid = b.assess.create_assessment('Peer side', standard='bs4142')

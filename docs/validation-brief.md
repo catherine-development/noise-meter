@@ -285,11 +285,17 @@ layouts, but that is an argument, not a measurement.
 ## 7. C8 — the assessment run key (the one I got wrong twice)
 
 `assessment_runs` linked an assessment to a measurement through
-`(session_date, run_number)`. Run numbers are positional — `noise_db` assigns
+`(session_date, run_number)`. Run numbers were positional — `noise_db` assigned
 them with `enumerate(projects, 1)` — so recovering a run that previously failed
 to parse shifts every later number on that date and re-points existing links to
 a different measurement. Six files in the archive fail to parse, so the scenario
 is real; none fall on a live date.
+
+*(Update, production fix WP1, 2026-08-19: the import path now keys `runs`
+themselves on `(session_id, source_file)` and reassigns `run_number` from the
+stored order after every import, so a partial or shifted upload can no longer
+overwrite or renumber a stored run behind the link's back. Section 4f of the
+suite covers it. The rest of this section stands as written.)*
 
 **The first fix was wrong, and instructively so.** It added `source_file` and
 preferred it *on read*, while `assign_runs` kept
