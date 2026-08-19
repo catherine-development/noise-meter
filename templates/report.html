@@ -349,7 +349,10 @@ tbody tr:hover{background:var(--bg)}
       Analysis prepared on {{ generated_at }} using NOR140 Noise Monitor ({{ pi_name }}).
       Reference standards: HSE Noise at Work Regulations 2005; BS 4142:2014+A1:2019; WHO Environmental Noise Guidelines 2018.
       {% if usage_info %}
-      <br>API usage (claude-sonnet-5): {{ usage_info.input_tokens | int }} input + {{ usage_info.output_tokens | int }} output tokens ≈ ${{ '%.4f' | format(usage_info.cost_usd or 0) }} (pricing approximate).
+      {# The model that actually generated this report. This line named
+         claude-sonnet-5 unconditionally, so every Haiku and Opus report in the
+         archive footed itself with the wrong model. #}
+      <br>API usage ({{ usage_info.model or 'model not recorded' }}): {{ usage_info.input_tokens | int }} input + {{ usage_info.output_tokens | int }} output tokens ≈ ${{ '%.4f' | format(usage_info.cost_usd or 0) }} (pricing approximate).
       {% endif %}
     </div>
 

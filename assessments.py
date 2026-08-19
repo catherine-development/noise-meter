@@ -184,8 +184,12 @@ def export_assessment_csv(aid):
         abort(404)
     output = io.StringIO()
     w = csv.writer(output)
+    # time_period classifies on the start time alone, so spans_boundary says
+    # whether the run ran on past 07:00 or 23:00 and is therefore only partly in
+    # the period named. Blank where the meter recorded no end time.
     w.writerow(['sub_location', 'description', 'date', 'start_time', 'end_time', 'duration_s',
-                'n_samples', 'time_period', 'avg_laeq_db', 'lafmin_db', 'lafmax_db',
+                'n_samples', 'time_period', 'spans_boundary', 'avg_laeq_db',
+                'lafmin_db', 'lafmax_db',
                 'la10_db', 'la90_db', 'max_lcpeak_db', 'max_laimax_db',
                 'conditions', 'notes'])
     for loc in data['locations']:
@@ -195,8 +199,11 @@ def export_assessment_csv(aid):
                 r.get('end_time') or '',
                 r['duration_s'] if r.get('duration_s') is not None else '',
                 r.get('n_samples', ''), r['time_period'],
+                '' if r.get('spans_boundary') is None else
+                ('yes' if r['spans_boundary'] else 'no'),
                 r.get('avg_laeq', ''), r.get('min_laeq', ''), r.get('max_laeq', ''),
-                r.get('la10', ''), r.get('la90', ''),
+                r.get('la10') if r.get('la10') is not None else '',
+                r.get('la90') if r.get('la90') is not None else '',
                 r.get('max_lcpeak', ''), r.get('max_laimax', ''),
                 r.get('conditions', '') or '', r.get('notes', '') or '',
             ])

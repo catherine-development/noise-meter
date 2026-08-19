@@ -18,8 +18,11 @@ import os
 from flask import Blueprint, render_template, request, jsonify, abort
 
 from config import PI_NAME
+from nor140_format import round_half_up
+from noise_parser import _energy_avg_weighted, run_weight_s
 from webauth import login_required
-from noise_db import get_all_sessions_json, get_session_prof_lafspl, get_run_prof_laeq
+from noise_db import (get_all_sessions_json, get_session_prof_lafspl,
+                      get_run_prof_laeq, percentile as _percentile)
 from reports_db import (get_report_templates, get_report_template, save_report_template,
                         update_report_template, delete_report_template,
                         save_generated_report, get_generated_reports,
@@ -30,20 +33,16 @@ log = logging.getLogger('noise.reports')
 bp = Blueprint('reports', __name__)
 
 
-def _percentile(sorted_vals, p):
-    n = len(sorted_vals)
-    if not n:
-        return None
-    idx = (p / 100) * (n - 1)
-    lo = int(idx)
-    hi = min(lo + 1, n - 1)
-    return round(sorted_vals[lo] + (idx - lo) * (sorted_vals[hi] - sorted_vals[lo]), 1)
+# _percentile is noise_db.percentile, imported above: assessments_db needs the
+# same function and cannot import this module. Re-exported under the old private
+# name so the existing call sites (and the suite) keep working.
 
 
 def _energy_avg_db(values):
     if not values:
         return None
-    return round(10 * math.log10(sum(10 ** (v / 10) for v in values) / len(values)), 1)
+    return round_half_up(
+        10 * math.log10(sum(10 ** (v / 10) for v in values) / len(values)), 1)
 
 
 def _expand_run(proj):
@@ -66,11 +65,20 @@ def _run_stats(proj, true_laeq=None):
 
     Prefers GLOB-derived scalar metrics (instrument-computed, accurate) over profile-
     derived estimates.  Falls back to profile stats only when GLOB values are absent
-    (pre-update imports).  Note: profile values are LAS (slow-weighted SPL), so
-    profile-derived LAeq/percentile estimates are ~8–11 dB high for impulsive sessions.
+    (pre-update imports).
+
+    The profile values expanded here are LAeq,1s — PROF field 1 — not LAS: the
+    docstring used to say "LAS (slow-weighted SPL)" and warn that the estimates
+    ran 8–11 dB high on impulsive sessions, which described neither the channel
+    nor the error. They are a per-second energy average, and the reason they are
+    only a fallback is that _expand_run repeats each chart point across its
+    window, so the series is a step function of window maxima. (LAFspl, the
+    Fast-weighted channel the LA10/LA90 convention actually calls for, is PROF
+    field 0 — pooled from storage in _build_session_data_block below.)
     """
     las_full = _expand_run(proj)
-    stats = {'n': proj.get('n'), 'pmx': proj.get('pmx')}
+    stats = {'n': proj.get('n'), 'duration_s': proj.get('duration_s'),
+             'pmx': proj.get('pmx')}
     if las_full:
         s = sorted(las_full)
         n = len(s)
@@ -84,24 +92,42 @@ def _run_stats(proj, true_laeq=None):
             'pct85': None,   # set from true_laeq below
         })
     # Override with GLOB-derived scalars where available
-    if proj.get('avg')    is not None: stats['leq']  = round(proj['avg'], 1)
-    if proj.get('la_l10') is not None: stats['la10'] = round(proj['la_l10'], 1)
-    if proj.get('la_l50') is not None: stats['la50'] = round(proj['la_l50'], 1)
-    if proj.get('la_l90') is not None: stats['la90'] = round(proj['la_l90'], 1)
-    if proj.get('lafmax') is not None: stats['lmax'] = round(proj['lafmax'], 1)
-    if proj.get('mn')     is not None: stats['lmin'] = round(proj['mn'], 1)
+    if proj.get('avg')    is not None: stats['leq']  = round_half_up(proj['avg'], 1)
+    if proj.get('la_l10') is not None: stats['la10'] = round_half_up(proj['la_l10'], 1)
+    if proj.get('la_l50') is not None: stats['la50'] = round_half_up(proj['la_l50'], 1)
+    if proj.get('la_l90') is not None: stats['la90'] = round_half_up(proj['la_l90'], 1)
+    if proj.get('lafmax') is not None: stats['lmax'] = round_half_up(proj['lafmax'], 1)
+    if proj.get('mn')     is not None: stats['lmin'] = round_half_up(proj['mn'], 1)
     if true_laeq:
-        stats['pct85'] = round(100 * sum(1 for v in true_laeq if v >= 85) / len(true_laeq), 1)
+        stats['pct85'] = round_half_up(
+            100 * sum(1 for v in true_laeq if v >= 85) / len(true_laeq), 1)
     return stats
 
 
 # ── Reports ───────────────────────────────────────────────────────────────────
 
+# USD per million tokens, (input, output). Two of these three were wrong: Haiku
+# 4.5 was priced at 0.80/4.00 (it is 1.00/5.00) and Opus 5 at 15.00/75.00 — an
+# Opus 4.x-era figure that overstated every Opus report by a factor of three.
+# Sonnet 5's list price is 3.00/15.00; an introductory 2.00/10.00 runs to
+# 2026-08-31, deliberately not encoded here — a date-dependent price in this
+# table would quietly start lying on 1 September.
 _MODEL_PRICING = {
-    'claude-haiku-4-5-20251001': (0.80, 4.00),
+    'claude-haiku-4-5':          (1.00, 5.00),
+    # Alias: the dated id the model dropdown used to send, kept so stored
+    # reports and any client still posting it are still priced.
+    'claude-haiku-4-5-20251001': (1.00, 5.00),
     'claude-sonnet-5':           (3.00, 15.00),
-    'claude-opus-5':             (15.00, 75.00),
+    'claude-opus-5':             (5.00, 25.00),
 }
+
+# Haiku 4.5 predates adaptive thinking and the effort control: sending either
+# `thinking` or `output_config` to it is a 400, not a silently ignored field.
+_NO_THINKING_MODELS = ('claude-haiku-4-5',)
+
+
+def _supports_thinking(model):
+    return not model.startswith(_NO_THINKING_MODELS)
 
 
 def _build_session_data_block(sess, run_rows, all_laeq, total_duration_s):
@@ -126,13 +152,14 @@ def _build_session_data_block(sess, run_rows, all_laeq, total_duration_s):
     wx_str = ', '.join(wx_parts) or 'Not available'
 
     # Prefer GLOB-derived per-run scalars (already in run_rows via _run_stats).
-    # Session LAeq = duration-weighted energy avg of per-run LAeq values.
-    run_leq_ns = [(r['leq'], r.get('n') or 1) for r in run_rows if r.get('leq') is not None]
-    if run_leq_ns:
-        total_n = sum(n for _, n in run_leq_ns)
-        session_leq = round(10 * math.log10(
-            sum(n * 10 ** (leq / 10) for leq, n in run_leq_ns) / total_n
-        ), 1)
+    # Session LAeq = duration-weighted energy avg of per-run LAeq values, the
+    # same _energy_avg_weighted() that writes sessions.avg_laeq on import, so
+    # this figure and the session list now agree (to this rounding). The weight
+    # was the record count n; it is the meter's duration_s where there is one.
+    run_leq_ws = [(r['leq'], run_weight_s(r))
+                  for r in run_rows if r.get('leq') is not None]
+    if run_leq_ws:
+        session_leq = round_half_up(_energy_avg_weighted(run_leq_ws), 1)
     else:
         session_leq = _energy_avg_db(all_laeq) if all_laeq else None
     # LA10/LA90: true percentile of every run's pooled 1-second LAFspl samples
@@ -231,12 +258,15 @@ def _call_claude(prompt, model, thinking_level):
         tool_choice={'type': 'tool', 'name': 'submit_report'},
         messages=[{'role': 'user', 'content': prompt}],
     )
-    if thinking_level == 'standard':
-        kwargs['thinking']      = {'type': 'adaptive'}
-        kwargs['output_config'] = {'effort': 'medium'}
-    elif thinking_level == 'extended':
-        kwargs['thinking']      = {'type': 'adaptive'}
-        kwargs['output_config'] = {'effort': 'high'}
+    # Haiku 4.5 rejects both of these outright (400), so a "standard thinking"
+    # Haiku report used to fail rather than simply run without thinking.
+    if _supports_thinking(model):
+        if thinking_level == 'standard':
+            kwargs['thinking']      = {'type': 'adaptive'}
+            kwargs['output_config'] = {'effort': 'medium'}
+        elif thinking_level == 'extended':
+            kwargs['thinking']      = {'type': 'adaptive'}
+            kwargs['output_config'] = {'effort': 'high'}
 
     message = client.messages.create(**kwargs)
 
@@ -410,10 +440,21 @@ def api_generate_report():
     session_data_block, stats = _build_session_data_block(sess, run_rows, all_laeq, total_s)
     prompt = tmpl['prompt'].replace('{{session_data}}', session_data_block)
 
+    # ── WP5/F12: a rejected request is the caller's fault, not the server's ──
+    # An unknown model id or an unsupported parameter comes back from the API as
+    # a 400; reporting it as a 500 sent the operator looking for a server fault.
+    try:
+        import anthropic as _anthropic
+        _bad_request = _anthropic.BadRequestError
+    except Exception:                      # SDK absent — _call_claude will say so
+        _bad_request = ()
     try:
         sections, tok_in, tok_out, cost_usd = _call_claude(prompt, model, thinking_level)
+    except _bad_request as e:
+        return jsonify({'error': str(e)}), 400
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+    # ── end WP5/F12 ──
 
     run_label = f"Run {run_number}" if run_number else "All runs"
     # Everything view_report renders, frozen at generation time. The narrative

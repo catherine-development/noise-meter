@@ -309,7 +309,7 @@ button,input,select,textarea{font-family:inherit}
           <label class="form-label">Standard</label>
           <select id="fStandard" class="form-input" style="cursor:pointer">
             <option value="noise_act">Noise Act (pre/post 23:00)</option>
-            <option value="bs4142">BS 4142 (Day/Evening/Night)</option>
+            <option value="bs4142">BS 4142 (Day/Night)</option>
           </select>
         </div>
         <div>
@@ -369,26 +369,26 @@ function fmtDur(n, step) {
   return `${m}:${String(sec).padStart(2, '0')}`;
 }
 
+// Mirrors assessments_db._time_period(). BS 4142:2014+A1:2019 defines two
+// periods only — day 07:00-23:00, night 23:00-07:00. The 'Evening' band this
+// used to return is not in the standard, and having it here as well as in the
+// Python meant the page and the CSV could disagree about the same run.
 function timePeriod(t, std) {
   const h = parseInt((t || '00').split(':')[0]);
-  if (std === 'bs4142') {
-    if (h >= 7 && h < 19) return 'Day';
-    if (h >= 19 && h < 23) return 'Evening';
-    return 'Night';
-  }
+  if (std === 'bs4142') return (h >= 7 && h < 23) ? 'Day' : 'Night';
   return (h >= 23 || h < 7) ? 'Post 23:00' : 'Pre 23:00';
 }
 
 function periodKey(p) {
-  return { Day:'day', Evening:'eve', Night:'ngt', 'Pre 23:00':'pre', 'Post 23:00':'post' }[p] || 'day';
+  return { Day:'day', Night:'ngt', 'Pre 23:00':'pre', 'Post 23:00':'post' }[p] || 'day';
 }
 
 function periods(std) {
-  return std === 'bs4142' ? ['Day','Evening','Night'] : ['Pre 23:00','Post 23:00'];
+  return std === 'bs4142' ? ['Day','Night'] : ['Pre 23:00','Post 23:00'];
 }
 
 function shortPeriod(p) {
-  return { Day:'Day', Evening:'Eve', Night:'Night', 'Pre 23:00':'Pre-23', 'Post 23:00':'Post-23' }[p] || p;
+  return { Day:'Day', Night:'Night', 'Pre 23:00':'Pre-23', 'Post 23:00':'Post-23' }[p] || p;
 }
 
 // ── Sidebar ─────────────────────────────────────────────────

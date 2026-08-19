@@ -1,11 +1,32 @@
-import math
 import os
 import json
 import sqlite3
 
-from nor140_format import SPECTRAL_TABLES
+from nor140_format import SPECTRAL_TABLES, round_half_up
+# The session LAeq must be the same number whether it was written by an import
+# or by a recompute, so both call the one implementation. noise_parser imports
+# nothing from here, so this direction is safe.
+from noise_parser import _energy_avg_weighted, run_weight_s
 
 DB_PATH = os.environ.get('NOISE_DB_PATH', '/home/flightdata/noise-meter/noise.db')
+
+
+def percentile(sorted_vals, p):
+    """The p-th percentile of an ascending list, linearly interpolated.
+
+    Lives here because reports.py and assessments_db.py both need it and both
+    already import from this module — assessments_db used to carry its own
+    nearest-rank version, which disagreed with the reports' figure for the same
+    run. LA90 is the level exceeded 90% of the time, i.e. percentile(s, 10).
+    """
+    n = len(sorted_vals)
+    if not n:
+        return None
+    idx = (p / 100) * (n - 1)
+    lo = int(idx)
+    hi = min(lo + 1, n - 1)
+    return round_half_up(
+        sorted_vals[lo] + (idx - lo) * (sorted_vals[hi] - sorted_vals[lo]), 1)
 
 
 def get_db():
@@ -1048,12 +1069,13 @@ def recompute_session_aggregates(dates=None):
     row untouched, so a session could sit ~8 dB high — the old 0x0422 LAeq bug
     preserved at session level long after the runs were fixed.
 
-    Deliberately uses the same formula as noise_parser.parse_zip(), an
-    equal-weight energy average of the per-run LAeq, so that a backfill and a
-    re-import of the same data produce identical session rows. (Reports compute
-    a duration-weighted session LAeq separately, which is the more correct
-    figure when runs differ in length; this column exists for the session list
-    and CSV export.)
+    Deliberately uses the same formula as noise_parser.parse_zip(), so that a
+    backfill and a re-import of the same data produce identical session rows.
+    That formula is a *duration-weighted* energy average of the per-run LAeq
+    (weight: the meter's duration_s, falling back to n_samples) — the same
+    definition the reports have always used, now the only one. It was an
+    equal-weight mean here and in parse_zip, so a day of mixed-length runs read
+    differently in the session list than in its own report.
 
     Returns [(date, old_avg, new_avg)] for the sessions whose values changed.
 
@@ -1082,17 +1104,18 @@ def _recompute_session_aggregates(conn, dates=None):
     changed = []
     for s in sess:
         runs = conn.execute(
-            'SELECT avg_laeq, max_laeq FROM runs WHERE session_id=?', (s['id'],)
+            'SELECT avg_laeq, max_laeq, duration_s, n_samples FROM runs '
+            'WHERE session_id=?', (s['id'],)
         ).fetchall()
         if not runs:
             continue
-        laeqs = [r['avg_laeq'] for r in runs if r['avg_laeq'] is not None]
+        weighted = [(r['avg_laeq'], run_weight_s(dict(r)))
+                    for r in runs if r['avg_laeq'] is not None]
         maxes = [r['max_laeq'] for r in runs if r['max_laeq'] is not None]
-        if not laeqs:
+        if not weighted:
             continue
-        new_avg = round(10 * math.log10(
-            sum(10 ** (v / 10) for v in laeqs) / len(laeqs)), 2)
-        new_max = round(max(maxes), 1) if maxes else s['max_laeq']
+        new_avg = round_half_up(_energy_avg_weighted(weighted), 2)
+        new_max = round_half_up(max(maxes), 1) if maxes else s['max_laeq']
         if (s['avg_laeq'] != new_avg or s['max_laeq'] != new_max
                 or s['run_count'] != len(runs)):
             conn.execute(
