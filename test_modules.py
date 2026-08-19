@@ -1563,6 +1563,172 @@ def main(meas_root):
             check(_lim.get('/login').status_code == 200,
                   'but the login page itself is still servable — the limit is POST only')
 
+        # ── 10. the run modal names the quantity it shows (F7) ─────────────────
+        print('\n10. run modal quantities and the 1-second series route')
+        # These numbers are what an officer reads off the screen and puts in a
+        # statement, and three of them named the wrong measurement: the modal
+        # labelled the downsampled LApeak channel "LCpeak max", the LAE channel
+        # "LAImax peak", and the extremes of a max-of-window profile
+        # "LAmax"/"LAmin". None of it was reachable from Python — the display is
+        # JavaScript — so the guard below is static, backed by a live check of
+        # the route the modal now fetches its series from.
+        #
+        # Its own Side, and noise_app dropped with it: the module binds
+        # noise_db's functions at import, so a stale noise_app answers from
+        # whichever database it was first imported against.
+        sys.modules.pop('noise_app', None)
+        pf = Side(os.path.join(tmp, 'prof.db'))
+        pf.db.import_sessions(sessions, metadata=META)
+        _papp = importlib.import_module('noise_app').app
+        _papp.config['TESTING'] = True
+        _pcl = _papp.test_client()
+        with _pcl.session_transaction() as _s:
+            _s['user'] = 'test'
+            _s['logged_in'] = True
+
+        # A downsampled run: the chart profile is one point per `step` seconds,
+        # each of them the maximum of its window. Take the one where that hurts
+        # most, so the checks below are made against a real disagreement rather
+        # than a run that happens never to approach 85 dB.
+        _pct = lambda xs: 100.0 * sum(1 for v in xs if v >= 85) / len(xs)
+        _expand = lambda p, n: [v for v in p['laeq_profile'] for _ in range(p['step'])][:n]
+        _worst, _over = None, -1.0
+        for _p in pf.db.get_all_sessions_json()['sessions'][0]['projects']:
+            _full = pf.db.get_run_prof_by_source(SESSION_DATE, _p['source_file'])['prof_laeq']
+            if not _full or _p['step'] <= 1:
+                continue
+            _d = _pct(_expand(_p, len(_full))) - _pct(_full)
+            if _d > _over:
+                _worst, _over = _p, _d
+        check(_over > 1.0, 'a run whose chart profile materially overstates time above 85 dB',
+              f"{_worst['source_file']}: +{_over:.1f} percentage points")
+        _dsrow = pf.sql('SELECT r.source_file, r.step, r.n_samples, r.prof_laeq_json '
+                        'FROM runs r JOIN sessions s ON s.id=r.session_id '
+                        'WHERE s.date=? AND r.source_file=?', SESSION_DATE, _worst['source_file'])[0]
+        _src8 = _dsrow['source_file']
+        _stored = json.loads(_dsrow['prof_laeq_json'])
+
+        _r = _pcl.get(f'/api/run/{SESSION_DATE}/{_src8}/prof')
+        check(_r.status_code == 200, 'the prof route serves a run that exists',
+              f'{_r.status_code}: {_r.get_data(as_text=True)[:120]}')
+        _j = _r.get_json()
+        check(_j['prof_laeq'] == _stored,
+              'it returns the stored 1-second series unaltered', f"{len(_j['prof_laeq'])} values")
+        check(len(_j['prof_laeq']) == _j['n'] == _dsrow['n_samples'],
+              'one value per second of the run', str(_j['n']))
+
+        # The difference the fix is for, on real data: counting the expanded
+        # chart profile against 85 dB is not counting the measurement.
+        _proj8 = next(p for p in pf.db.get_all_sessions_json()['sessions'][0]['projects']
+                      if p['source_file'] == _src8)
+        _chart = _expand(_proj8, _j['n'])
+        check(len(_proj8['laeq_profile']) < len(_j['prof_laeq']),
+              'the browser payload really does carry only the downsampled profile',
+              f"{len(_proj8['laeq_profile'])} vs {len(_j['prof_laeq'])}")
+        check(_pct(_chart) > _pct(_stored),
+              'counting the chart profile overstates the time above 85 dB',
+              f'chart {_pct(_chart):.1f}% vs real {_pct(_stored):.1f}%')
+        check(min(_proj8['laeq_profile']) > min(_stored),
+              'and its minimum is biased high — so it cannot be an "LAmin"',
+              f'{min(_proj8["laeq_profile"])} vs {min(_stored)}')
+
+        # Keyed on the stable identity, so a renumbering between render and
+        # fetch cannot swap the measurement under an open modal.
+        _sid8 = pf.sql('SELECT id FROM sessions WHERE date=?', SESSION_DATE)[0]['id']
+        pf.exec('UPDATE runs SET run_number=run_number+100 WHERE session_id=?', _sid8)
+        _r = _pcl.get(f'/api/run/{SESSION_DATE}/{_src8}/prof')
+        check(_r.status_code == 200 and _r.get_json()['prof_laeq'] == _stored,
+              'a renumbered run still resolves by source_file', str(_r.status_code))
+        pf.exec('UPDATE runs SET run_number=run_number-100 WHERE session_id=?', _sid8)
+
+        # A run whose PROF series was never stored — an older peer-synced
+        # session — answers 200 with an empty series, which is what tells the
+        # page to fall back to the chart profile and label it, rather than
+        # showing an empty distribution as if the run had been silent.
+        pf.exec('UPDATE runs SET prof_laeq_json=NULL WHERE session_id=? AND source_file=?',
+                _sid8, _src8)
+        _r = _pcl.get(f'/api/run/{SESSION_DATE}/{_src8}/prof')
+        check(_r.status_code == 200 and _r.get_json()['prof_laeq'] == [],
+              'a run with no stored series is 200 with an empty series, not a 404',
+              str(_r.status_code))
+        pf.exec('UPDATE runs SET prof_laeq_json=? WHERE session_id=? AND source_file=?',
+                json.dumps(_stored), _sid8, _src8)
+
+        # An unknown run is a 404, not an empty series presented as a result.
+        _r = _pcl.get(f'/api/run/{SESSION_DATE}/PROJ7777/prof')
+        check(_r.status_code == 404, 'an unknown source_file is a 404', str(_r.status_code))
+        _r = _pcl.get(f'/api/run/1999-01-01/{_src8}/prof')
+        check(_r.status_code == 404, 'an unknown date is a 404', str(_r.status_code))
+        check(pf.db.get_run_prof_by_source(SESSION_DATE, 'PROJ7777') is None,
+              'the helper returns None rather than an empty series')
+
+        # The page still renders — a template that fails to parse takes the
+        # whole browser view with it.
+        check(_pcl.get('/').status_code == 200, 'the session browser still renders')
+
+        # ── 8b. static guard on the modal label -> field mapping ──────────────
+        print('\n10b. every modal row is bound to the field its label names')
+        _idx = open(os.path.join(REPO, 'templates', 'index.html'), encoding='utf-8').read()
+
+        def _jsfn(name):
+            """Source of one top-level function in index.html."""
+            _ls = _idx.split('\n')
+            _st = next(i for i, l in enumerate(_ls)
+                       if l.startswith(f'function {name}(') or l.startswith(f'async function {name}('))
+            _en = next(i for i in range(_st + 1, len(_ls)) if _ls[i] == '}')
+            return '\n'.join(_ls[_st:_en + 1])
+
+        _render = _jsfn('renderModalStats')
+        _openfn = _jsfn('openRunModal')
+        _loadfn = _jsfn('loadRunProf')
+
+        def _row(label):
+            hits = [l.strip() for l in _render.split('\n') if label in l]
+            check(len(hits) == 1, f'exactly one modal row for {label}', str(len(hits)))
+            return hits[0]
+
+        # The displayed value, not merely a mention of the field somewhere on the
+        # line: a row guarded by `proj.pmx != null` while showing
+        # max(lcpeak_profile) is exactly the defect, and naming the whole line
+        # would have let it through.
+        check('d1(proj.pmx)' in _row('LC<sub>peak</sub> max'),
+              'LCpeak max displays the GLOB LCpeak scalar (proj.pmx)')
+        check('d1(proj.laimax)' in _row('LA<sub>Imax</sub>'),
+              'LAImax displays the GLOB LAImax scalar')
+        check('d1(proj.mx)' in _row('LA<sub>Fmax</sub>'), 'LAFmax displays proj.mx')
+        check('d1(proj.mn)' in _row('LA<sub>Fmin</sub>'), 'LAFmin displays proj.mn')
+        check('d1(proj.avg)' in _row('LA<sub>eq</sub> (energy avg)'),
+              'LAeq is the stored GLOB LAeq, not a profile energy average')
+        check("'LA<sub>max</sub>'" not in _idx and "'LA<sub>min</sub>'" not in _idx,
+              'the ambiguous LAmax/LAmin rows are gone')
+
+        # And no row may come off a downsampled profile at all — the general
+        # form of the same mistake, whichever channel it is made with next.
+        _rowlines = [l.strip() for l in _render.split('\n')
+                     if "'dB'," in l or "'%'," in l]
+        check(len(_rowlines) >= 9, 'the guard located the modal rows', str(len(_rowlines)))
+        _fromprof = [l for l in _rowlines if '_profile' in l]
+        check(not _fromprof, 'no modal row is derived from a downsampled profile',
+              str(_fromprof))
+
+        check('computeStats(prof.series)' in _render,
+              'the series-derived rows are computed from the fetched series')
+        check('pct85' in _row('Time ≥ 85 dB') and 'stats ? stats.pct85' in _render,
+              'Time ≥ 85 dB comes from that series')
+        check("drawHistogram(document.getElementById('modalHistCanvas'), prof.series)" in _openfn,
+              'the histogram bins the fetched series')
+        check("drawExceedance(document.getElementById('modalExcCanvas'), prof.series)" in _openfn,
+              'the exceedance curve reads the fetched series')
+        check('laeq_profile' not in _openfn,
+              'nothing the modal counts is taken from the chart profile')
+
+        check('${encodeURIComponent(proj.source_file)}/prof' in _loadfn,
+              'the modal fetches the series by source_file, not by run number')
+        check("source: 'chart'" in _loadfn,
+              'a run with no stored series falls back to the chart profile')
+        check('chart profile' in _render,
+              'and the fallback says so on the rows it produced')
+
         print(f'\nAll {_checks} checks passed.')
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

@@ -301,6 +301,9 @@ def _parse_session_files_ex(glob_data, prof_data):
         'lafmax_profile': [_round_db(v, 1) for v in _downsample(lafmax_raw, step)],
         # No LAE channel in the 4-channel layout — stored NULL rather than faked.
         'lae_profile': [_round_db(v, 1) for v in _downsample(lae_raw, step)] if lae_raw else None,
+        # A misnomer kept because the stored column is called laimax_json: this
+        # is the LAE channel downsampled, with nothing impulse-weighted in it.
+        # The meter's own LAImax is the GLOB scalar 'laimax' / 'pmxi' above.
         'laimax_profile': [_round_db(v, 1) for v in _downsample(lae_raw, step)] if lae_raw else None,
         'lapeak_profile': [_round_db(v, 1) for v in _downsample(lapeak_raw, step)],
         'lcpeak_profile': [_round_db(v, 1) for v in _downsample(lapeak_raw, step)],  # LApeak alias; true LCpeak is GLOB 0x03ef
