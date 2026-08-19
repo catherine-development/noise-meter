@@ -3,8 +3,9 @@ Assessments subsystem: BS 4142 / Noise Act assessment records, their
 measurement locations, and the runs assigned to each location.
 
 Split out of noise_db.py. Assessments reference sessions and runs by
-(session_date, run_number) but own their own tables entirely; nothing in the
-core session/run measurement model depends on this module.
+(session_date, instrument_serial, source_file) — run_number as the legacy
+fallback — but own their own tables entirely; nothing in the core session/run
+measurement model depends on this module.
 
 The assessments / assessment_locations / assessment_runs tables are still
 created by noise_db._migrate(), which remains the single schema authority.
@@ -12,7 +13,7 @@ created by noise_db._migrate(), which remains the single schema authority.
 import json
 
 from nor140_format import round_half_up
-from noise_db import get_db, percentile
+from noise_db import get_db, percentile, resolve_serial
 
 
 def _with_end(row):
@@ -195,8 +196,9 @@ def delete_assessment_location(loc_id):
 
 
 def assign_runs(assessment_id, location_id, run_pairs):
-    """Link runs to a location. run_pairs items are (date, run_number) or
-    (date, run_number, source_file).
+    """Link runs to a location. run_pairs items are (date, run_number),
+    (date, run_number, source_file) or (date, run_number, source_file, serial);
+    a missing or blank serial means the default instrument.
 
     The upsert targets source_file, not run_number. Keying writes on the
     position while reads followed source_file let two things go wrong once
@@ -209,20 +211,24 @@ def assign_runs(assessment_id, location_id, run_pairs):
     for pair in run_pairs:
         date, run_num = pair[0], pair[1]
         source_file = pair[2] if len(pair) > 2 else None
+        serial = resolve_serial(pair[3] if len(pair) > 3 else None, conn)
         if source_file:
             # Trust nothing from the client about identity: the stable key must
             # name a run that actually exists in the session being assigned.
             ok = conn.execute(
                 'SELECT 1 FROM runs r JOIN sessions s ON s.id=r.session_id '
-                'WHERE s.date=? AND r.source_file=?', (date, source_file)).fetchone()
+                'WHERE s.date=? AND s.instrument_serial=? AND r.source_file=?',
+                (date, serial, source_file)).fetchone()
             if not ok:
                 conn.close()
                 raise ValueError(
-                    'source_file %r is not a run in session %s' % (source_file, date))
+                    'source_file %r is not a run in session %s (serial %r)'
+                    % (source_file, date, serial))
         if not source_file:
             row = conn.execute(
                 'SELECT r.source_file FROM runs r JOIN sessions s ON s.id=r.session_id '
-                'WHERE s.date=? AND r.run_number=?', (date, run_num)).fetchone()
+                'WHERE s.date=? AND s.instrument_serial=? AND r.run_number=?',
+                (date, serial, run_num)).fetchone()
             source_file = row['source_file'] if row else None
 
         if source_file:
@@ -231,8 +237,8 @@ def assign_runs(assessment_id, location_id, run_pairs):
             # link would silently become two.
             legacy = conn.execute(
                 'SELECT id FROM assessment_runs WHERE assessment_id=? AND session_date=? '
-                'AND run_number=? AND source_file IS NULL',
-                (assessment_id, date, run_num)).fetchone()
+                'AND instrument_serial=? AND run_number=? AND source_file IS NULL',
+                (assessment_id, date, serial, run_num)).fetchone()
             if legacy:
                 conn.execute(
                     'UPDATE assessment_runs SET source_file=?, location_id=? WHERE id=?',
@@ -241,19 +247,21 @@ def assign_runs(assessment_id, location_id, run_pairs):
                 continue
             conn.execute(
                 'INSERT INTO assessment_runs '
-                '  (assessment_id, location_id, session_date, run_number, source_file) '
-                'VALUES (?,?,?,?,?) '
+                '  (assessment_id, location_id, session_date, instrument_serial, '
+                '   run_number, source_file) '
+                'VALUES (?,?,?,?,?,?) '
                 # The index is partial, so the conflict target has to repeat
                 # its WHERE clause for SQLite to match it.
-                'ON CONFLICT(assessment_id, session_date, source_file) '
+                'ON CONFLICT(assessment_id, session_date, instrument_serial, source_file) '
                 '  WHERE source_file IS NOT NULL '
                 'DO UPDATE SET location_id=excluded.location_id, '
                 '  run_number=excluded.run_number',
-                (assessment_id, location_id, date, run_num, source_file)
+                (assessment_id, location_id, date, serial, run_num, source_file)
             )
             row = conn.execute(
                 'SELECT id FROM assessment_runs WHERE assessment_id=? AND session_date=? '
-                'AND source_file=?', (assessment_id, date, source_file)).fetchone()
+                'AND instrument_serial=? AND source_file=?',
+                (assessment_id, date, serial, source_file)).fetchone()
             if row:
                 touched.append(row['id'])
         else:
@@ -261,8 +269,8 @@ def assign_runs(assessment_id, location_id, run_pairs):
             # Fall back to the positional key, and do not create a second row.
             existing = conn.execute(
                 'SELECT id FROM assessment_runs WHERE assessment_id=? AND session_date=? '
-                'AND run_number=? AND source_file IS NULL',
-                (assessment_id, date, run_num)).fetchone()
+                'AND instrument_serial=? AND run_number=? AND source_file IS NULL',
+                (assessment_id, date, serial, run_num)).fetchone()
             if existing:
                 conn.execute('UPDATE assessment_runs SET location_id=? WHERE id=?',
                              (location_id, existing['id']))
@@ -270,8 +278,9 @@ def assign_runs(assessment_id, location_id, run_pairs):
             else:
                 cur = conn.execute(
                     'INSERT INTO assessment_runs '
-                    '  (assessment_id, location_id, session_date, run_number) '
-                    'VALUES (?,?,?,?)', (assessment_id, location_id, date, run_num))
+                    '  (assessment_id, location_id, session_date, instrument_serial, run_number) '
+                    'VALUES (?,?,?,?,?)',
+                    (assessment_id, location_id, date, serial, run_num))
                 touched.append(cur.lastrowid)
     conn.commit()
     rows = [dict(r) for r in conn.execute(
@@ -289,13 +298,16 @@ def get_assessment_run(ar_id):
 
 
 def get_assessment_runs_by_pairs(assessment_id, pairs):
-    """Return assessment_run rows for (session_date, run_number) pairs."""
+    """Return assessment_run rows for (session_date, run_number[, serial]) pairs."""
     conn = get_db()
     rows = []
-    for date, num in pairs:
+    for pair in pairs:
+        date, num = pair[0], pair[1]
+        serial = resolve_serial(pair[2] if len(pair) > 2 else None, conn)
         r = conn.execute(
-            'SELECT * FROM assessment_runs WHERE assessment_id=? AND session_date=? AND run_number=?',
-            (assessment_id, date, num)
+            'SELECT * FROM assessment_runs WHERE assessment_id=? AND session_date=? '
+            'AND instrument_serial=? AND run_number=?',
+            (assessment_id, date, serial, num)
         ).fetchone()
         if r:
             rows.append(dict(r))
@@ -340,9 +352,10 @@ def get_assessment_detail(aid):
             SELECT ar.id as ar_id, ar.conditions, ar.notes as run_notes,
                    r.run_number, r.start_time, r.end_time, r.n_samples, r.step,
                    r.avg_laeq, r.min_laeq, r.max_laeq, r.max_lcpeak, r.max_laimax,
-                   r.location_tag, ar.session_date
+                   r.location_tag, ar.session_date, ar.instrument_serial
             FROM assessment_runs ar
             JOIN sessions s ON s.date = ar.session_date
+                           AND s.instrument_serial = ar.instrument_serial
             JOIN runs r ON r.session_id = s.id AND (
                  r.source_file = ar.source_file
                  OR (ar.source_file IS NULL AND r.run_number = ar.run_number))
@@ -358,9 +371,10 @@ def get_assessment_detail(aid):
         SELECT ar.id as ar_id, ar.conditions, ar.notes as run_notes,
                r.run_number, r.start_time, r.end_time, r.n_samples, r.step,
                r.avg_laeq, r.min_laeq, r.max_laeq, r.max_lcpeak, r.max_laimax,
-               r.location_tag, ar.session_date
+               r.location_tag, ar.session_date, ar.instrument_serial
         FROM assessment_runs ar
         JOIN sessions s ON s.date = ar.session_date
+                       AND s.instrument_serial = ar.instrument_serial
         JOIN runs r ON r.session_id = s.id AND (
                  r.source_file = ar.source_file
                  OR (ar.source_file IS NULL AND r.run_number = ar.run_number))
@@ -376,25 +390,25 @@ def get_assessment_detail(aid):
 def get_all_runs_for_assessment(assessment_id):
     conn = get_db()
     rows = conn.execute('''
-        SELECT s.date as session_date, s.location_label as session_loc,
+        SELECT s.date as session_date, s.instrument_serial, s.location_label as session_loc,
                r.id as run_db_id, r.run_number, r.source_file, r.start_time, r.end_time,
                r.n_samples, r.step,
                r.avg_laeq, r.max_laeq, r.max_lcpeak, r.max_laimax, r.location_tag
         FROM runs r
         JOIN sessions s ON r.session_id = s.id
-        ORDER BY s.date, r.run_number
+        ORDER BY s.date, s.instrument_serial, r.run_number
     ''').fetchall()
 
     ar_rows = conn.execute(
-        'SELECT id as ar_id, session_date, run_number, source_file, location_id '
-        'FROM assessment_runs WHERE assessment_id=?', (assessment_id,)
+        'SELECT id as ar_id, session_date, instrument_serial, run_number, source_file, '
+        'location_id FROM assessment_runs WHERE assessment_id=?', (assessment_id,)
     ).fetchall()
     # Keyed on source_file so the pool marks the run that is actually linked.
     # Keyed on run_number it marked whichever run had inherited the number,
     # which is what walked users into re-assigning the wrong measurement.
-    assigned = {(ar['session_date'], ar['source_file']): dict(ar)
+    assigned = {(ar['session_date'], ar['instrument_serial'], ar['source_file']): dict(ar)
                 for ar in ar_rows if ar['source_file']}
-    assigned_legacy = {(ar['session_date'], ar['run_number']): dict(ar)
+    assigned_legacy = {(ar['session_date'], ar['instrument_serial'], ar['run_number']): dict(ar)
                        for ar in ar_rows if not ar['source_file']}
 
     loc_rows = conn.execute(
@@ -408,8 +422,8 @@ def get_all_runs_for_assessment(assessment_id):
     result = []
     for r in rows:
         row = _with_end(dict(r))
-        ar = (assigned.get((r['session_date'], r['source_file']))
-              or assigned_legacy.get((r['session_date'], r['run_number'])))
+        ar = (assigned.get((r['session_date'], r['instrument_serial'], r['source_file']))
+              or assigned_legacy.get((r['session_date'], r['instrument_serial'], r['run_number'])))
         row['ar_id'] = ar['ar_id'] if ar else None
         row['assigned_location_id'] = ar['location_id'] if ar else None
         row['assigned_location_label'] = (
@@ -438,9 +452,11 @@ def prepare_assessment_report_data(aid):
             SELECT ar.conditions, ar.notes as run_notes,
                    r.run_number, r.start_time, r.end_time, r.n_samples, r.step, r.duration_s,
                    r.avg_laeq, r.min_laeq, r.max_laeq, r.max_lcpeak, r.max_laimax,
-                   r.la_l10, r.la_l50, r.la_l90, r.prof_lafspl_json, ar.session_date
+                   r.la_l10, r.la_l50, r.la_l90, r.prof_lafspl_json, ar.session_date,
+                   ar.instrument_serial
             FROM assessment_runs ar
             JOIN sessions s ON s.date = ar.session_date
+                           AND s.instrument_serial = ar.instrument_serial
             JOIN runs r ON r.session_id = s.id AND (
                  r.source_file = ar.source_file
                  OR (ar.source_file IS NULL AND r.run_number = ar.run_number))
@@ -476,6 +492,7 @@ def prepare_assessment_report_data(aid):
                                 'la90': percentile(sv, 10)}
             runs_data.append({
                 'date': r['session_date'],
+                'serial': r['instrument_serial'],
                 'start_time': r['start_time'],
                 'end_time': r['end_time'],
                 # Meter-stored duration; no arithmetic fallback — blank rather

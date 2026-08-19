@@ -345,9 +345,19 @@ import noise_db; print(noise_db.audit_assessment_run_keys())"'
 ```
 
 **Known limit.** `source_file` is unique only *within* a session — `PROJ0001`
-recurs on every date — so every join is scoped by `session_id` or
-`session_date`. I believe that is sufficient; no constraint enforces it across
-the `runs` table itself, and it is the assumption I would attack next.
+recurs on every date, and, since WP8, can recur on a single date when two
+meters measured it — so every join is scoped by the session key, which WP8
+widened from `session_date` to `(session_date, instrument_serial)`. The
+stable link key is now `(assessment_id, session_date, instrument_serial,
+source_file)` and the partial unique index enforces it; the assessments pool
+posts the serial alongside `source_file` for the same reason it posts
+`source_file` alongside the run number. `UNIQUE(session_id, source_file)` on
+`runs` itself (via `idx_runs_stable`) still holds per session. Suite section
+14 imports the same PROJ folder under two serials on one date and asserts the
+link follows the right meter. The remaining assumption: the serial is
+supplied from outside the data (the meter writes none), so a card uploaded
+under the wrong serial files legitimate runs under the wrong instrument —
+visible, but wrong until deleted and re-uploaded.
 
 ---
 

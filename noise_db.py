@@ -57,6 +57,107 @@ class MigrationUnsafe(RuntimeError):
     """
 
 
+# ── Instrument serial ────────────────────────────────────────────────────────
+# A session is identified by (date, instrument_serial): several NOR140 meters
+# may measure on the same calendar date at different sites. The meter writes
+# no serial into GLOB/PROF, so it is supplied from outside the data — the
+# upload form, import_sdcard.py --serial, or `serial` beside `d` in a JSON
+# payload — and a payload that names none is filed under this Pi's default,
+# the `instrument_serial` app setting (else ''). That keeps an older peer, an
+# older JSON export and the pre-WP8 two-Pi deployment importing unchanged.
+
+def _default_serial(conn):
+    row = conn.execute(
+        "SELECT value FROM app_settings WHERE key='instrument_serial'").fetchone()
+    return (row[0] or '').strip() if row else ''
+
+
+def default_serial():
+    """The serial a payload/route/tombstone that names none is filed under."""
+    conn = get_db()
+    try:
+        return _default_serial(conn)
+    finally:
+        conn.close()
+
+
+def resolve_serial(serial, conn=None):
+    """Normalise a caller-supplied serial: stripped, or the default when blank.
+
+    Blank is treated the same as missing on purpose — an empty serial is not a
+    different instrument, it is an instrument nobody named.
+    """
+    s = (serial or '').strip() if serial is not None else ''
+    if s:
+        return s
+    return _default_serial(conn) if conn is not None else default_serial()
+
+
+# Column order for the sessions table when it has to be rebuilt. SQLite cannot
+# replace UNIQUE(date) with UNIQUE(date, instrument_serial) in place.
+_SESSION_COLUMNS = [
+    ('id',                'INTEGER PRIMARY KEY'),
+    ('date',              'TEXT NOT NULL'),
+    ('instrument_serial', "TEXT NOT NULL DEFAULT ''"),
+    ('run_count',         'INTEGER'),
+    ('avg_laeq',          'REAL'),
+    ('max_laeq',          'REAL'),
+    ('recorder_name',     'TEXT'),
+    ('location_label',    'TEXT'),
+    ('postcode',          'TEXT'),
+    ('lat',               'REAL'),
+    ('lng',               'REAL'),
+    ('notes',             'TEXT'),
+    ('imported_at',       "TEXT DEFAULT (datetime('now'))"),
+]
+
+
+def _table_sql(conn, name):
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type IN ('table','index') AND name=?",
+        (name,)).fetchone()
+    return (row[0] if row else '') or ''
+
+
+def _rebuild_sessions_with_serial(conn, serial):
+    """Replace UNIQUE(date) with UNIQUE(date, instrument_serial), keeping ids.
+
+    Follows SQLite's documented table-rebuild procedure. Ids are copied so
+    runs.session_id stays valid; every existing row is filed under `serial`
+    (the Pi's default at migration time). foreign_keys is switched off for the
+    duration and the switch is verified: with enforcement on, DROP TABLE
+    sessions would cascade-delete every run. The PRAGMA is a silent no-op
+    inside a transaction, which is why the caller commits first.
+    """
+    info = conn.execute('PRAGMA table_info(sessions)').fetchall()
+    have = [r[1] for r in info]
+    known = {c for c, _ in _SESSION_COLUMNS}
+    extra = [(r[1], r[2] or '') for r in info if r[1] not in known]
+    columns = _SESSION_COLUMNS + extra
+    defs = ', '.join(f'{c} {t}' for c, t in columns)
+    copy_cols = [c for c, _ in columns if c in have and c != 'instrument_serial']
+    serial_expr = ("COALESCE(NULLIF(TRIM(instrument_serial), ''), ?)"
+                   if 'instrument_serial' in have else '?')
+    conn.commit()
+    conn.execute('PRAGMA foreign_keys=off')
+    if conn.execute('PRAGMA foreign_keys').fetchone()[0]:
+        raise MigrationUnsafe(
+            'could not disable foreign_keys for the sessions rebuild (a '
+            'transaction is open); refusing, since DROP TABLE sessions would '
+            'cascade to runs')
+    try:
+        conn.execute(f'CREATE TABLE sessions_new ({defs}, UNIQUE(date, instrument_serial))')
+        conn.execute(
+            f'INSERT INTO sessions_new ({",".join(copy_cols)}, instrument_serial) '
+            f'SELECT {",".join(copy_cols)}, {serial_expr} FROM sessions', (serial,))
+        conn.execute('DROP TABLE sessions')
+        conn.execute('ALTER TABLE sessions_new RENAME TO sessions')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_sessions_date ON sessions(date)')
+        conn.commit()
+    finally:
+        conn.execute('PRAGMA foreign_keys=on')
+
+
 def _migrate(conn):
     conn.execute('''
         CREATE TABLE IF NOT EXISTS app_settings (
@@ -76,17 +177,45 @@ def _migrate(conn):
     for col, typ in new_cols:
         if col not in existing:
             conn.execute(f'ALTER TABLE sessions ADD COLUMN {col} {typ}')
+
+    # (date, instrument_serial) sessions. Rebuild when the column is missing
+    # or the table-level UNIQUE still names the date alone; idempotent after.
+    serial_default = _default_serial(conn)
+    sess_sql = _table_sql(conn, 'sessions')
+    if ('instrument_serial' not in existing
+            or 'UNIQUE(date, instrument_serial)' not in sess_sql):
+        _rebuild_sessions_with_serial(conn, serial_default)
+
     # Tombstones for deleted sessions. A missed upsert self-heals on the next
     # full sync, but a missed delete does not — the peer would keep the session
     # forever — so deletions are recorded and replayed rather than only pushed.
     # deleted_at uses datetime('now') (UTC) to match sessions.imported_at, which
-    # apply_full_sync() compares it against.
+    # apply_full_sync() compares it against. Keyed like sessions, on
+    # (date, instrument_serial); an older table keyed on date alone is rebuilt
+    # with every tombstone filed under the default serial.
     conn.execute('''
         CREATE TABLE IF NOT EXISTS deleted_sessions (
-            date       TEXT PRIMARY KEY,
-            deleted_at TEXT DEFAULT (datetime('now'))
+            date              TEXT NOT NULL,
+            instrument_serial TEXT NOT NULL DEFAULT '',
+            deleted_at        TEXT DEFAULT (datetime('now')),
+            PRIMARY KEY (date, instrument_serial)
         )
     ''')
+    ds_cols = {row[1] for row in conn.execute('PRAGMA table_info(deleted_sessions)').fetchall()}
+    if 'instrument_serial' not in ds_cols:
+        conn.executescript('''
+            CREATE TABLE deleted_sessions_new (
+                date              TEXT NOT NULL,
+                instrument_serial TEXT NOT NULL DEFAULT '',
+                deleted_at        TEXT DEFAULT (datetime('now')),
+                PRIMARY KEY (date, instrument_serial)
+            );
+        ''')
+        conn.execute(
+            'INSERT INTO deleted_sessions_new (date, instrument_serial, deleted_at) '
+            'SELECT date, ?, deleted_at FROM deleted_sessions', (serial_default,))
+        conn.execute('DROP TABLE deleted_sessions')
+        conn.execute('ALTER TABLE deleted_sessions_new RENAME TO deleted_sessions')
     conn.execute('''
         CREATE TABLE IF NOT EXISTS weather (
             date        TEXT PRIMARY KEY,
@@ -113,6 +242,7 @@ def _migrate(conn):
         CREATE TABLE IF NOT EXISTS generated_reports (
             id             INTEGER PRIMARY KEY,
             session_date   TEXT NOT NULL,
+            instrument_serial TEXT NOT NULL DEFAULT '',
             run_number     INTEGER,
             run_label      TEXT,
             template_id    INTEGER,
@@ -179,6 +309,12 @@ def _migrate(conn):
                      ('source_file', 'TEXT'), ('input_snapshot_json', 'TEXT')]:
         if col not in gr_cols:
             conn.execute(f'ALTER TABLE generated_reports ADD COLUMN {col} {typ}')
+    if 'instrument_serial' not in gr_cols:
+        # Every report stored before this column existed was generated from a
+        # session that is now filed under the default serial.
+        conn.execute("ALTER TABLE generated_reports ADD COLUMN instrument_serial "
+                     "TEXT NOT NULL DEFAULT ''")
+        conn.execute('UPDATE generated_reports SET instrument_serial=?', (serial_default,))
     if 'source_file' not in gr_cols:
         # Backfill through the run_number join. As with assessment_runs below,
         # this is the one moment the positional join is still trustworthy: the
@@ -231,6 +367,10 @@ def _migrate(conn):
             assessment_id   INTEGER NOT NULL REFERENCES assessments(id) ON DELETE CASCADE,
             location_id     INTEGER REFERENCES assessment_locations(id) ON DELETE SET NULL,
             session_date    TEXT NOT NULL,
+            -- With session_date, names the session: sessions are keyed on
+            -- (date, instrument_serial) because several meters can measure
+            -- on one calendar date.
+            instrument_serial TEXT NOT NULL DEFAULT '',
             -- Positional index of the run within its session. Kept for peer
             -- compatibility and as a fallback, but it is NOT a stable identity:
             -- recovering a previously unparseable run shifts every later number
@@ -262,14 +402,20 @@ def _migrate(conn):
                   AND r.run_number = assessment_runs.run_number
             ) WHERE source_file IS NULL
         ''')
+    if 'instrument_serial' not in ar_cols:
+        # Links made before sessions carried a serial all point at sessions
+        # now filed under the default one.
+        conn.execute("ALTER TABLE assessment_runs ADD COLUMN instrument_serial "
+                     "TEXT NOT NULL DEFAULT ''")
+        conn.execute('UPDATE assessment_runs SET instrument_serial=?', (serial_default,))
 
     # Only now is it safe to look. A duplicated stable key cannot be migrated
     # automatically, and creating the index over it would fail with a bare
     # IntegrityError naming nothing. Refuse instead, and say which rows.
     dupes = conn.execute('''
-        SELECT assessment_id, session_date, source_file, COUNT(*) AS n
+        SELECT assessment_id, session_date, instrument_serial, source_file, COUNT(*) AS n
         FROM assessment_runs WHERE source_file IS NOT NULL
-        GROUP BY assessment_id, session_date, source_file HAVING n > 1
+        GROUP BY assessment_id, session_date, instrument_serial, source_file HAVING n > 1
     ''').fetchall()
     if dupes:
         raise MigrationUnsafe(
@@ -292,24 +438,30 @@ def _migrate(conn):
                 assessment_id   INTEGER NOT NULL REFERENCES assessments(id) ON DELETE CASCADE,
                 location_id     INTEGER REFERENCES assessment_locations(id) ON DELETE SET NULL,
                 session_date    TEXT NOT NULL,
+                instrument_serial TEXT NOT NULL DEFAULT '',
                 run_number      INTEGER,
                 source_file     TEXT,
                 conditions      TEXT,
                 notes           TEXT
             );
             INSERT INTO assessment_runs_new
-                (id, assessment_id, location_id, session_date, run_number,
-                 source_file, conditions, notes)
-            SELECT id, assessment_id, location_id, session_date, run_number,
-                   source_file, conditions, notes FROM assessment_runs;
+                (id, assessment_id, location_id, session_date, instrument_serial,
+                 run_number, source_file, conditions, notes)
+            SELECT id, assessment_id, location_id, session_date, instrument_serial,
+                   run_number, source_file, conditions, notes FROM assessment_runs;
             DROP TABLE assessment_runs;
             ALTER TABLE assessment_runs_new RENAME TO assessment_runs;
         ''')
         conn.execute('PRAGMA foreign_keys=on')
 
+    # The stable key is (assessment, date, serial, source_file). An index built
+    # before the serial existed is replaced; CREATE ... IF NOT EXISTS alone
+    # would keep the narrower one and reject a second meter's PROJ0001.
+    if 'instrument_serial' not in _table_sql(conn, 'idx_assessment_runs_stable'):
+        conn.execute('DROP INDEX IF EXISTS idx_assessment_runs_stable')
     conn.execute('''
         CREATE UNIQUE INDEX IF NOT EXISTS idx_assessment_runs_stable
-            ON assessment_runs(assessment_id, session_date, source_file)
+            ON assessment_runs(assessment_id, session_date, instrument_serial, source_file)
             WHERE source_file IS NOT NULL
     ''')
 
@@ -340,7 +492,8 @@ def init_db():
     conn.executescript('''
         CREATE TABLE IF NOT EXISTS sessions (
             id             INTEGER PRIMARY KEY,
-            date           TEXT UNIQUE NOT NULL,
+            date           TEXT NOT NULL,
+            instrument_serial TEXT NOT NULL DEFAULT '',
             run_count      INTEGER,
             avg_laeq       REAL,
             max_laeq       REAL,
@@ -349,7 +502,8 @@ def init_db():
             postcode       TEXT,
             lat            REAL,
             lng            REAL,
-            imported_at    TEXT DEFAULT (datetime('now'))
+            imported_at    TEXT DEFAULT (datetime('now')),
+            UNIQUE(date, instrument_serial)
         );
         CREATE TABLE IF NOT EXISTS runs (
             id          INTEGER PRIMARY KEY,
@@ -413,6 +567,9 @@ def import_sessions(sessions_data, metadata=None):
     try:
         for sess in sessions_data:
             date = sess['d']
+            # The instrument. A payload that names none (older peer, older
+            # JSON export, a form left blank) is filed under this Pi's default.
+            serial = resolve_serial(sess.get('serial'), conn)
             projects = sess.get('projects', [])
             recorder_name  = sess.get('name', meta.get('recorder_name')) or None
             location_label = sess.get('loc',  meta.get('location_label')) or None
@@ -425,9 +582,9 @@ def import_sessions(sessions_data, metadata=None):
             # _recompute_session_aggregates() below fills them from the runs.
             conn.execute(
                 'INSERT INTO sessions '
-                '  (date, recorder_name, location_label, postcode, lat, lng, notes) '
-                'VALUES (?,?,?,?,?,?,?) '
-                'ON CONFLICT(date) DO UPDATE SET '
+                '  (date, instrument_serial, recorder_name, location_label, postcode, lat, lng, notes) '
+                'VALUES (?,?,?,?,?,?,?,?) '
+                'ON CONFLICT(date, instrument_serial) DO UPDATE SET '
                 '  recorder_name=COALESCE(excluded.recorder_name, sessions.recorder_name), '
                 '  location_label=COALESCE(excluded.location_label, sessions.location_label), '
                 '  postcode=COALESCE(excluded.postcode, sessions.postcode), '
@@ -435,7 +592,7 @@ def import_sessions(sessions_data, metadata=None):
                 '  lng=COALESCE(excluded.lng, sessions.lng), '
                 '  notes=COALESCE(excluded.notes, sessions.notes), '
                 '  imported_at=datetime(\'now\')',
-                (date, recorder_name, location_label, postcode, lat, lng, notes)
+                (date, serial, recorder_name, location_label, postcode, lat, lng, notes)
             )
             wx = sess.get('wx')
             if wx:
@@ -451,8 +608,11 @@ def import_sessions(sessions_data, metadata=None):
             # Importing a date supersedes any earlier deletion of it, so drop the
             # tombstone — otherwise a legitimate SD-card re-import would be deleted
             # again the next time a peer replayed its full sync payload.
-            conn.execute('DELETE FROM deleted_sessions WHERE date=?', (date,))
-            sess_id = conn.execute('SELECT id FROM sessions WHERE date=?', (date,)).fetchone()['id']
+            conn.execute('DELETE FROM deleted_sessions WHERE date=? AND instrument_serial=?',
+                         (date, serial))
+            sess_id = conn.execute(
+                'SELECT id FROM sessions WHERE date=? AND instrument_serial=?',
+                (date, serial)).fetchone()['id']
 
             touched = []   # run ids written by this payload
             for i, proj in enumerate(projects, 1):
@@ -672,16 +832,18 @@ def get_all_sessions_json():
     conn = get_db()
     sessions = conn.execute(
         'SELECT s.*, w.wind_speed, w.wind_dir, w.temp_min, w.temp_max, w.precip '
-        'FROM sessions s LEFT JOIN weather w ON s.date=w.date ORDER BY s.date DESC'
+        'FROM sessions s LEFT JOIN weather w ON s.date=w.date '
+        'ORDER BY s.date DESC, s.instrument_serial'
     ).fetchall()
-    # Build session_date -> list of assessment names (one query, not N)
+    # Build (session_date, serial) -> list of assessment names (one query, not N)
     sess_assess_rows = conn.execute(
-        'SELECT DISTINCT ar.session_date, a.name '
+        'SELECT DISTINCT ar.session_date, ar.instrument_serial, a.name '
         'FROM assessment_runs ar JOIN assessments a ON a.id=ar.assessment_id'
     ).fetchall()
     sess_assessments = {}
     for row in sess_assess_rows:
-        sess_assessments.setdefault(row['session_date'], []).append(row['name'])
+        sess_assessments.setdefault(
+            (row['session_date'], row['instrument_serial']), []).append(row['name'])
     result = []
     for sess in sessions:
         runs = conn.execute(
@@ -693,16 +855,17 @@ def get_all_sessions_json():
             "                    THEN COALESCE(al.label,'?') END, ',') AS assess_locs "
             'FROM runs r '
             'LEFT JOIN assessment_runs ar '
-            '  ON ar.session_date=? AND ('
+            '  ON ar.session_date=? AND ar.instrument_serial=? AND ('
             '    ar.source_file=r.source_file'
             '    OR (ar.source_file IS NULL AND ar.run_number=r.run_number)) '
             'LEFT JOIN assessment_locations al ON al.id=ar.location_id '
             'WHERE r.session_id=? '
             'GROUP BY r.id ORDER BY r.run_number',
-            (sess['date'], sess['id'])
+            (sess['date'], sess['instrument_serial'], sess['id'])
         ).fetchall()
         result.append({
             'd':       sess['date'],
+            'serial':  sess['instrument_serial'],
             'avg':     sess['avg_laeq'],
             'mx':      sess['max_laeq'],
             'name':    sess['recorder_name'],
@@ -712,7 +875,7 @@ def get_all_sessions_json():
             'lng':     sess['lng'],
             'notes':   sess['notes'],
             'wx':      _wx(sess),
-            'assmnts': sess_assessments.get(sess['date'], []),
+            'assmnts': sess_assessments.get((sess['date'], sess['instrument_serial']), []),
             'projects': [{
                 **_run_to_dict(r, full=False),
                 'loc_tag': r['location_tag'],
@@ -747,24 +910,31 @@ def get_weather(date):
     return dict(row) if row else None
 
 
-def get_existing_dates():
-    """Return a set of session dates already in the database."""
+def get_existing_dates(serial=None):
+    """Return a set of session dates already in the database — for one
+    instrument when `serial` is given (blank means the default serial), else
+    across every instrument."""
     conn = get_db()
-    rows = conn.execute('SELECT date FROM sessions').fetchall()
+    if serial is None:
+        rows = conn.execute('SELECT date FROM sessions').fetchall()
+    else:
+        rows = conn.execute('SELECT date FROM sessions WHERE instrument_serial=?',
+                            (resolve_serial(serial, conn),)).fetchall()
     conn.close()
     return {r['date'] for r in rows}
 
 
 def get_existing_run_starts():
-    """Return dict mapping date -> set of start_times already in the database."""
+    """Return dict mapping (date, serial) -> set of start_times already stored."""
     conn = get_db()
     rows = conn.execute(
-        'SELECT s.date, r.start_time FROM runs r JOIN sessions s ON r.session_id = s.id'
+        'SELECT s.date, s.instrument_serial, r.start_time '
+        'FROM runs r JOIN sessions s ON r.session_id = s.id'
     ).fetchall()
     conn.close()
     result = {}
     for row in rows:
-        result.setdefault(row['date'], set()).add(row['start_time'])
+        result.setdefault((row['date'], row['instrument_serial']), set()).add(row['start_time'])
     return result
 
 
@@ -774,7 +944,7 @@ def get_sessions_since(since):
     sessions = conn.execute(
         'SELECT s.*, w.wind_speed, w.wind_dir, w.temp_min, w.temp_max, w.precip '
         'FROM sessions s LEFT JOIN weather w ON s.date=w.date '
-        'WHERE s.imported_at > ? ORDER BY s.date', (since,)
+        'WHERE s.imported_at > ? ORDER BY s.date, s.instrument_serial', (since,)
     ).fetchall()
     result = []
     for sess in sessions:
@@ -783,6 +953,7 @@ def get_sessions_since(since):
         ).fetchall()
         result.append({
             'd':     sess['date'],
+            'serial': sess['instrument_serial'],
             'avg':   sess['avg_laeq'],
             'mx':    sess['max_laeq'],
             'name':  sess['recorder_name'],
@@ -802,47 +973,67 @@ def get_all_sessions_list():
     """Return all sessions as dicts for the manage page (no run data)."""
     conn = get_db()
     rows = conn.execute(
-        'SELECT date, run_count, avg_laeq, max_laeq, '
+        'SELECT date, instrument_serial, run_count, avg_laeq, max_laeq, '
         '       recorder_name, location_label, postcode, lat, lng, notes '
-        'FROM sessions ORDER BY date DESC'
+        'FROM sessions ORDER BY date DESC, instrument_serial'
     ).fetchall()
     conn.close()
-    return [dict(r) for r in rows]
+    out = []
+    for r in rows:
+        d = dict(r)
+        # A DOM-safe handle for the row: the date alone no longer identifies a
+        # session once two meters measured on the same day.
+        d['key'] = d['date'] + (('-' + d['instrument_serial']) if d['instrument_serial'] else '')
+        out.append(d)
+    return out
 
 
-def update_session_metadata(date, recorder_name, location_label, postcode, lat, lng, notes=None):
+def update_session_metadata(date, recorder_name, location_label, postcode, lat, lng,
+                            notes=None, serial=None):
     conn = get_db()
     conn.execute(
         'UPDATE sessions SET recorder_name=?, location_label=?, postcode=?, lat=?, lng=?, notes=? '
-        'WHERE date=?',
+        'WHERE date=? AND instrument_serial=?',
         (recorder_name or None, location_label or None,
-         postcode or None, lat, lng, notes or None, date)
+         postcode or None, lat, lng, notes or None, date, resolve_serial(serial, conn))
     )
     conn.commit()
     conn.close()
 
 
-def get_full_run_row(date, run_number):
+def _session_id(conn, date, serial):
+    """The id of the (date, serial) session, or None. `serial` may be None or
+    blank, meaning the default."""
+    row = conn.execute(
+        'SELECT id FROM sessions WHERE date=? AND instrument_serial=?',
+        (date, resolve_serial(serial, conn))).fetchone()
+    return row['id'] if row else None
+
+
+def get_full_run_row(date, run_number, serial=None):
     """Return all columns for a single run (including spec_ and prof_ JSON columns).
-    Adds 'session_date' so callers can build full datetimes from start_time."""
+    Adds 'session_date' and 'instrument_serial' so callers can build full
+    datetimes from start_time and name the instrument in exports."""
     conn = get_db()
-    sess = conn.execute('SELECT id FROM sessions WHERE date=?', (date,)).fetchone()
-    if not sess:
+    serial = resolve_serial(serial, conn)
+    sid = _session_id(conn, date, serial)
+    if sid is None:
         conn.close()
         return None
     row = conn.execute(
         'SELECT * FROM runs WHERE session_id=? AND run_number=?',
-        (sess['id'], run_number)
+        (sid, run_number)
     ).fetchone()
     conn.close()
     if row is None:
         return None
     result = dict(row)
     result['session_date'] = date
+    result['instrument_serial'] = serial
     return result
 
 
-def get_session_prof_lafspl(date, run_numbers=None):
+def get_session_prof_lafspl(date, run_numbers=None, serial=None):
     """Return the pooled list of 1-second LAFspl values across the given runs
     (or all runs, if run_numbers is None) of a session.
 
@@ -860,19 +1051,19 @@ def get_session_prof_lafspl(date, run_numbers=None):
     notes make for LAFmin vs min(PROF field 0).
     """
     conn = get_db()
-    sess = conn.execute('SELECT id FROM sessions WHERE date=?', (date,)).fetchone()
-    if not sess:
+    sid = _session_id(conn, date, serial)
+    if sid is None:
         conn.close()
         return []
     if run_numbers:
         ph = ','.join('?' * len(run_numbers))
         rows = conn.execute(
             f'SELECT prof_lafspl_json FROM runs WHERE session_id=? AND run_number IN ({ph})',
-            (sess['id'], *run_numbers)
+            (sid, *run_numbers)
         ).fetchall()
     else:
         rows = conn.execute(
-            'SELECT prof_lafspl_json FROM runs WHERE session_id=?', (sess['id'],)
+            'SELECT prof_lafspl_json FROM runs WHERE session_id=?', (sid,)
         ).fetchall()
     conn.close()
     pooled = []
@@ -882,7 +1073,7 @@ def get_session_prof_lafspl(date, run_numbers=None):
     return pooled
 
 
-def get_run_prof_laeq(date, run_number):
+def get_run_prof_laeq(date, run_number, serial=None):
     """Return the full 1-second LAeq series for one run, or [] if not stored.
 
     The session browser payload only carries the downsampled chart profile, which
@@ -893,14 +1084,15 @@ def get_run_prof_laeq(date, run_number):
     conn = get_db()
     row = conn.execute(
         'SELECT r.prof_laeq_json FROM runs r JOIN sessions s ON r.session_id = s.id '
-        'WHERE s.date = ? AND r.run_number = ?', (date, run_number)).fetchone()
+        'WHERE s.date = ? AND s.instrument_serial = ? AND r.run_number = ?',
+        (date, resolve_serial(serial, conn), run_number)).fetchone()
     conn.close()
     if not row or not row['prof_laeq_json']:
         return []
     return json.loads(row['prof_laeq_json'])
 
 
-def get_run_prof_by_source(date, source_file):
+def get_run_prof_by_source(date, source_file, serial=None):
     """Return the stored 1-second PROF series for one run, keyed on the stable
     identity (`source_file`, e.g. 'PROJ0003') rather than its position.
 
@@ -920,7 +1112,8 @@ def get_run_prof_by_source(date, source_file):
     row = conn.execute(
         'SELECT r.run_number, r.n_samples, r.step, r.prof_laeq_json, r.prof_lafspl_json '
         'FROM runs r JOIN sessions s ON r.session_id = s.id '
-        'WHERE s.date = ? AND r.source_file = ?', (date, source_file)).fetchone()
+        'WHERE s.date = ? AND s.instrument_serial = ? AND r.source_file = ?',
+        (date, resolve_serial(serial, conn), source_file)).fetchone()
     conn.close()
     if row is None:
         return None
@@ -934,57 +1127,70 @@ def get_run_prof_by_source(date, source_file):
     }
 
 
-def update_run_location_tag(date, run_number, tag):
+def update_run_location_tag(date, run_number, tag, serial=None, source_file=None):
+    """Set a run's location tag. The run is named by source_file when given
+    (its stable identity), else by its current run_number."""
     conn = get_db()
-    conn.execute(
-        'UPDATE runs SET location_tag=? '
-        'WHERE session_id=(SELECT id FROM sessions WHERE date=?) AND run_number=?',
-        (tag or None, date, run_number)
-    )
+    sid = _session_id(conn, date, serial)
+    if source_file:
+        conn.execute('UPDATE runs SET location_tag=? WHERE session_id=? AND source_file=?',
+                     (tag or None, sid, source_file))
+    else:
+        conn.execute('UPDATE runs SET location_tag=? WHERE session_id=? AND run_number=?',
+                     (tag or None, sid, run_number))
     conn.commit()
     conn.close()
 
 
-def delete_session(date):
-    """Delete a session and its runs (cascaded via FK) plus its assessment
-    assignments — assessment_runs.session_date is a plain text column, not a
-    declared foreign key, so it can't cascade automatically.
+def delete_session(date, serial=None):
+    """Delete the (date, serial) session and its runs (cascaded via FK) plus
+    its assessment assignments — assessment_runs.session_date is a plain text
+    column, not a declared foreign key, so it can't cascade automatically.
+    `serial` None or blank means the default serial, which is also how a
+    peer's pre-WP8 delete event (date only) is applied.
 
     Records a tombstone so the deletion replicates to a peer that was offline
     when it happened. Weather is deliberately left in place: it is keyed by
     date, not by session, and is reference data rather than measurement data."""
     conn = get_db()
-    conn.execute('DELETE FROM assessment_runs WHERE session_date=?', (date,))
-    conn.execute('DELETE FROM sessions WHERE date=?', (date,))
-    _record_tombstones(conn, [date])
+    serial = resolve_serial(serial, conn)
+    conn.execute('DELETE FROM assessment_runs WHERE session_date=? AND instrument_serial=?',
+                 (date, serial))
+    conn.execute('DELETE FROM sessions WHERE date=? AND instrument_serial=?', (date, serial))
+    _record_tombstones(conn, [(date, serial)])
     conn.commit()
     conn.close()
 
 
-def _record_tombstones(conn, dates, deleted_at=None):
-    """Mark session dates as deleted. Caller commits.
+def _record_tombstones(conn, keys, deleted_at=None):
+    """Mark (date, serial) sessions as deleted. Caller commits. A bare date in
+    `keys` means the default serial.
 
     deleted_at is supplied when replaying a peer's tombstone, so the original
     deletion time is preserved as it propagates; the MAX() keeps the newest
-    time if the same date is deleted on both Pis."""
-    for date in dates:
+    time if the same session is deleted on both Pis."""
+    for key in keys:
+        date, serial = key if isinstance(key, (tuple, list)) else (key, None)
+        serial = resolve_serial(serial, conn)
         if deleted_at is None:
             conn.execute(
-                "INSERT INTO deleted_sessions (date) VALUES (?) "
-                "ON CONFLICT(date) DO UPDATE SET deleted_at=datetime('now')", (date,))
+                "INSERT INTO deleted_sessions (date, instrument_serial) VALUES (?,?) "
+                "ON CONFLICT(date, instrument_serial) DO UPDATE SET deleted_at=datetime('now')",
+                (date, serial))
         else:
             conn.execute(
-                'INSERT INTO deleted_sessions (date, deleted_at) VALUES (?,?) '
-                'ON CONFLICT(date) DO UPDATE SET '
+                'INSERT INTO deleted_sessions (date, instrument_serial, deleted_at) VALUES (?,?,?) '
+                'ON CONFLICT(date, instrument_serial) DO UPDATE SET '
                 '  deleted_at=MAX(deleted_sessions.deleted_at, excluded.deleted_at)',
-                (date, deleted_at))
+                (date, serial, deleted_at))
 
 
 def get_session_tombstones():
-    """Return [{date, deleted_at}] for every deleted session."""
+    """Return [{date, serial, deleted_at}] for every deleted session."""
     conn = get_db()
     rows = conn.execute(
-        'SELECT date, deleted_at FROM deleted_sessions ORDER BY date').fetchall()
+        'SELECT date, instrument_serial AS serial, deleted_at FROM deleted_sessions '
+        'ORDER BY date, instrument_serial').fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
@@ -1030,8 +1236,8 @@ def audit_assessment_run_keys():
     """
     conn = get_db()
     rows = [dict(r) for r in conn.execute('''
-        SELECT ar.id, ar.assessment_id, ar.session_date, ar.run_number,
-               ar.source_file, a.name AS assessment_name
+        SELECT ar.id, ar.assessment_id, ar.session_date, ar.instrument_serial,
+               ar.run_number, ar.source_file, a.name AS assessment_name
         FROM assessment_runs ar
         LEFT JOIN assessments a ON a.id = ar.assessment_id
         ORDER BY ar.session_date, ar.run_number
@@ -1047,13 +1253,13 @@ def audit_assessment_run_keys():
         # more than one means the stable key does not identify a single run.
         n_hits = conn.execute(
             'SELECT COUNT(*) FROM runs rn JOIN sessions se ON se.id = rn.session_id '
-            'WHERE se.date=? AND rn.source_file=?',
-            (r['session_date'], r['source_file'])).fetchone()[0]
+            'WHERE se.date=? AND se.instrument_serial=? AND rn.source_file=?',
+            (r['session_date'], r['instrument_serial'], r['source_file'])).fetchone()[0]
         if n_hits == 0:
             report['unmatched'].append(r)
         elif n_hits > 1:
             report['ambiguous'].append(dict(r, matching_runs=n_hits))
-        key = (r['assessment_id'], r['session_date'], r['source_file'])
+        key = (r['assessment_id'], r['session_date'], r['instrument_serial'], r['source_file'])
         if key in seen:
             report['duplicate'].append(r)
         seen[key] = r['id']
@@ -1151,10 +1357,11 @@ def get_sessions_export_format(dates=None):
     if dates:
         ph = ','.join('?' * len(dates))
         sessions_rows = conn.execute(
-            f'SELECT * FROM sessions WHERE date IN ({ph}) ORDER BY date', dates
+            f'SELECT * FROM sessions WHERE date IN ({ph}) ORDER BY date, instrument_serial', dates
         ).fetchall()
     else:
-        sessions_rows = conn.execute('SELECT * FROM sessions ORDER BY date').fetchall()
+        sessions_rows = conn.execute(
+            'SELECT * FROM sessions ORDER BY date, instrument_serial').fetchall()
 
     result = []
     for sess in sessions_rows:
@@ -1164,6 +1371,7 @@ def get_sessions_export_format(dates=None):
         projects = [_run_to_dict(r, full=True) for r in runs]
         result.append({
             'd': sess['date'],
+            'serial': sess['instrument_serial'],
             'avg': sess['avg_laeq'],
             'mx': sess['max_laeq'],
             'projects': projects,
@@ -1175,8 +1383,10 @@ def get_sessions_export_format(dates=None):
 def purge_sessions_before(before_date):
     """Delete all sessions (and associated data) older than before_date (YYYY-MM-DD)."""
     conn = get_db()
-    old = [r[0] for r in conn.execute(
-        'SELECT date FROM sessions WHERE date < ?', (before_date,)).fetchall()]
+    keys = [(r[0], r[1]) for r in conn.execute(
+        'SELECT date, instrument_serial FROM sessions WHERE date < ?',
+        (before_date,)).fetchall()]
+    old = sorted({d for d, _ in keys})
     if old:
         ph = ','.join('?' * len(old))
         conn.execute(f'DELETE FROM assessment_runs WHERE session_date IN ({ph})', old)
@@ -1191,7 +1401,7 @@ def purge_sessions_before(before_date):
         conn.execute(
             f'DELETE FROM runs WHERE session_id IN (SELECT id FROM sessions WHERE date IN ({ph}))', old)
         conn.execute(f'DELETE FROM sessions WHERE date IN ({ph})', old)
-        _record_tombstones(conn, old)
+        _record_tombstones(conn, keys)
         conn.commit()
     conn.close()
     return old

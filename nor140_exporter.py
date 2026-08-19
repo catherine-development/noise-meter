@@ -419,8 +419,20 @@ def _write_profile_setup(ws, run, serial, trig_dt, duration_s):
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-def build_global_xlsx(run, serial=''):
+def _serial_for(run, serial):
+    """The serial written into the Setup sheet and the filename: the one the
+    caller names, else the session's own (get_full_run_row() adds
+    instrument_serial), else blank. Sessions are keyed on (date, serial), so
+    the run row knows its instrument; the app-wide setting is only a fallback
+    the route applies for a session filed under a blank serial."""
+    if serial:
+        return serial
+    return run.get('instrument_serial') or ''
+
+
+def build_global_xlsx(run, serial=None):
     """Build NOR140-style GLOBAL xlsx. Returns bytes."""
+    serial = _serial_for(run, serial)
     trig_dt = _dt(run)
     n_samples = run.get('n_samples', 1) or 1
     # n_samples is the count of actual 1-second measurements; 'step' is a chart
@@ -456,8 +468,9 @@ def build_global_xlsx(run, serial=''):
     return buf.getvalue()
 
 
-def build_profile_xlsx(run, serial=''):
+def build_profile_xlsx(run, serial=None):
     """Build NOR140-style PROFILE xlsx. Returns bytes."""
+    serial = _serial_for(run, serial)
     trig_dt = _dt(run)
     # Prefer the meter's stored duration over the record count — see the note in
     # build_global_xlsx.
@@ -482,7 +495,9 @@ def build_profile_xlsx(run, serial=''):
 
 
 def export_filename(run, serial, report_type):
-    """Return the canonical Nortfr filename for a run export."""
+    """Return the canonical Nortfr filename for a run export. `serial` may be
+    None to use the run's own instrument_serial."""
+    serial = _serial_for(run, serial)
     trig_dt = _dt(run)
     date_str = trig_dt.strftime('%y%m%d')
     run_num = _run_num(run)

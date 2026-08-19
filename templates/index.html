@@ -477,6 +477,27 @@ const DATA = JSON.parse(document.getElementById('dataBlob').textContent);
 // Default to the most recent session
 const TODAY_DATE = DATA.sessions[DATA.sessions.length - 1].d;
 let selectedDate = TODAY_DATE;
+// WP8: a session is (date, instrument serial) — two meters can measure on one
+// calendar date. selectedSerial rides beside selectedDate; findSess() resolves
+// a session by date at the selected serial, falling back to any session on
+// that date so date-only call sites keep working in the one-meter case. The
+// serial is only shown when more than one exists in the data.
+let selectedSerial = DATA.sessions[DATA.sessions.length - 1].serial || '';
+const MULTI_SERIAL = new Set(DATA.sessions.map(s => s.serial || '')).size > 1;
+function findSess(date, serial) {
+  const want = serial !== undefined ? (serial || '') : selectedSerial;
+  return DATA.sessions.find(s => s.d === date && (s.serial || '') === want)
+      || DATA.sessions.find(s => s.d === date);
+}
+function serialQS(prefix) {  // '?serial=…' for the selected session; '' when blank
+  return selectedSerial ? prefix + 'serial=' + encodeURIComponent(selectedSerial) : '';
+}
+function serialTag(serial) { // display suffix, only once >1 serial exists
+  return MULTI_SERIAL && serial ? ' \u00b7 SN ' + serial : '';
+}
+function runKey(date, serial, n) {  // assessment-filter run key
+  return date + '|' + (serial || '') + '|' + n;
+}
 
 // ── Utilities ──────────────────────────────────────────────
 function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
@@ -505,11 +526,11 @@ document.getElementById('hdrSd').textContent = `${DATA.sessions.length} sessions
 
 // ── Session panel ──────────────────────────────────────────
 function renderSessionPanel(date) {
-  const sess = DATA.sessions.find(s => s.d === date);
+  const sess = findSess(date);
   if (!sess) return;
 
-  document.getElementById('hdrDate').textContent = fmtDate(date);
-  document.getElementById('sessDateLabel').textContent = fmtDate(date);
+  document.getElementById('hdrDate').textContent = fmtDate(date) + serialTag(sess.serial);
+  document.getElementById('sessDateLabel').textContent = fmtDate(date) + serialTag(sess.serial);
 
   const locParts = [sess.name, sess.loc, sess.post].filter(Boolean);
   document.getElementById('sessLocation').textContent = locParts.join(' · ');
@@ -551,7 +572,7 @@ function renderSessionPanel(date) {
     let displayProjects = sess.projects;
     let displayNums = null;
     if (assessFilter.runSet) {
-      const pairs = sess.projects.map((p, i) => [p, i + 1]).filter(([, n]) => assessFilter.runSet.has(sess.d + '|' + n));
+      const pairs = sess.projects.map((p, i) => [p, i + 1]).filter(([, n]) => assessFilter.runSet.has(runKey(sess.d, sess.serial, n)));
       displayProjects = pairs.map(([p]) => p);
       displayNums = pairs.map(([, n]) => n);
     }
@@ -679,7 +700,7 @@ function saveMetaEdit(date) {
   status.style.color = 'var(--text3)';
   status.textContent = 'Saving…';
 
-  fetch('/session/' + date + '/edit', {
+  fetch('/session/' + date + '/edit' + serialQS('?'), {
     method: 'POST',
     headers: {'X-Requested-With': 'XMLHttpRequest',
               'Content-Type': 'application/x-www-form-urlencoded'},
@@ -689,7 +710,7 @@ function saveMetaEdit(date) {
   .then(json => {
     if (json.status !== 'ok') throw new Error(json.error || 'Error');
     // Update in-memory data
-    const sess = DATA.sessions.find(s => s.d === date);
+    const sess = findSess(date);
     if (sess) {
       sess.name  = g('mf-name')  || null;
       sess.loc   = g('mf-loc')   || null;
@@ -737,7 +758,8 @@ function renderRunsGrid(container, projects, runNums) {
             <span class="run-tag${tagVal ? '' : ' empty'}" title="Click to set location tag"
                   onclick="startTagEdit(event,this)">${tagVal || 'tag'}</span>
             <input class="run-tag-input" maxlength="8" placeholder="e.g. A"
-                   data-date="${selectedDate}" data-run="${runNum}"
+                   data-date="${selectedDate}" data-serial="${esc(selectedSerial)}"
+                   data-run="${runNum}" data-src="${esc(proj.source_file || '')}"
                    onblur="saveTag(this)" onkeydown="tagKeydown(event,this)">
             ${assessBadge}
           </div>
@@ -764,8 +786,8 @@ function renderRunsGrid(container, projects, runNums) {
       </div>` : ''}
       <div class="run-foot">${fmtDuration(proj.n)} · ${proj.n} samples${proj.step > 1 ? ' · chart 1/'+proj.step+'s' : ''}${proj.source_file ? ` · <span class="run-src" title="NOR140 project folder">${esc(proj.source_file)}</span>` : ''}</div>
       ${proj.lafmax != null ? `<div class="run-exports" onclick="event.stopPropagation()">
-        <a class="run-export-link" href="/session/${selectedDate}/run/${runNum}/export/nor140/GLOBAL" download>NOR140 Global xlsx</a>
-        <a class="run-export-link" href="/session/${selectedDate}/run/${runNum}/export/nor140/PROFILE" download>NOR140 Profile xlsx</a>
+        <a class="run-export-link" href="/session/${selectedDate}/run/${runNum}/export/nor140/GLOBAL${serialQS('?')}" download>NOR140 Global xlsx</a>
+        <a class="run-export-link" href="/session/${selectedDate}/run/${runNum}/export/nor140/PROFILE${serialQS('?')}" download>NOR140 Profile xlsx</a>
       </div>` : ''}`;
     card.addEventListener('click', () => openRunModal(proj, runNum, selectedDate));
     grid.appendChild(card);
@@ -807,15 +829,19 @@ function saveTag(input) {
   badge.style.display = '';
 
   // Update in-memory data so the modal picks it up
-  const sess = DATA.sessions.find(s => s.d === date);
+  const sess = findSess(date);
   if (sess && sess.projects && sess.projects[runNum - 1]) {
     sess.projects[runNum - 1].loc_tag = tag || null;
   }
 
-  fetch(`/session/${date}/run/${runNum}/tag`, {
+  // The serial names the session; source_file names the run by its stable
+  // identity, so the tag lands on the same measurement even if numbering
+  // shifted (or differs on the peer) between render and save.
+  const tagQS = input.dataset.serial ? '?serial=' + encodeURIComponent(input.dataset.serial) : '';
+  fetch(`/session/${date}/run/${runNum}/tag${tagQS}`, {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({tag}),
+    body: JSON.stringify({tag, source_file: input.dataset.src || null}),
   }).catch(() => {}); // fire and forget — badge already updated optimistically
 }
 
@@ -912,7 +938,7 @@ function drawRunChart(canvas, proj) {
 }
 
 function drawAllRunCharts(projects) {
-  const sess = DATA.sessions.find(s=>s.d===selectedDate);
+  const sess = findSess(selectedDate);
   if (!sess || !sess.projects) return;
   sess.projects.forEach((proj, idx) => {
     if (runCanvases[idx]) drawRunChart(runCanvases[idx], proj);
@@ -971,7 +997,7 @@ async function _doAssessFilter() {
     const assessName = matches[i].name;
     for (const r of runs) {
       if (r.ar_id === null) continue;  // skip unassigned runs
-      runSet.add(r.session_date + '|' + r.run_number);
+      runSet.add(runKey(r.session_date, r.instrument_serial, r.run_number));
       if (!sessAssessments.has(r.session_date)) sessAssessments.set(r.session_date, new Set());
       sessAssessments.get(r.session_date).add(assessName);
     }
@@ -1007,10 +1033,11 @@ function buildTable(sessions) {
   empty.style.display = 'none';
   tbody.innerHTML = sessions.map(s => {
     const loc = [s.loc, s.post].filter(Boolean).join(', ');
-    const sel = s.d === selectedDate ? ' sel' : '';
+    const sel = (s.d === selectedDate && (s.serial || '') === selectedSerial) ? ' sel' : '';
     const assessNames = (s.assmnts || []).join(', ');
-    return `<tr data-date="${s.d}" class="${sel}" onclick="selectSession('${s.d}')">
-      <td class="td-date">${s.d}</td>
+    return `<tr data-date="${s.d}" data-serial="${esc(s.serial || '')}" class="${sel}"
+        onclick="selectSession('${s.d}', '${esc(s.serial || '')}')">
+      <td class="td-date">${s.d}${MULTI_SERIAL && s.serial ? ` <span style="color:var(--text3);font-size:10px" title="Instrument serial">${esc(s.serial)}</span>` : ''}</td>
       <td class="td-loc">${esc(loc)}</td>
       <td class="td-by">${esc(s.name || '')}</td>
       <td class="td-assess" style="font-size:12px;color:var(--text2);max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(assessNames)}</td>
@@ -1021,11 +1048,13 @@ function buildTable(sessions) {
   }).join('');
 }
 
-function selectSession(date) {
+function selectSession(date, serial) {
   selectedDate = date;
+  if (serial !== undefined) selectedSerial = serial || '';
   renderSessionPanel(date);
   document.querySelectorAll('#sessTableBody tr').forEach(tr =>
-    tr.classList.toggle('sel', tr.dataset.date === date)
+    tr.classList.toggle('sel', tr.dataset.date === date &&
+                               (tr.dataset.serial || '') === selectedSerial)
   );
   drawHistory();
   document.getElementById('sessPanel').scrollIntoView({behavior: 'smooth', block: 'nearest'});
@@ -1047,7 +1076,7 @@ function applyFilter() {
     if (!isNaN(avg) && s.avg < avg) return false;
     if (!isNaN(max) && s.mx  < max) return false;
     if (assessFilter.runSet) {
-      const hasRun = (s.projects || []).some((_, i) => assessFilter.runSet.has(s.d + '|' + (i + 1)));
+      const hasRun = (s.projects || []).some((_, i) => assessFilter.runSet.has(runKey(s.d, s.serial, i + 1)));
       if (!hasRun) return false;
     }
     return true;
@@ -1092,7 +1121,7 @@ function downloadCsv(filename, rows) {
 }
 
 function exportSessionRuns(date) {
-  const sess = DATA.sessions.find(s => s.d === date);
+  const sess = findSess(date);
   if (!sess || !sess.projects || !sess.projects.length) return;
   // p.mn/p.mx are the GLOB LAFmin/LAFmax fallback-min/max, not LAeq min/max;
   // p.duration_s is the meter-stored duration (blank when the meter didn't
@@ -1101,7 +1130,7 @@ function exportSessionRuns(date) {
   sess.projects.forEach((p, i) => {
     rows.push([i + 1, p.start, p.end || '', p.n, p.step, p.avg.toFixed(2), p.mn, p.mx, p.pmx, p.duration_s]);
   });
-  downloadCsv('noise-' + date + '-runs.csv', rows);
+  downloadCsv('noise-' + date + (sess.serial ? '-' + sess.serial : '') + '-runs.csv', rows);
 }
 
 function exportRunCSV(proj, runIdx, date) {
@@ -1179,7 +1208,7 @@ function drawHistory() {
   const barMeta = [];
   sessions.forEach((s,i)=>{
     const x=xP(i);
-    const isSel = s.d === selectedDate;
+    const isSel = s.d === selectedDate && (s.serial || '') === selectedSerial;
     const color = isSel ? css('--sel-bar') : barColor(s.avg);
     const yTop=yP(s.avg), barH=Math.max(2,PAD.t+cH-yTop);
     ctx.fillStyle=color;
@@ -1213,7 +1242,7 @@ histWrap.addEventListener('mousemove', e=>{
   if(hit){
     const s=hit.s;
     const detail=s.projects?`${s.projects.length} runs · ` :'';
-    histTip.innerHTML=`<strong>${fmtDate(s.d)}</strong> &nbsp; ${detail}avg&nbsp;${s.avg}&nbsp;dB &nbsp; max&nbsp;${s.mx}&nbsp;dB`;
+    histTip.innerHTML=`<strong>${fmtDate(s.d)}${serialTag(s.serial)}</strong> &nbsp; ${detail}avg&nbsp;${s.avg}&nbsp;dB &nbsp; max&nbsp;${s.mx}&nbsp;dB`;
     histTip.style.display='block';
     histTip.style.left=Math.min(mx+10,r.width-230)+'px';
   } else { histTip.style.display='none'; }
@@ -1223,11 +1252,12 @@ histWrap.addEventListener('click', e=>{
   const r=histCanvas.getBoundingClientRect(), mx=e.clientX-r.left;
   const bars=histCanvas._bars; if(!bars)return;
   const hit=bars.find(b=>mx>=b.x&&mx<=b.x+b.w);
-  if(hit && hit.s.d !== selectedDate){
+  if(hit && (hit.s.d !== selectedDate || (hit.s.serial || '') !== selectedSerial)){
     selectedDate=hit.s.d;
+    selectedSerial=hit.s.serial || '';
     renderSessionPanel(selectedDate);
     drawHistory();
-    drawAllRunCharts(DATA.sessions.find(s=>s.d===selectedDate)?.projects||[]);
+    drawAllRunCharts(findSess(selectedDate)?.projects||[]);
   }
 });
 
@@ -1238,10 +1268,15 @@ function renderAll(){
   drawHistory();
 }
 
-// Pre-select a date from ?date= URL param (used by Manage → View link)
-const _urlDate = new URLSearchParams(window.location.search).get('date');
-if (_urlDate && DATA.sessions.find(s => s.d === _urlDate)) {
-  selectedDate = _urlDate;
+// Pre-select a date from ?date= (&serial=) URL params (Manage → View link).
+// Without &serial=, any session on the date matches — old links keep working.
+const _urlParams = new URLSearchParams(window.location.search);
+const _urlDate = _urlParams.get('date');
+const _urlSerial = _urlParams.get('serial');
+if (_urlDate) {
+  const _hit = DATA.sessions.find(s => s.d === _urlDate &&
+      (_urlSerial === null || (s.serial || '') === _urlSerial));
+  if (_hit) { selectedDate = _hit.d; selectedSerial = _hit.serial || ''; }
 }
 renderAll();
 
@@ -1250,7 +1285,7 @@ window.addEventListener('resize',()=>{
   clearTimeout(resizeTimer);
   resizeTimer=setTimeout(()=>{
     drawHistory();
-    drawAllRunCharts(DATA.sessions.find(s=>s.d===selectedDate)?.projects||[]);
+    drawAllRunCharts(findSess(selectedDate)?.projects||[]);
   },120);
 });
 const obs=new MutationObserver(renderAll);
@@ -1453,11 +1488,11 @@ const modalProfCache = {};    // date/source_file -> {series, source}
 async function loadRunProf(proj, date) {
   const fallback = {series: proj.laeq_profile || [], source: 'chart'};
   if (!proj.source_file) return fallback;
-  const key = date + '/' + proj.source_file;
+  const key = date + '/' + selectedSerial + '/' + proj.source_file;
   if (modalProfCache[key]) return modalProfCache[key];
   let result = fallback;
   try {
-    const r = await fetch(`/api/run/${encodeURIComponent(date)}/${encodeURIComponent(proj.source_file)}/prof`);
+    const r = await fetch(`/api/run/${encodeURIComponent(date)}/${encodeURIComponent(proj.source_file)}/prof${serialQS('?')}`);
     if (r.ok) {
       const j = await r.json();
       if (j.prof_laeq && j.prof_laeq.length) result = {series: j.prof_laeq, source: 'prof'};
@@ -1516,7 +1551,7 @@ function renderModalStats(proj, prof) {
 
 function openRunModal(proj, runNum, date) {
   const runIdx = runNum - 1;
-  const sess = DATA.sessions.find(s => s.d === date);
+  const sess = findSess(date);
   const tagLabel = proj.loc_tag ? `  ·  Location ${proj.loc_tag}` : '';
   document.getElementById('modalTitle').textContent = `Run ${runIdx+1}${tagLabel}  ·  ${proj.start}${proj.end ? '–' + proj.end : ''}`;
   document.getElementById('modalSub').textContent =
@@ -1580,7 +1615,7 @@ function saveModalMetaEdit() {
   const status = document.getElementById('modal-mf-status');
   status.style.color = 'var(--text3)';
   status.textContent = 'Saving…';
-  fetch('/session/' + date + '/edit', {
+  fetch('/session/' + date + '/edit' + serialQS('?'), {
     method: 'POST',
     headers: {'X-Requested-With': 'XMLHttpRequest',
               'Content-Type': 'application/x-www-form-urlencoded'},
@@ -1589,7 +1624,7 @@ function saveModalMetaEdit() {
   .then(r => r.json())
   .then(json => {
     if (json.status !== 'ok') throw new Error(json.error || 'Error');
-    const sess = DATA.sessions.find(s => s.d === date);
+    const sess = findSess(date);
     if (sess) {
       sess.name  = g('name')  || null;
       sess.loc   = g('loc')   || null;
@@ -1646,13 +1681,13 @@ window.saveTag            = saveTag;
 function fetchWeather(date) {
   const btn = document.getElementById('wx-btn-' + date);
   if (btn) { btn.textContent = 'Fetching…'; btn.disabled = true; }
-  fetch('/session/' + date + '/fetch-weather', { method: 'POST',
+  fetch('/session/' + date + '/fetch-weather' + serialQS('?'), { method: 'POST',
     headers: {'X-Requested-With': 'XMLHttpRequest'} })
   .then(r => r.json())
   .then(json => {
     if (json.status !== 'ok') throw new Error(json.message || 'Error');
     // Update in-memory data
-    const sess = DATA.sessions.find(s => s.d === date);
+    const sess = findSess(date);
     if (sess) sess.wx = json.wx;
     // Refresh chips and hide button
     const chips = document.getElementById('wx-chips-' + date);
@@ -1670,7 +1705,7 @@ function fetchWeather(date) {
 
 <script>
 // ── Report options modal ───────────────────────────────────────────────────
-let _roptDate = null, _roptRun = null, _roptSrc = null;
+let _roptDate = null, _roptRun = null, _roptSrc = null, _roptSerial = null;
 
 // sourceFile is the run's stable identity (its PROJ folder); run_number is
 // its position, which moves when the session is re-imported, so the report is
@@ -1679,6 +1714,7 @@ async function openReportOpt(date, runNumber, label, sourceFile) {
   _roptDate = date;
   _roptRun  = runNumber || null;
   _roptSrc  = sourceFile || null;
+  _roptSerial = selectedSerial;   // the modal always belongs to the selected session
   document.getElementById('roptTitle').textContent = 'Report — ' + label;
   document.getElementById('roptNotice').textContent = '';
   document.getElementById('roptNotice').className = 'ropt-notice';
@@ -1720,6 +1756,7 @@ async function submitReportOpt() {
 
   const body = {
     session_date:   _roptDate,
+    serial:         _roptSerial || '',
     template_id:    parseInt(document.getElementById('roptTemplate').value),
     model:          document.getElementById('roptModel').value,
     thinking_level: document.getElementById('roptThinking').value,

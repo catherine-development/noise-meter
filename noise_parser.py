@@ -403,7 +403,7 @@ def _proj_key_from_filename(fname):
     return f"PROJ{digits}" if digits.isdigit() else 'PROJ0000'
 
 
-def parse_files(file_pairs):
+def parse_files(file_pairs, serial=None):
     """
     Parse NOR140 data from a list of (relative_path, bytes) tuples.
     Used for folder uploads where the browser sends files individually.
@@ -413,12 +413,18 @@ def parse_files(file_pairs):
     with zipfile.ZipFile(buf, 'w') as zf:
         for path, data in file_pairs:
             zf.writestr(path, data)
-    return parse_zip(buf.getvalue())
+    return parse_zip(buf.getvalue(), serial=serial)
 
 
-def parse_zip(zip_bytes):
+def parse_zip(zip_bytes, serial=None):
     """
     Parse a ZIP of NOR140 SD card data from any folder level.
+
+    `serial` is the instrument the card came from. The NOR140 writes no serial
+    into GLOB/PROF (see NOR140_handoff.md), so one upload is one meter and the
+    caller names it; every session dict is stamped with it as `serial` beside
+    `d`. None or blank means "not named" and the importer files the session
+    under its default serial (the instrument_serial app setting).
 
     The SD card structure is:
       MEAS118/ → YYMMDD/ → PART0000/ → PROJnnnn/ → GLOBnnnn.DAT + PROFnnnn.DAT
@@ -427,7 +433,7 @@ def parse_zip(zip_bytes):
     a single PROJ folder, or even a flat ZIP of just the two DAT files.
 
     Returns a ParseResult — a list of session dicts
-        [{d, avg, mx, complete_date, skipped_files, projects:[...]}, ...]
+        [{d, serial, avg, mx, complete_date, skipped_files, projects:[...]}, ...]
     whose `.skipped` attribute lists every GLOB/PROF pair that was found but
     not imported, as {path, reason, date}. It used to drop those silently, so
     the user was told "Added N session(s)" with no hint that a run was missing.
@@ -521,6 +527,7 @@ def parse_zip(zip_bytes):
             [(p['avg'], run_weight_s(p)) for p in projects]), 2)
         result.append({
             'd':        date,
+            'serial':   (serial or '').strip(),
             'avg':      avg,
             'mx':       _round_db(max(p['mx'] for p in projects), 1),
             'complete_date': all(from_date_folder[date]),

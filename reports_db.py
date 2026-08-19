@@ -8,7 +8,7 @@ it lives apart from the core noise data layer.
 The report_templates / generated_reports tables themselves are still created by
 noise_db._migrate(), which remains the single schema authority for the app.
 """
-from noise_db import get_db
+from noise_db import get_db, resolve_serial
 
 
 DEFAULT_TEMPLATES = [
@@ -128,18 +128,23 @@ def delete_report_template(tid):
 def save_generated_report(session_date, template_id, template_name, model,
                           thinking_level, sections_json, input_tokens, output_tokens, cost_usd,
                           run_number=None, run_label=None,
-                          source_file=None, input_snapshot_json=None):
+                          source_file=None, input_snapshot_json=None,
+                          instrument_serial=None):
     """source_file pins a single-run report to the run's stable identity
     (run_number is display metadata that moves on re-import);
     input_snapshot_json is the JSON of every input the report was rendered
-    from, so view_report can show what was true at generation time."""
+    from, so view_report can show what was true at generation time.
+    instrument_serial names the session with session_date (None/blank = the
+    default serial)."""
     conn = get_db()
     cur = conn.execute(
         'INSERT INTO generated_reports '
-        '  (session_date, run_number, run_label, template_id, template_name, model, thinking_level, '
-        '   sections_json, input_tokens, output_tokens, cost_usd, source_file, input_snapshot_json) '
-        'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
-        (session_date, run_number, run_label, template_id, template_name, model, thinking_level,
+        '  (session_date, instrument_serial, run_number, run_label, template_id, template_name, '
+        '   model, thinking_level, sections_json, input_tokens, output_tokens, cost_usd, '
+        '   source_file, input_snapshot_json) '
+        'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+        (session_date, resolve_serial(instrument_serial, conn), run_number, run_label,
+         template_id, template_name, model, thinking_level,
          sections_json, input_tokens, output_tokens, cost_usd, source_file, input_snapshot_json)
     )
     rid = cur.lastrowid

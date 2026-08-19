@@ -113,6 +113,14 @@ h2{font-size:14px;font-weight:600;color:var(--text2);margin-bottom:14px}
       <div class="section-label">About this recording</div>
 
       <div class="field">
+        <label>Instrument serial</label>
+        <input type="text" name="serial" id="serialInput" value="{{ upload_serial or '' }}"
+               placeholder="e.g. 6899108" maxlength="20" style="width:160px">
+        <p class="note">The meter this SD card came from — one upload is one meter.
+        Sessions are filed under (date, serial), so check this before uploading a
+        different meter's card. Blank uses this Pi's default serial.</p>
+      </div>
+      <div class="field">
         <label>Recorded by <span>(optional)</span></label>
         <input type="text" name="recorder_name" placeholder="e.g. Jane Smith">
       </div>
@@ -221,8 +229,11 @@ h2{font-size:14px;font-weight:600;color:var(--text2);margin-bottom:14px}
     status.textContent = 'Checking for new recordings…';
     status.className = 'folder-status';
 
-    // Fetch existing dates from server, then filter to only new dates.
-    fetch('/api/existing-dates')
+    // Fetch existing dates from server, then filter to only new dates —
+    // scoped to the instrument named in the serial field, so a second meter's
+    // card for a date the first already covered is not filtered out.
+    var serialVal = (document.getElementById('serialInput') || {value: ''}).value.trim();
+    fetch('/api/existing-dates' + (serialVal ? '?serial=' + encodeURIComponent(serialVal) : '?serial='))
       .then(function (r) { return r.json(); })
       .then(function (existing) {
         var existingSet = new Set(existing);

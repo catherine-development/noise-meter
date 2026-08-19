@@ -806,13 +806,18 @@ def main(meas_root):
         _tpl = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                  'templates', 'assessments.html'), encoding='utf-8').read()
         _keyline = [l for l in _tpl.split('\n') if 'const key = ' in l]
-        check(len(_keyline) == 1 and 'r.source_file' in _keyline[0],
-              'the pool key carries source_file, not just the position',
+        # WP8: the key also carries the instrument serial — two meters can hold
+        # a same-numbered run (even the same PROJ folder) on one date.
+        check(len(_keyline) == 1 and 'r.source_file' in _keyline[0]
+              and 'r.instrument_serial' in _keyline[0],
+              'the pool key carries source_file and the serial, not just the position',
               _keyline[0].strip() if _keyline else 'not found')
-        check('const [date, rn, srcFile] = key.split' in _tpl,
-              'and the click handler destructures all three')
+        check('const [date, rn, srcFile, serial] = key.split' in _tpl,
+              'and the click handler destructures all four')
         check('source_file: srcFile || null' in _tpl,
               'and posts source_file to the server')
+        check("serial: serial || ''" in _tpl,
+              'and posts the serial to the server')
 
         # ── 4e. migration from hostile starting schemas ───────────────────────
         print('\n4e. migration on databases unlike the ones it was written against')
@@ -1813,8 +1818,12 @@ def main(meas_root):
               'the snapshot carries every input view_report renders', str(sorted(snap5)))
         check(snap5['run_rows'][0]['source_file'] == 'PROJ0005' and snap5['run_rows'][0]['run'] == 5,
               'snapshot run row names the run by source_file and number')
-        check(snap5['generated_from'] == {'dates': [SESSION_DATE], 'source_files': ['PROJ0005']},
-              'generated_from records the date and source_file', str(snap5['generated_from']))
+        # WP8: generated_from also names the instrument (the default serial,
+        # '' on this Side, since the request named none).
+        check(snap5['generated_from'] == {'dates': [SESSION_DATE], 'serials': [''],
+                                          'source_files': ['PROJ0005']},
+              'generated_from records the date, serial and source_file',
+              str(snap5['generated_from']))
         check(snap5['session_data_block'] == _prompts[-1].split('\n\n', 1)[1]
               .rsplit('\n\nProduce a professional', 1)[0]
               or snap5['session_data_block'] in _prompts[-1],
@@ -2403,6 +2412,319 @@ def main(meas_root):
         check(_row[_hdr.index('spans_boundary')] == 'no', 'and it crosses no boundary',
               _row[_hdr.index('spans_boundary')])
         rt.assess.delete_assessment(_aid12)
+
+
+        # ── 14. sessions keyed on (date, instrument_serial) (WP8) ────────────
+        print('\n14. sessions are keyed on (date, instrument_serial)')
+        # Several meters can measure on one calendar date. The serial comes
+        # from outside the data (the NOR140 writes none into GLOB/PROF), rides
+        # beside 'd' in every payload, and a payload naming none is filed
+        # under the Pi's default serial — so everything pre-WP8 still imports.
+        import io as _io14
+        import zipfile as _zf14
+
+        w = Side(os.path.join(tmp, 'wp8.db'))
+
+        def _payload_copy(serial=None, bump=None, n_projects=2):
+            sess14 = json.loads(json.dumps(dict(sessions[0])))
+            sess14.pop('complete_date', None)   # partial payloads only add/refresh
+            sess14['projects'] = sess14['projects'][:n_projects]
+            if serial is None:
+                sess14.pop('serial', None)   # a pre-WP8 payload has no such key
+            else:
+                sess14['serial'] = serial
+            if bump:
+                for pr in sess14['projects']:
+                    pr['avg'] += bump
+            return sess14
+
+        # (a) two meters, same date, the same PROJ folder names — side by side
+        sA = _payload_copy('METER-A')
+        sB = _payload_copy('METER-B', bump=3.0)
+        w.db.import_sessions([sA])
+        w.db.import_sessions([sB])
+        rows14 = w.sql('SELECT id, instrument_serial, run_count, avg_laeq '
+                       'FROM sessions WHERE date=? ORDER BY instrument_serial',
+                       SESSION_DATE)
+        check([r['instrument_serial'] for r in rows14] == ['METER-A', 'METER-B'],
+              'two meters on one date are two sessions',
+              str([dict(r) for r in rows14]))
+        check(all(r['run_count'] == 2 for r in rows14),
+              'each meter keeps its own runs', str([r['run_count'] for r in rows14]))
+        check(rows14[0]['avg_laeq'] != rows14[1]['avg_laeq'],
+              'aggregates are computed per meter, not pooled',
+              f"{rows14[0]['avg_laeq']} vs {rows14[1]['avg_laeq']}")
+        for r in rows14:
+            nums = [x['run_number'] for x in w.sql(
+                'SELECT run_number FROM runs WHERE session_id=? ORDER BY run_number', r['id'])]
+            check(nums == [1, 2], f"{r['instrument_serial']}: run numbering starts at 1",
+                  str(nums))
+        w.db.import_sessions([sA])   # re-import upserts, never twins
+        check(len(w.sql('SELECT id FROM sessions WHERE date=?', SESSION_DATE)) == 2,
+              'a re-import lands on the same (date, serial) session')
+        srcA = w.sql('SELECT r.source_file FROM runs r JOIN sessions s ON s.id=r.session_id '
+                     "WHERE s.date=? AND s.instrument_serial='METER-A' AND r.run_number=1",
+                     SESSION_DATE)[0]['source_file']
+        srcB = w.sql('SELECT r.source_file FROM runs r JOIN sessions s ON s.id=r.session_id '
+                     "WHERE s.date=? AND s.instrument_serial='METER-B' AND r.run_number=1",
+                     SESSION_DATE)[0]['source_file']
+        check(srcA == srcB, 'the same PROJ folder can exist under both serials', f'{srcA} / {srcB}')
+        rrA = w.db.get_full_run_row(SESSION_DATE, 1, serial='METER-A')
+        rrB = w.db.get_full_run_row(SESSION_DATE, 1, serial='METER-B')
+        check(abs(rrB['avg_laeq'] - rrA['avg_laeq'] - 3.0) < 1e-6,
+              'get_full_run_row(serial=…) reads the right meter',
+              f"{rrA['avg_laeq']} vs {rrB['avg_laeq']}")
+
+        # (b) an old-format payload (no serial) lands on the default serial
+        w.db.set_setting('instrument_serial', '6899108')
+        w.db.import_sessions([_payload_copy(serial=None)])
+        check(bool(w.sql('SELECT 1 FROM sessions WHERE date=? AND instrument_serial=?',
+                         SESSION_DATE, '6899108')),
+              'a payload without serial is filed under the instrument_serial setting')
+        check(len(w.sql('SELECT id FROM sessions WHERE date=?', SESSION_DATE)) == 3,
+              'and is a third session beside the two named meters')
+
+        # (c) the serial survives a peer round-trip
+        payload14 = w.db.get_sessions_since('1970-01-01T00:00:00')
+        check(sorted(p14['serial'] for p14 in payload14) == ['6899108', 'METER-A', 'METER-B'],
+              'the sync payload carries serial beside d',
+              str(sorted(p14.get('serial') for p14 in payload14)))
+        w2 = Side(os.path.join(tmp, 'wp8-peer.db'))
+        w2.db.import_sessions(payload14)
+        check(sorted(r['instrument_serial'] for r in
+                     w2.sql('SELECT instrument_serial FROM sessions WHERE date=?', SESSION_DATE))
+              == ['6899108', 'METER-A', 'METER-B'],
+              'the peer stores each session under the sender\'s serial')
+
+        # (e, first half) an assessment link and a generated report name the meter
+        aid14 = w.assess.create_assessment('WP8', standard='bs4142')
+        lid14 = w.assess.add_assessment_location(aid14, 'L')
+        w.assess.assign_runs(aid14, lid14, [(SESSION_DATE, 1, srcB, 'METER-B')])
+        det14 = w.assess.get_assessment_detail(aid14)
+        _linked = det14['locations'][0]['runs']
+        check(len(_linked) == 1 and abs(_linked[0]['avg_laeq'] - rrB['avg_laeq']) < 1e-6,
+              'the link resolves to METER-B\'s run, not METER-A\'s same-named one',
+              str([(_r['instrument_serial'], _r['avg_laeq']) for _r in _linked]))
+        pool14 = w.assess.get_all_runs_for_assessment(aid14)
+        marked = [(r14['instrument_serial'], r14['run_number'])
+                  for r14 in pool14 if r14['ar_id'] is not None]
+        check(marked == [('METER-B', 1)], 'the pool marks only METER-B run 1', str(marked))
+        rid14 = w.reports_db.save_generated_report(
+            SESSION_DATE, None, 't', 'claude-sonnet-5', 'none', '{}', 1, 1, 0.0,
+            run_number=1, source_file=srcB, instrument_serial='METER-B')
+        check(w.reports_db.get_generated_report(rid14)['instrument_serial'] == 'METER-B',
+              'a generated report records the instrument')
+
+        # (d) tombstones carry the serial; one without applies to the default
+        w.db.delete_session(SESSION_DATE, 'METER-A')
+        tombs14 = w.db.get_session_tombstones()
+        check([(t['date'], t['serial']) for t in tombs14] == [(SESSION_DATE, 'METER-A')],
+              'delete_session(date, serial) tombstones that meter only', str(tombs14))
+        check(len(w.sql('SELECT id FROM sessions WHERE date=?', SESSION_DATE)) == 2,
+              'the other two sessions on the date survive')
+
+        w2.exec("UPDATE sessions SET imported_at='2020-01-01 00:00:00'")
+        w2.sync.apply_full_sync(w.sync.get_full_sync_payload())
+        left14 = sorted(r['instrument_serial'] for r in
+                        w2.sql('SELECT instrument_serial FROM sessions WHERE date=?', SESSION_DATE))
+        check(left14 == ['6899108', 'METER-B'],
+              'the replicated tombstone deletes only METER-A on the peer', str(left14))
+        # an old peer's tombstone names no serial → the default serial only
+        w2.db.set_setting('instrument_serial', '6899108')
+        w2.sync.apply_full_sync({'deleted_sessions': [
+            {'date': SESSION_DATE, 'deleted_at': '2031-01-01 00:00:00'}]})
+        left14 = sorted(r['instrument_serial'] for r in
+                        w2.sql('SELECT instrument_serial FROM sessions WHERE date=?', SESSION_DATE))
+        check(left14 == ['METER-B'],
+              'a serial-less tombstone applies to the default serial only', str(left14))
+
+        # (e, second half) the link survived METER-A\'s deletion, on the right meter
+        det14 = w.assess.get_assessment_detail(aid14)
+        check(len(det14['locations'][0]['runs']) == 1,
+              'the assessment link survives the other meter\'s deletion')
+        audit14 = w.db.audit_assessment_run_keys()
+        check(not any(audit14.values()), 'and the key audit is clean', str(audit14))
+
+        # session delete event without serial → the receiver\'s default
+        w2.db.import_sessions([_payload_copy(serial='6899108')])
+        w2.sync.apply_sync_event('session', 'delete', {'date': SESSION_DATE})
+        left14 = sorted(r['instrument_serial'] for r in
+                        w2.sql('SELECT instrument_serial FROM sessions WHERE date=?', SESSION_DATE))
+        check(left14 == ['METER-B'],
+              "a delete event without serial deletes the receiver's default serial",
+              str(left14))
+
+        # run_tag events: applied by source_file within the named serial
+        w.sync.apply_sync_event('run_tag', 'upsert', {
+            'session_date': SESSION_DATE, 'serial': 'METER-B',
+            'run_number': 999, 'source_file': srcB, 'location_tag': 'Q'})
+        check(w.db.get_full_run_row(SESSION_DATE, 1, serial='METER-B')['location_tag'] == 'Q',
+              'a run_tag event lands by (serial, source_file), ignoring a stale number')
+
+        # ── 14b. migration of a pre-WP8 database ──────────────────────────────
+        print('\n14b. migration of a pre-WP8 database')
+        _p14 = os.path.join(tmp, 'prewp8.db')
+        _cx = _sq.connect(_p14)
+        _cx.executescript("""
+            CREATE TABLE sessions(id INTEGER PRIMARY KEY, date TEXT UNIQUE NOT NULL,
+              run_count INTEGER, avg_laeq REAL, max_laeq REAL, recorder_name TEXT,
+              location_label TEXT, postcode TEXT, lat REAL, lng REAL,
+              imported_at TEXT DEFAULT (datetime('now')), notes TEXT);
+            CREATE INDEX idx_sessions_date ON sessions(date);
+            CREATE TABLE runs(id INTEGER PRIMARY KEY,
+              session_id INTEGER REFERENCES sessions(id) ON DELETE CASCADE,
+              run_number INTEGER, start_time TEXT, n_samples INTEGER,
+              step INTEGER DEFAULT 1, avg_laeq REAL, min_laeq REAL, max_laeq REAL,
+              max_lcpeak REAL, laeq_json TEXT, lcpeak_json TEXT, source_file TEXT,
+              UNIQUE(session_id, run_number));
+            CREATE TABLE deleted_sessions(date TEXT PRIMARY KEY,
+              deleted_at TEXT DEFAULT (datetime('now')));
+            CREATE TABLE assessments(id INTEGER PRIMARY KEY, name TEXT);
+            CREATE TABLE assessment_locations(id INTEGER PRIMARY KEY, assessment_id INTEGER);
+            CREATE TABLE assessment_runs(id INTEGER PRIMARY KEY,
+              assessment_id INTEGER NOT NULL REFERENCES assessments(id) ON DELETE CASCADE,
+              location_id INTEGER, session_date TEXT NOT NULL, run_number INTEGER,
+              source_file TEXT, conditions TEXT, notes TEXT);
+            CREATE UNIQUE INDEX idx_assessment_runs_stable
+              ON assessment_runs(assessment_id, session_date, source_file)
+              WHERE source_file IS NOT NULL;
+            CREATE TABLE generated_reports(id INTEGER PRIMARY KEY, session_date TEXT NOT NULL,
+              run_number INTEGER, run_label TEXT, template_id INTEGER, template_name TEXT,
+              model TEXT NOT NULL, thinking_level TEXT NOT NULL DEFAULT 'none',
+              sections_json TEXT NOT NULL, input_tokens INTEGER, output_tokens INTEGER,
+              cost_usd REAL, created_at TEXT, source_file TEXT, input_snapshot_json TEXT);
+            CREATE TABLE app_settings(key TEXT PRIMARY KEY, value TEXT);
+            INSERT INTO app_settings VALUES('instrument_serial','6899108');
+            INSERT INTO sessions(id,date,run_count,avg_laeq,max_laeq,notes)
+              VALUES(7,'2026-08-12',2,55.5,71.0,'kept'),(9,'2026-08-13',1,50.0,60.0,NULL);
+            INSERT INTO runs(id,session_id,run_number,start_time,avg_laeq,source_file)
+              VALUES(1,7,1,'12:00:00',55.0,'PROJ0001'),(2,7,2,'13:00:00',56.0,'PROJ0002'),
+                    (3,9,1,'09:00:00',50.0,'PROJ0001');
+            INSERT INTO deleted_sessions VALUES('2026-07-01','2026-07-02 00:00:00');
+            INSERT INTO assessments VALUES(1,'A');
+            INSERT INTO assessment_runs(id,assessment_id,session_date,run_number,source_file)
+              VALUES(4,1,'2026-08-12',2,'PROJ0002');
+            INSERT INTO generated_reports(id,session_date,run_number,model,sections_json,source_file)
+              VALUES(2,'2026-08-12',1,'claude-sonnet-5','{}','PROJ0001');
+        """)
+        _cx.commit(); _cx.close()
+
+        _err = _migrate_only(_p14)
+        check(_err is None, 'a pre-WP8 database migrates', repr(_err))
+        _cx = _sq.connect(_p14); _cx.row_factory = _sq.Row
+        _sess = [dict(r) for r in _cx.execute(
+            'SELECT id, date, instrument_serial, run_count, avg_laeq, notes '
+            'FROM sessions ORDER BY id').fetchall()]
+        check([(r['id'], r['date'], r['instrument_serial']) for r in _sess]
+              == [(7, '2026-08-12', '6899108'), (9, '2026-08-13', '6899108')],
+              'session ids kept; every row backfilled with the default serial', str(_sess))
+        check(_sess[0]['run_count'] == 2 and _sess[0]['avg_laeq'] == 55.5
+              and _sess[0]['notes'] == 'kept',
+              'session values survive the table rebuild', str(_sess[0]))
+        _runs = _cx.execute(
+            'SELECT COUNT(*) FROM runs r JOIN sessions s ON s.id=r.session_id').fetchone()[0]
+        check(_runs == 3, 'every run still joins its session by id', str(_runs))
+        check('UNIQUE(date, instrument_serial)' in _cx.execute(
+            "SELECT sql FROM sqlite_master WHERE name='sessions'").fetchone()[0],
+              'UNIQUE(date) became UNIQUE(date, instrument_serial)')
+        _ds = [tuple(r) for r in _cx.execute(
+            'SELECT date, instrument_serial, deleted_at FROM deleted_sessions').fetchall()]
+        check(_ds == [('2026-07-01', '6899108', '2026-07-02 00:00:00')],
+              'tombstones re-keyed to (date, serial) with times preserved', str(_ds))
+        _ar = dict(_cx.execute('SELECT * FROM assessment_runs').fetchone())
+        check(_ar['id'] == 4 and _ar['instrument_serial'] == '6899108'
+              and _ar['source_file'] == 'PROJ0002',
+              'assessment link id kept and backfilled with the serial', str(_ar))
+        _gr = dict(_cx.execute('SELECT * FROM generated_reports WHERE id=2').fetchone())
+        check(_gr['instrument_serial'] == '6899108',
+              'generated report backfilled with the serial', str(_gr))
+        _idx = _cx.execute("SELECT sql FROM sqlite_master WHERE name='idx_assessment_runs_stable'"
+                           ).fetchone()[0]
+        check('instrument_serial' in _idx, 'the stable unique index includes the serial', _idx)
+        _before = {t: _cx.execute(f'SELECT COUNT(*) FROM {t}').fetchone()[0]
+                   for t in ('sessions', 'runs', 'assessment_runs',
+                             'generated_reports', 'deleted_sessions')}
+        _cx.close()
+        _err = _migrate_only(_p14)   # idempotency: a second migration is a no-op
+        check(_err is None, 'the migration is idempotent', repr(_err))
+        _cx = _sq.connect(_p14)
+        _after = {t: _cx.execute(f'SELECT COUNT(*) FROM {t}').fetchone()[0]
+                  for t in ('sessions', 'runs', 'assessment_runs',
+                            'generated_reports', 'deleted_sessions')}
+        check(_before == _after, 'and changes no row counts', f'{_before} vs {_after}')
+        check(_cx.execute('SELECT id FROM sessions ORDER BY id').fetchall() == [(7,), (9,)],
+              'and keeps the session ids a second time')
+        _cx.close()
+
+        # ── 14c. the routes: upload form serial, CSVs, deep-link statics ─────
+        print('\n14c. routes and templates carry the serial')
+        # The upload form field files the card under the named meter (route.db,
+        # via the 4d client — its existing runs sit under the '' serial, so the
+        # same start times under WP8-TEST must not be deduplicated away).
+        _zbuf = _io14.BytesIO()
+        with _zf14.ZipFile(_zbuf, 'w') as _z:
+            for _fn in ('GLOB0004.DAT', 'PROF0004.DAT'):
+                _fp = os.path.join(meas_root, DATE_FOLDER, 'PART0000', 'PROJ0004', _fn)
+                _z.write(_fp, f'{DATE_FOLDER}/PART0000/PROJ0004/{_fn}')
+        _resp = _client.post('/upload', headers=CSRF_HDR, data={
+            'serial': 'WP8-TEST',
+            'file': (_io14.BytesIO(_zbuf.getvalue()), 'card.zip'),
+        }, content_type='multipart/form-data')
+        check(_resp.status_code in (200, 302), 'upload with a serial field succeeds',
+              f'{_resp.status_code}: {_resp.get_data(as_text=True)[:150]}')
+        _n = rt.sql('SELECT COUNT(*) FROM sessions WHERE date=? AND instrument_serial=?',
+                    SESSION_DATE, 'WP8-TEST')[0][0]
+        check(_n == 1, 'the card landed under the form serial, beside the existing session')
+        check(rt.db.get_setting('last_upload_serial') == 'WP8-TEST',
+              'the serial is remembered as the next upload\'s default')
+        _r = _client.get('/api/existing-dates?serial=WP8-TEST')
+        check(SESSION_DATE in _r.get_json(), 'existing-dates?serial= sees that meter')
+        _r = _client.get('/api/existing-dates?serial=SOME-OTHER')
+        check(SESSION_DATE not in _r.get_json(), 'and not an unknown one')
+
+        # sessions CSV carries a serial column
+        _r = _client.get('/export/sessions.csv')
+        _hdr14 = _r.get_data(as_text=True).split('\r\n')[0].split(',')
+        check(_hdr14[:3] == ['date', 'serial', 'location'],
+              'sessions CSV has the serial column', str(_hdr14[:3]))
+        # assessment CSV too (header checked; 13g covered the values)
+        _aid14 = rt.assess.create_assessment('WP8 hdr', standard='bs4142')
+        _r = _client.get(f'/export/assessment/{_aid14}.csv')
+        _hdr14 = _r.get_data(as_text=True).split('\r\n')[0].split(',')
+        check('serial' in _hdr14, 'assessment CSV has a serial column', str(_hdr14))
+        rt.assess.delete_assessment(_aid14)
+
+        # import_sdcard: --serial flag exists and stamps the payload
+        import import_sdcard as _isd14
+        _sd14 = os.path.join(tmp, 'sd14', DATE_FOLDER, 'PART0000', 'PROJ0004')
+        os.makedirs(_sd14)
+        for _fn in ('GLOB0004.DAT', 'PROF0004.DAT'):
+            shutil.copy(os.path.join(meas_root, DATE_FOLDER, 'PART0000', 'PROJ0004', _fn), _sd14)
+        _sessions14 = _isd14.parse_all(sd_root=os.path.join(tmp, 'sd14'), serial='CLI-1')
+        check(len(_sessions14) == 1 and _sessions14[0]['serial'] == 'CLI-1',
+              'import_sdcard stamps the --serial into the payload',
+              str([(x['d'], x.get('serial')) for x in _sessions14]))
+        _isd_src = open(os.path.join(REPO, 'import_sdcard.py'), encoding='utf-8').read()
+        check("add_argument('--serial'" in _isd_src and 'INSTRUMENT_SERIAL' in _isd_src,
+              '--serial is a flag, defaulting from INSTRUMENT_SERIAL')
+
+        # UI statics: the deep link reads &serial=, manage writes it, the
+        # upload form names the field, and the report body sends it.
+        _ih = open(os.path.join(REPO, 'templates', 'index.html'), encoding='utf-8').read()
+        check("_urlParams.get('serial')" in _ih, 'index.html reads &serial= from the URL')
+        check('selectedSerial' in _ih and 'MULTI_SERIAL' in _ih,
+              'index.html tracks the selected serial and hides it while one meter exists')
+        check("serial:         _roptSerial || ''" in _ih,
+              'the report modal posts the serial')
+        _mh = open(os.path.join(REPO, 'templates', 'manage.html'), encoding='utf-8').read()
+        check('&serial={{ s.instrument_serial | urlencode }}' in _mh,
+              'manage.html writes &serial= into View deep links')
+        _uh = open(os.path.join(REPO, 'templates', 'upload.html'), encoding='utf-8').read()
+        check('name="serial"' in _uh and 'upload_serial' in _uh,
+              'upload.html has the serial field with the remembered default')
+        _rh = open(os.path.join(REPO, 'templates', 'reports.html'), encoding='utf-8').read()
+        check("serial: sess.serial || ''" in _rh,
+              'reports.html sends the serial with generate-report')
 
         print(f'\nAll {_checks} checks passed.')
     finally:

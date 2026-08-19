@@ -7,3 +7,6 @@ __pycache__/
 # locally for the test suite rather than committed.
 MEAS118/
 *.zip
+
+# symlink form too (a worktree symlink is not matched by MEAS118/)
+MEAS118
