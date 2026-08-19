@@ -1090,25 +1090,33 @@ function downloadCsv(filename, rows) {
 function exportSessionRuns(date) {
   const sess = DATA.sessions.find(s => s.d === date);
   if (!sess || !sess.projects || !sess.projects.length) return;
-  const rows = [['run', 'start_time', 'end_time', 'n_samples', 'step_s', 'laeq_avg_db', 'laeq_min_db', 'laeq_max_db', 'lcpeak_max_db', 'duration_s']];
+  // p.mn/p.mx are the GLOB LAFmin/LAFmax fallback-min/max, not LAeq min/max;
+  // p.duration_s is the meter-stored duration (blank when the meter didn't
+  // record one) — distinct from n_samples, the 1-second record count.
+  const rows = [['run', 'start_time', 'end_time', 'n_samples', 'step_s', 'laeq_avg_db', 'lafmin_db', 'lafmax_db', 'lcpeak_max_db', 'duration_s']];
   sess.projects.forEach((p, i) => {
-    rows.push([i + 1, p.start, p.end || '', p.n, p.step, p.avg.toFixed(2), p.mn, p.mx, p.pmx, p.n]);
+    rows.push([i + 1, p.start, p.end || '', p.n, p.step, p.avg.toFixed(2), p.mn, p.mx, p.pmx, p.duration_s]);
   });
   downloadCsv('noise-' + date + '-runs.csv', rows);
 }
 
 function exportRunCSV(proj, runIdx, date) {
   const hasFmax = proj.lafmax_profile && proj.lafmax_profile.length;
-  const hasImax = proj.laimax_profile && proj.laimax_profile.length;
+  // proj.laimax_profile is downsampled from the LAE channel, not LAImax —
+  // see noise_parser.py _parse_session_files ('laimax_profile' comment).
+  const hasLae = proj.laimax_profile && proj.laimax_profile.length;
   const hdrs = ['elapsed_s', 'laeq_db'];
   if (hasFmax) hdrs.push('lafmax_db');
-  if (hasImax) hdrs.push('laimax_db');
-  hdrs.push('lcpeak_db');
+  if (hasLae) hdrs.push('lae_db');
+  // proj.lcpeak_profile is the LApeak series (true GLOB LCpeak is a single
+  // scalar, not a per-second series) — see noise_parser.py comment on
+  // 'lcpeak_profile'.
+  hdrs.push('lapeak_db');
   const rows = [hdrs];
   proj.laeq_profile.forEach((v, i) => {
     const row = [i * proj.step, v];
     if (hasFmax) row.push(proj.lafmax_profile[i]);
-    if (hasImax) row.push(proj.laimax_profile[i]);
+    if (hasLae) row.push(proj.laimax_profile[i]);
     row.push(proj.lcpeak_profile[i]);
     rows.push(row);
   });

@@ -273,7 +273,10 @@ def _prepare_session_for_report(date, run_number=None):
         run_rows.append({'run': rn, 'start': proj['start'],
                          'end': proj.get('end'), **st})
         all_laeq.extend(_expand_run(proj))
-    total_s = sum(p.get('n', 0) for p in projects)
+    # Meter-stored duration where available (a run stopped mid-period can
+    # differ from its 1-second record count); falls back to n for runs
+    # imported before duration_s existed.
+    total_s = sum((p.get('duration_s') or p.get('n', 0)) for p in projects)
     return sess, run_rows, all_laeq, total_s
 
 
