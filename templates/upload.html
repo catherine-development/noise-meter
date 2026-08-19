@@ -87,6 +87,15 @@ h2{font-size:14px;font-weight:600;color:var(--text2);margin-bottom:14px}
   <div class="flash {{ cat }}">{{ msg }}</div>
   {% endfor %}
 
+  {% if last_push_error %}
+  <div class="flash error" id="pushError">
+    <strong>The last push to the other Pi failed</strong>
+    {% if last_push_error.at %}({{ last_push_error.at }}){% endif %}{% if last_push_error.dates %} for {{ last_push_error.dates }}{% endif %}:
+    {{ last_push_error.error }}.
+    The data is stored on this Pi; the peer picks it up on its next scheduled sync. This notice clears when a push succeeds.
+  </div>
+  {% endif %}
+
   <div id="inlineMsg" style="display:none" class="inline-msg"></div>
 
   <div class="card">
@@ -157,8 +166,8 @@ h2{font-size:14px;font-weight:600;color:var(--text2);margin-bottom:14px}
       <tr>
         <td>{{ row.date }}</td>
         <td>{{ row.run_count }}</td>
-        <td class="mf">{{ '%.1f'|format(row.avg_laeq) }} dB</td>
-        <td class="mf">{{ '%.1f'|format(row.max_laeq) }} dB</td>
+        <td class="mf">{% if row.avg_laeq is not none %}{{ '%.1f'|format(row.avg_laeq) }} dB{% else %}—{% endif %}</td>
+        <td class="mf">{% if row.max_laeq is not none %}{{ '%.1f'|format(row.max_laeq) }} dB{% else %}—{% endif %}</td>
         <td><span class="loc-chip">{{ row.location_label or '—' }}</span></td>
         <td class="mf">{{ row.imported_at[:10] }}</td>
       </tr>

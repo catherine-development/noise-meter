@@ -53,6 +53,43 @@ def update_last_sync_time(ts):
     conn.close()
 
 
+def get_sync_state(key, default=None):
+    conn = get_db()
+    row = conn.execute('SELECT value FROM sync_state WHERE key=?', (key,)).fetchone()
+    conn.close()
+    return row['value'] if row else default
+
+
+def set_sync_state(key, value):
+    """Upsert one sync_state row; value=None deletes it."""
+    conn = get_db()
+    if value is None:
+        conn.execute('DELETE FROM sync_state WHERE key=?', (key,))
+    else:
+        conn.execute(
+            'INSERT INTO sync_state (key, value) VALUES (?, ?) '
+            'ON CONFLICT(key) DO UPDATE SET value=excluded.value', (key, value))
+    conn.commit()
+    conn.close()
+
+
+def get_last_push_error():
+    """The most recent failed push_to_peer(), as {'at', 'error'}, or None.
+
+    Recorded by peer_client.push_to_peer() and cleared on the next success, so
+    the upload page can say that the last upload did not reach the peer — it
+    used to print() the failure to a log nobody reads.
+    """
+    import json
+    raw = get_sync_state('last_push_error')
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except ValueError:
+        return {'at': None, 'error': raw}
+
+
 def get_full_sync_payload():
     """Return all syncable state for peer replication."""
     conn = get_db()

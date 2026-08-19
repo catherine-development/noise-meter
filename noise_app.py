@@ -7,6 +7,7 @@ import csv
 import io
 import os
 import json
+import sqlite3
 import urllib.request
 import threading
 from datetime import timedelta
@@ -26,7 +27,7 @@ from noise_db import (init_db, import_sessions, get_all_sessions_json,
                       get_sessions_export_format,
                       get_setting, set_setting, get_full_run_row)
 from sync_db import (get_import_log, get_full_sync_payload,
-                     apply_full_sync, apply_sync_event)
+                     apply_full_sync, apply_sync_event, get_last_push_error)
 from noise_parser import parse_zip, parse_files
 from webauth import (AUTH_AVAILABLE, login_required, require_api_key,
                      login_or_api_key, check_upload_auth)
@@ -207,7 +208,8 @@ def upload_page():
     log = get_import_log()
     needs_password = bool(UPLOAD_PASS)
     return render_template('upload.html', pi_name=PI_NAME, log=log,
-                           needs_password=needs_password)
+                           needs_password=needs_password,
+                           last_push_error=get_last_push_error())
 
 
 @app.route('/upload', methods=['POST'])
@@ -256,8 +258,21 @@ def do_upload():
         flash(f'Could not read file: {e}', 'error')
         return redirect(url_for('upload_page'))
 
+    # Pairs the parser found but could not turn into a run. Reported rather than
+    # swallowed: "Added 1 session" with a PROJ folder silently missing is how a
+    # corrupt file goes unnoticed until someone counts runs against the card.
+    # (A .json upload is a plain list and has no report.)
+    skipped_files = list(getattr(parsed, 'skipped', ()) or ())
+    skip_note = ''
+    if skipped_files:
+        lines = [f"{s['path']}: {s['reason']}" for s in skipped_files[:8]]
+        if len(skipped_files) > 8:
+            lines.append(f'and {len(skipped_files) - 8} more')
+        skip_note = (f' {len(skipped_files)} file pair(s) could not be read and were '
+                     f'skipped: ' + '; '.join(lines))
+
     if not parsed:
-        msg = 'No valid measurement sessions found.'
+        msg = 'No valid measurement sessions found.' + skip_note
         if is_folder_upload:
             return _json_error(msg)
         flash(msg, 'error')
@@ -289,12 +304,14 @@ def do_upload():
 
     if not new_sessions:
         msg = f'All {len(skipped)} session(s) already in database: {", ".join(skipped)}.'
+        msg += skip_note
         if is_folder_upload:
             return _json_info(msg)
         flash(msg, 'info')
         return redirect(url_for('upload_page'))
 
-    # Import sessions — ON CONFLICT upserts handle existing runs safely
+    # Import sessions. Runs are keyed on their PROJ folder, so a partial upload
+    # refreshes or adds runs and never overwrites a different one.
     import_sessions(new_sessions, metadata=metadata)
 
     # Push to peer Pi and fetch weather in background
@@ -304,7 +321,15 @@ def do_upload():
     msg = f'Added {len(new_sessions)} new session(s)'
     if skipped:
         msg += f' ({len(skipped)} already existed: {", ".join(skipped)})'
-    msg += '.'
+    msg += '.' + skip_note
+    if skipped_files:
+        # Stay on the upload page so the skip note is actually read: the
+        # success path redirects to the index, which shows no flashes, and the
+        # folder path's 'ok' status navigates away after a second.
+        if is_folder_upload:
+            return _json_info(msg)
+        flash(msg, 'info')
+        return redirect(url_for('upload_page'))
     if is_folder_upload:
         return _json_ok(msg)
     flash(msg, 'success')
@@ -477,10 +502,12 @@ def import_redirect():
 @app.route('/import', methods=['POST'])
 @require_api_key
 def do_import():
+    skipped = []
     if request.files.get('file'):
         raw = request.files['file'].read()
         if raw[:2] == b'PK':  # ZIP magic bytes
             sessions = parse_zip(raw)
+            skipped = list(sessions.skipped)
         else:
             data = json.loads(raw)
             sessions = data.get('sessions', [data] if 'd' in data else [])
@@ -489,10 +516,18 @@ def do_import():
         sessions = data.get('sessions', [data] if 'd' in data else [])
 
     if not sessions:
-        return jsonify({'error': 'no sessions found in payload'}), 400
+        return jsonify({'error': 'no sessions found in payload',
+                        'skipped': skipped}), 400
 
-    n = import_sessions(sessions)
-    return jsonify({'imported': n, 'status': 'ok'})
+    try:
+        n = import_sessions(sessions)
+    except sqlite3.IntegrityError as e:
+        # Nothing was written (import_sessions commits once, at the end), but
+        # say what the database refused rather than 500 with a bare traceback —
+        # the peer's push_to_peer() records this text as last_push_error.
+        app.logger.warning('import rejected: %s', e)
+        return jsonify({'error': f'import rejected: {e}', 'status': 'error'}), 409
+    return jsonify({'imported': n, 'status': 'ok', 'skipped': skipped})
 
 
 @app.route('/api/peer-sync', methods=['POST'])
