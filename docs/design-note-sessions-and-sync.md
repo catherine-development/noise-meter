@@ -200,6 +200,18 @@ collapses into (b).
 
 ## 3. Replicated ids — options
 
+> **Implemented (WP10, 2026-08-20):** option 2 (UUID sync key, local ints
+> kept) plus §3.4's timestamps, stale-write rejection with a conflict list
+> (`sync_conflicts`, `GET /api/sync-conflicts`) and delete tombstones
+> (`deleted_uids`) — extended beyond this note to `report_templates`, which
+> now replicate, and to generated-report delete tombstones. One deviation
+> from the sketch below: existing rows get `uuid5(namespace, content-seed)`
+> (created_at|name etc.) rather than `'legacy-' || id`, so the backfill is
+> correct even if the ids had drifted, at the cost of twinning any row whose
+> seed fields held unsynced divergent edits at migration time. Details and
+> deploy steps: `docs/fix-plan-2026-08-19.md`, WP10.
+
+
 The tables in question: `assessments`, `assessment_locations`, `assessment_runs`
 (replicated by `id`), and `report_templates`/`generated_reports` (not
 replicated; each Pi's ids are private, so no hazard *yet* — but the moment
@@ -270,7 +282,7 @@ deleted_at)`), replayed in `apply_full_sync` before the upserts, mirroring
 
 ### Verdict on ids
 
-Option 2 (UUID) plus §3.4 timestamps and delete tombstones. Option 1 is
+**Done — WP10 implemented exactly this.** Option 2 (UUID) plus §3.4 timestamps and delete tombstones. Option 1 is
 smaller but leaves the edit-conflict and restore hazards; option 0 costs
 nothing and should be adopted as policy *today* regardless, until 2 lands.
 
