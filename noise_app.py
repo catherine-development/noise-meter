@@ -478,7 +478,10 @@ def do_upload():
                         f'assignment(s) pointing at them were removed.')
         else:
             msg += ' No stored runs needed removing.'
-    if skipped_files or (prune and imported.deleted_runs):
+    if skipped_files or prune:
+        # A prune outcome — deletions, or the explicit "nothing needed
+        # removing" — must be read, so stay on the upload page like the
+        # skip-note path does (the index shows no flashes).
         # Stay on the upload page so the skip note is actually read: the
         # success path redirects to the index, which shows no flashes, and the
         # folder path's 'ok' status navigates away after a second.

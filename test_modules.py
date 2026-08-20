@@ -3455,6 +3455,247 @@ def main(meas_root):
             else:
                 os.environ['FLIGHTS_DB_PATH'] = _saved_fdb
 
+        # ── 17. WP11: import safety — explicit prune, link hygiene, ZIP limits ─
+        print('\n17. WP11: explicit prune (F1), link hygiene (F5), ZIP limits (F8a)')
+        import struct as _st17
+
+        s17 = Side(os.path.join(tmp, 'wp11.db'))
+        for _m in ('noise_app', 'peer_client'):
+            sys.modules.pop(_m, None)
+        _app17 = importlib.import_module('noise_app')
+        _app17._auto_fetch_weather = lambda *_a, **_k: None
+        _app17.app.config['TESTING'] = True
+        _c17 = _app17.app.test_client()
+        import webauth as _wa17
+        _saved_key17 = _wa17.IMPORT_KEY
+        _wa17.IMPORT_KEY = 'wp11-key'
+        _KEY17 = {'X-Import-Key': 'wp11-key'}
+
+        def _files17(side):
+            return [r['source_file'] for r in side.sql(
+                'SELECT r.source_file FROM runs r JOIN sessions s ON s.id=r.session_id '
+                'WHERE s.date=? ORDER BY r.run_number', SESSION_DATE)]
+
+        def _zip17(entries):
+            buf = _io.BytesIO()
+            with _zf.ZipFile(buf, 'w') as z:
+                for name, data in entries:
+                    z.writestr(name, data)
+            return buf.getvalue()
+
+        # A 3-run session, seeded from the real card files with their full
+        # date-folder paths — the exact shape of the verified F1 repro.
+        three_pairs = [(p, d) for p, d in pairs
+                       if any(f'/PROJ000{i}/' in p for i in (1, 2, 3))]
+        check(len(three_pairs) == 6, 'seed data: three GLOB/PROF pairs',
+              str([p for p, _ in three_pairs]))
+        seed = _copy.deepcopy(list(parse_files(three_pairs)))
+        for _s in seed:
+            _s['projects'] = [p for p in _s['projects']
+                              if p['source_file'] in ('PROJ0001', 'PROJ0002', 'PROJ0003')]
+        s17.db.import_sessions(seed, metadata=META)
+        check(_files17(s17) == ['PROJ0001', 'PROJ0002', 'PROJ0003'],
+              'baseline: 3 runs stored', str(_files17(s17)))
+
+        # (a) The F1 repro. One PROJ folder zipped from the parent, so every
+        # path carries the YYMMDD folder — the shape that used to be inferred
+        # as a complete date and deleted the other two runs (3 became 1).
+        f1_zip = _zip17([(p, d) for p, d in three_pairs if '/PROJ0001/' in p])
+        f1 = _parse_zip(f1_zip)
+        check(len(f1) == 1 and f1[0]['complete_date'] is False,
+              'a one-PROJ ZIP with date-folder paths claims no completeness',
+              str(f1[0]['complete_date']))
+        s17.db.import_sessions(f1, metadata=META)
+        check(_files17(s17) == ['PROJ0001', 'PROJ0002', 'PROJ0003'],
+              'F1 repro: importing it leaves all 3 stored runs', str(_files17(s17)))
+
+        # (b) /import: a payload that says complete_date for itself — an old
+        # exporter or peer, or a replayed pre-WP11 JSON file — never deletes
+        # without the top-level prune authorisation.
+        old_payload = _copy.deepcopy(seed)
+        old_payload[0]['complete_date'] = True
+        old_payload[0]['skipped_files'] = []
+        old_payload[0]['projects'] = old_payload[0]['projects'][:1]
+        r = _c17.post('/import', json={'sessions': old_payload}, headers=_KEY17)
+        js = r.get_json()
+        check(r.status_code == 200 and js['deleted_runs'] == 0,
+              '/import without top-level prune ignores per-session complete_date',
+              str(js)[:150])
+        check(_files17(s17) == ['PROJ0001', 'PROJ0002', 'PROJ0003'],
+              'and deletes nothing', str(_files17(s17)))
+
+        # Peer/export payloads still cannot even express a prune.
+        _since17 = s17.db.get_sessions_since('1970-01-01T00:00:00')
+        _exp17 = s17.db.get_sessions_export_format()
+        check(all('complete_date' not in s and 'prune' not in s
+                  for s in list(_since17) + list(_exp17)),
+              'sync and export payloads carry no complete_date/prune keys')
+
+        # (c) F5 setup: an assessment link on PROJ0003, about to be pruned.
+        aid17 = s17.assess.create_assessment('WP11 links')
+        lid17 = s17.assess.add_assessment_location(aid17, 'L')
+        s17.assess.assign_runs(aid17, lid17, [(SESSION_DATE, 3, 'PROJ0003')])
+        link_uid = s17.sql('SELECT uid FROM assessment_runs')[0]['uid']
+        check(bool(link_uid), 'the link has a uid to tombstone')
+
+        # (d) The prune checkbox: an upload of PROJ0001+PROJ0002 with prune=1
+        # deletes PROJ0003, says so, and says the assignment went with it.
+        with _c17.session_transaction() as _s17s:
+            _s17s['user'] = 'test'
+            _s17s['logged_in'] = True
+            _s17s['_csrf_token'] = SUITE_CSRF
+        prune_zip = _zip17([(p, d) for p, d in three_pairs if '/PROJ0003/' not in p])
+        r = _c17.post('/upload', data={'file': (_io.BytesIO(prune_zip), 'card.zip'),
+                                       'prune': '1', 'csrf_token': SUITE_CSRF},
+                      content_type='multipart/form-data', follow_redirects=True)
+        page17 = r.get_data(as_text=True)
+        check(_files17(s17) == ['PROJ0001', 'PROJ0002'],
+              'prune-checkbox upload deletes the run missing from it',
+              str(_files17(s17)))
+        check('Removed 1 stored run(s) not in this upload' in page17
+              and 'PROJ0003' in page17,
+              'and the page says which run was removed',
+              page17[page17.find('Removed'):page17.find('Removed') + 120]
+              if 'Removed' in page17 else f'status {r.status_code}')
+        check('1 assessment run assignment(s)' in page17,
+              'and that an assessment assignment was removed with it')
+        # F5: link gone, tombstoned, and the key audit is clean.
+        check(s17.sql('SELECT COUNT(*) AS n FROM assessment_runs')[0]['n'] == 0,
+              'the dangling link was deleted in the same transaction')
+        check([r['uid'] for r in s17.sql(
+                  "SELECT uid FROM deleted_uids WHERE table_name='assessment_runs'")]
+              == [link_uid],
+              'and uid-tombstoned so the removal replicates')
+        _audit17 = s17.db.audit_assessment_run_keys()
+        check(all(not v for v in _audit17.values()),
+              'audit_assessment_run_keys() is clean after the prune',
+              str({k: len(v) for k, v in _audit17.items()}))
+        # A prune with nothing to remove is also reported, not silent.
+        r = _c17.post('/upload', data={'file': (_io.BytesIO(prune_zip), 'card.zip'),
+                                       'prune': '1', 'csrf_token': SUITE_CSRF},
+                      content_type='multipart/form-data', follow_redirects=True)
+        check('No stored runs needed removing' in r.get_data(as_text=True),
+              'a no-op prune says so instead of staying quiet')
+
+        # (e) import_sdcard's own payloads still prune: it walks the real card
+        # root, so it is the one caller allowed to claim completeness.
+        import import_sdcard as _sd17
+        card_root = os.path.join(tmp, 'card17')
+        for p, d in three_pairs:
+            if '/PROJ0002/' in p or '/PROJ0003/' in p:
+                continue                       # the card now holds PROJ0001 only
+            dest = os.path.join(card_root, p)
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            with open(dest, 'wb') as fh:
+                fh.write(d)
+        s17.db.import_sessions(seed, metadata=META)   # restore PROJ0003 first
+        check(_files17(s17) == ['PROJ0001', 'PROJ0002', 'PROJ0003'],
+              'all three runs restored before the card import')
+        sd_sessions = _sd17.parse_all(sd_root=card_root)
+        check(len(sd_sessions) == 1 and sd_sessions[0]['complete_date'] is False,
+              'parse_all inherits the parser: no inferred completeness')
+        _sd17.mark_complete_dates(sd_sessions)
+        check(sd_sessions[0]['complete_date'] is True,
+              'mark_complete_dates stamps the enumerated dates')
+        # The exact body push_to_pi() sends (its prune=True branch).
+        r = _c17.post('/import', json={'sessions': list(sd_sessions), 'prune': True},
+                      headers=_KEY17)
+        js = r.get_json()
+        check(js['deleted_runs'] == 2 and 'pruned 2 stored run(s)' in js['message'],
+              'an import_sdcard-shaped payload prunes and reports it', str(js)[:200])
+        check(_files17(s17) == ['PROJ0001'],
+              'the two runs gone from the card are gone from the DB',
+              str(_files17(s17)))
+
+        # (f) F8a: decompression limits, checked before anything is extracted.
+        from noise_parser import (ZIP_MAX_MEMBERS, ZIP_MAX_MEMBER_BYTES,
+                                  ZIP_MAX_TOTAL_BYTES)
+
+        def _refused17(zip_bytes, needle, label):
+            try:
+                _parse_zip(zip_bytes)
+                check(False, label, 'parse_zip accepted it')
+            except ValueError as e:
+                check(needle in str(e), label, str(e))
+
+        def _patch_sizes17(zip_bytes, new_size, local_too=False):
+            """Forge the declared uncompressed size of every member."""
+            raw = bytearray(zip_bytes)
+            at = 0
+            while True:
+                at = raw.find(b'PK\x01\x02', at)
+                if at < 0:
+                    break
+                _st17.pack_into('<I', raw, at + 24, new_size)
+                at += 4
+            if local_too:
+                at = 0
+                while True:
+                    at = raw.find(b'PK\x03\x04', at)
+                    if at < 0:
+                        break
+                    _st17.pack_into('<I', raw, at + 22, new_size)
+                    at += 4
+            return bytes(raw)
+
+        many = _zip17([(f'260812/PART0000/PROJ{i:04d}/x', b'')
+                       for i in range(ZIP_MAX_MEMBERS + 1)])
+        _refused17(many, f'more than the {ZIP_MAX_MEMBERS}',
+                   'a ZIP with too many members is refused')
+
+        one = _zip17([('260812/PART0000/PROJ0001/GLOB0001.DAT', b'x' * 64)])
+        _refused17(_patch_sizes17(one, ZIP_MAX_MEMBER_BYTES + 1),
+                   'per-file limit',
+                   'a member declaring over the per-file limit is refused')
+
+        twenty = _zip17([(f'd/f{i}', b'x' * 64) for i in range(20)])
+        _refused17(_patch_sizes17(twenty, 30 * 1024 * 1024),
+                   f'{ZIP_MAX_TOTAL_BYTES // (1024 * 1024)} MB limit',
+                   'members whose declared sizes total over the limit are refused')
+
+        # A member whose stream runs past what it declares (the classic bomb
+        # shape): read through a capped stream and refused, never expanded.
+        _lying_buf = _io.BytesIO()
+        with _zf.ZipFile(_lying_buf, 'w', _zf.ZIP_DEFLATED) as z:
+            z.writestr('260812/PART0000/PROJ0001/GLOB0001.DAT', b'A' * 100000)
+        _refused17(_patch_sizes17(_lying_buf.getvalue(), 10, local_too=True),
+                   'declared size',
+                   'a member that expands past its declared size is refused')
+
+        # Duplicate member names: first copy kept, the rest reported.
+        _g1 = next(d for p, d in three_pairs if 'PROJ0001/GLOB' in p.upper())
+        _p1 = next(d for p, d in three_pairs if 'PROJ0001/PROF' in p.upper())
+        dup = _zip17([('260812/PART0000/PROJ0001/GLOB0001.DAT', _g1),
+                      ('260812/PART0000/PROJ0001/PROF0001.DAT', _p1),
+                      ('260812/PART0000/PROJ0001/GLOB0001.DAT', b'garbage')])
+        dup_res = _parse_zip(dup)
+        check(len(dup_res) == 1 and len(dup_res[0]['projects']) == 1
+              and dup_res[0]['projects'][0]['source_file'] == 'PROJ0001',
+              'with a duplicated member name the first copy is parsed')
+        check(len(dup_res.skipped) == 1
+              and 'duplicate name' in dup_res.skipped[0]['reason'],
+              'and the duplicate is reported as skipped, not silently resolved',
+              str(dup_res.skipped))
+
+        # The routes turn a refusal into their readable error paths, writing
+        # nothing to the database.
+        _before17 = _files17(s17)
+        r = _c17.post('/import', data={'file': (_io.BytesIO(many), 'bomb.zip')},
+                      headers=_KEY17, content_type='multipart/form-data')
+        check(r.status_code == 400
+              and 'more than the' in r.get_json().get('error', ''),
+              '/import refuses a bomb with a readable 400', str(r.get_json())[:150])
+        r = _c17.post('/upload', data={'file': (_io.BytesIO(many), 'bomb.zip'),
+                                       'csrf_token': SUITE_CSRF},
+                      content_type='multipart/form-data', follow_redirects=True)
+        check(r.status_code == 200
+              and 'Could not read file' in r.get_data(as_text=True),
+              'the upload page shows the refusal as a readable error')
+        check(_files17(s17) == _before17, 'and the database is untouched by either',
+              str(_files17(s17)))
+
+        _wa17.IMPORT_KEY = _saved_key17
+
         print(f'\nAll {_checks} checks passed.')
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
