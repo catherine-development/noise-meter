@@ -118,10 +118,18 @@ def get_full_sync_payload():
     ).fetchall()]
     deleted_sess = [dict(r) for r in conn.execute(
         'SELECT date, instrument_serial AS serial, deleted_at FROM deleted_sessions').fetchall()]
+    # Weather is session-keyed reference data and replicates in full (WP9), so
+    # a Pi that was offline when the other side fetched — or received — a row
+    # catches up here. hourly_json rides along: ~24 rows × 4 series per date,
+    # small beside the runs' own spectral payloads.
+    weather = [dict(r) for r in conn.execute(
+        'SELECT date, instrument_serial AS serial, wind_speed, wind_dir, '
+        'temp_min, temp_max, precip, hourly_json FROM weather').fetchall()]
     conn.close()
     return {'assessments': assessments, 'assessment_locations': locations,
             'assessment_runs': assess_runs, 'sessions_meta': sess_meta,
-            'run_tags': run_tags, 'deleted_sessions': deleted_sess}
+            'run_tags': run_tags, 'deleted_sessions': deleted_sess,
+            'weather': weather}
 
 
 def apply_full_sync(payload):
@@ -183,36 +191,34 @@ def apply_full_sync(payload):
         ''', sm)
     for rt in payload.get('run_tags', []):
         _apply_run_tag(conn, rt, coalesce=True)
+    for wx in payload.get('weather', []):
+        _apply_weather(conn, wx)
     conn.commit()
     conn.close()
 
 
-def _with_serial(conn, row, key='instrument_serial'):
-    """Copy of a peer row with its serial normalised: missing or blank (an
-    older peer) becomes this Pi's default. Also defaults source_file, which
-    a peer on the older schema does not send."""
-    row = dict(row)
-    row[key] = resolve_serial(row.get(key), conn)
-    row.setdefault('source_file', None)
-    return row
+_WEATHER_VALUE_COLS = ('wind_speed', 'wind_dir', 'temp_min', 'temp_max',
+                       'precip', 'hourly_json')
 
 
-def _apply_run_tag(conn, rt, coalesce=False):
-    """Apply one run_tag row: session by (session_date, serial), run by
-    source_file when the row carries one (the stable identity), else by
-    run_number (older peer)."""
-    rt = _with_serial(conn, rt, key='serial')
-    rt.setdefault('source_file', None)
-    set_sql = ('location_tag=COALESCE(:location_tag, location_tag)' if coalesce
-               else 'location_tag=:location_tag')
-    run_match = ('source_file=:source_file' if rt['source_file']
-                 else 'run_number=:run_number')
+def _apply_weather(conn, wx):
+    """Upsert one peer weather row, keyed (date, serial). Caller commits.
+
+    COALESCE per column: full-sync is a catch-up, not an authority, so a
+    NULL from the peer (it never fetched, or an old-format sender without
+    hourly_json) must not erase a value already held here."""
+    if not wx.get('date'):
+        return
+    wx = _with_serial(conn, wx, key='serial')
+    for c in _WEATHER_VALUE_COLS:
+        wx.setdefault(c, None)
+    sets = ', '.join(f'{c}=COALESCE(excluded.{c}, weather.{c})'
+                     for c in _WEATHER_VALUE_COLS)
     conn.execute(f'''
-        UPDATE runs SET {set_sql}
-        WHERE session_id=(SELECT id FROM sessions
-                          WHERE date=:session_date AND instrument_serial=:serial)
-          AND {run_match}
-    ''', rt)
+        INSERT INTO weather (date, instrument_serial, {", ".join(_WEATHER_VALUE_COLS)})
+        VALUES (:date, :serial, {", ".join(":" + c for c in _WEATHER_VALUE_COLS)})
+        ON CONFLICT(date, instrument_serial) DO UPDATE SET {sets}
+    ''', wx)
 
 
 def apply_sync_event(entity, action, data):

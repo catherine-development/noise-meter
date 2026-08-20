@@ -28,6 +28,7 @@ if _env_file.exists():
 
 from noise_db import init_db, import_sessions
 from sync_db import get_last_sync_time, update_last_sync_time
+from weather import fill_weather_gaps
 
 PEER_URL  = os.environ.get('PEER_URL', '')
 PI_NAME   = os.environ.get('PI_NAME', 'Pi')
@@ -62,6 +63,18 @@ try:
     if sessions:
         n = import_sessions(sessions)
         log.info('Imported %d session(s)', n)
+        # Weather gap-fill (WP9): a session can arrive without a weather row —
+        # the sender had no coordinates yet, or its own fetch had not run.
+        # Fill the gap from here with our own fetch (same archive API, same
+        # coordinates; the upsert makes a double fetch harmless). Best-effort:
+        # weather must never fail the sync run that already imported the data.
+        try:
+            filled = fill_weather_gaps(sessions)
+            if filled:
+                log.info('Weather gap-fill: fetched %d row(s): %s',
+                         len(filled), filled)
+        except Exception as e:
+            log.warning('Weather gap-fill failed: %s', e)
     else:
         log.info('Nothing new')
 
