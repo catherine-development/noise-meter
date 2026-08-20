@@ -1478,8 +1478,10 @@ def main(meas_root):
         finally:
             _lg.getLogger('noise.webauth').removeHandler(_cap)
         check(_wa.UPLOAD_PASS == '', 'no upload password is set in this environment')
-        check(any(r.levelno == _lg.WARNING and 'UPLOAD_PASSWORD' in r.getMessage()
-                  for r in _seen), 'an empty UPLOAD_PASSWORD is warned about at startup')
+        # INFO, not WARNING: relying on the flight-data login alone is the
+        # chosen configuration (2026-08-20), so the log line is informational.
+        check(any(r.levelno == _lg.INFO and 'UPLOAD_PASSWORD' in r.getMessage()
+                  for r in _seen), 'an empty UPLOAD_PASSWORD is noted at INFO at startup')
         check(any(r.levelno == _lg.ERROR for r in _seen),
               'and running unauthenticated is logged at ERROR')
 

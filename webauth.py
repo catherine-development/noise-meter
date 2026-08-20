@@ -68,8 +68,10 @@ def check_startup_security():
         log.error('Starting with authentication DISABLED (ALLOW_UNAUTHENTICATED=1). '
                   'Every page and API on this instance is public.')
     if not UPLOAD_PASS:
-        log.warning('UPLOAD_PASSWORD is empty — the upload form accepts any '
-                    'password. Set it in .env to gate uploads.')
+        # Deliberate configuration (Catherine, 2026-08-20): uploads are gated by
+        # the flight-data login system alone. UPLOAD_PASSWORD remains available
+        # as an optional second gate for anyone who wants it.
+        log.info('UPLOAD_PASSWORD not set — uploads are gated by login only.')
 
 
 # ── API key ───────────────────────────────────────────────────────────────────
