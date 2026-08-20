@@ -9,7 +9,6 @@ import logging
 import os
 import json
 import sqlite3
-import urllib.request
 import threading
 from datetime import timedelta
 
@@ -30,7 +29,7 @@ from flask import (Flask, render_template, request, jsonify, redirect,
 from noise_db import (init_db, import_sessions, get_all_sessions_json,
                       get_sessions_since, get_existing_dates, get_existing_run_starts,
                       get_all_sessions_list, update_session_metadata, delete_session,
-                      save_weather, get_weather,
+                      save_weather,
                       update_run_location_tag, purge_sessions_before,
                       get_sessions_export_format, get_run_prof_by_source,
                       get_setting, set_setting, get_full_run_row,
@@ -42,6 +41,7 @@ from webauth import (AUTH_AVAILABLE, login_required, require_api_key,
                      login_or_api_key, check_upload_auth,
                      check_startup_security, csrf_protect, csrf_token)
 from peer_client import push_to_peer, sync_event_to_peer, startup_sync_from_peer
+from weather import fetch_weather_summary, fill_weather_gaps
 import reports
 import assessments
 import helpdocs
@@ -162,61 +162,11 @@ app.register_blueprint(assessments.bp)
 app.register_blueprint(helpdocs.bp)
 
 
-def _fetch_weather_for_session(date, lat, lng):
-    """Call Open-Meteo archive API and return summary dict. Raises on failure."""
-    import math
-    import urllib.parse
-    params = urllib.parse.urlencode({
-        'latitude': lat, 'longitude': lng,
-        'start_date': date, 'end_date': date,
-        'hourly': 'temperature_2m,precipitation,wind_speed_10m,wind_direction_10m',
-        'wind_speed_unit': 'mph',
-        'timezone': 'Europe/London',
-    })
-    url = f'https://archive-api.open-meteo.com/v1/archive?{params}'
-    req = urllib.request.Request(url, headers={'User-Agent': 'NOR140-noise-meter/1.0'})
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        data = json.loads(resp.read())
-    h = data.get('hourly', {})
-    temps  = [v for v in h.get('temperature_2m', [])       if v is not None]
-    winds  = [v for v in h.get('wind_speed_10m', [])       if v is not None]
-    dirs   = [v for v in h.get('wind_direction_10m', [])   if v is not None]
-    precip = [v for v in h.get('precipitation', [])        if v is not None]
-    # Circular mean for wind direction
-    wd = None
-    if dirs:
-        s = sum(math.sin(math.radians(d)) for d in dirs)
-        c = sum(math.cos(math.radians(d)) for d in dirs)
-        wd = round((math.degrees(math.atan2(s, c)) + 360) % 360, 1)
-    return {
-        'wind_speed': round(sum(winds) / len(winds), 1) if winds else None,
-        'wind_dir':   wd,
-        'temp_min':   round(min(temps), 1) if temps else None,
-        'temp_max':   round(max(temps), 1) if temps else None,
-        'precip':     round(sum(precip), 1) if precip else None,
-        'hourly_json': json.dumps(h),
-    }
-
-
-def _auto_fetch_weather(sessions):
-    """Background thread: fetch weather for any new sessions that have coordinates.
-    Weather stays keyed by date (reference data); the coordinates come from
-    the (date, serial) session that was just imported."""
-    all_data = get_all_sessions_json()['sessions']
-    sess_map = {(s['d'], s.get('serial', '')): s for s in all_data}
-    for sess in sessions:
-        date = sess['d']
-        s = sess_map.get((date, resolve_serial(sess.get('serial'))), sess)
-        if s.get('lat') is None or s.get('lng') is None:
-            continue
-        if get_weather(date):
-            continue  # already have it
-        try:
-            w = _fetch_weather_for_session(date, s['lat'], s['lng'])
-            save_weather(date, w)
-            log.info('Weather fetched for %s', date)
-        except Exception as e:
-            log.warning('Weather fetch failed for %s: %s', date, e)
+# The Open-Meteo fetch and the gap-fill live in weather.py (WP9): weather is
+# keyed per session, (date, instrument_serial), and sync_peer.py runs the same
+# gap-fill after each 15-minute pull, so it must be importable without this
+# whole app module. _auto_fetch_weather is the upload path's thread target.
+_auto_fetch_weather = fill_weather_gaps
 
 
 # ── Auth routes ───────────────────────────────────────────────────────────────
@@ -772,14 +722,17 @@ def admin_push_to_peer():
 @app.route('/session/<date>/fetch-weather', methods=['POST'])
 @login_required
 def fetch_weather_route(date):
+    # Per session: the (date, serial) session's own coordinates, stored under
+    # the same (date, serial) key. The weather row replicates to the peer
+    # inside the session sync payload.
     serial = _req_serial()
     all_data = get_all_sessions_json()['sessions']
     sess = next((s for s in all_data if s['d'] == date and s.get('serial') == serial), None)
     if not sess or sess.get('lat') is None or sess.get('lng') is None:
         return jsonify({'status': 'error', 'message': 'No GPS coordinates for this session — add them via Edit metadata first.'})
     try:
-        w = _fetch_weather_for_session(date, sess['lat'], sess['lng'])
-        save_weather(date, w)
+        w = fetch_weather_summary(date, sess['lat'], sess['lng'])
+        save_weather(date, w, serial)
         return jsonify({'status': 'ok', 'wx': {
             'ws': w['wind_speed'], 'wd': w['wind_dir'],
             'tn': w['temp_min'],   'tx': w['temp_max'], 'pr': w['precip'],

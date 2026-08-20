@@ -118,10 +118,24 @@ def get_full_sync_payload():
     ).fetchall()]
     deleted_sess = [dict(r) for r in conn.execute(
         'SELECT date, instrument_serial AS serial, deleted_at FROM deleted_sessions').fetchall()]
+    # Weather is session-keyed reference data and replicates in full (WP9), so
+    # a Pi that was offline when the other side fetched — or received — a row
+    # catches up here. hourly_json rides along: ~24 rows × 4 series per date,
+    # small beside the runs' own spectral payloads.
+    weather = [dict(r) for r in conn.execute(
+        'SELECT date, instrument_serial AS serial, wind_speed, wind_dir, '
+        'temp_min, temp_max, precip, hourly_json FROM weather').fetchall()]
+    # Generated reports replicate too — they are append-only evidence, keyed
+    # across the pair by uid, never by the local integer id. Report
+    # *templates* deliberately do not: they are mutable per-Pi state and need
+    # the F6 conflict machinery before they can replicate safely.
+    reports = [dict(r) for r in conn.execute(
+        'SELECT * FROM generated_reports WHERE uid IS NOT NULL').fetchall()]
     conn.close()
     return {'assessments': assessments, 'assessment_locations': locations,
             'assessment_runs': assess_runs, 'sessions_meta': sess_meta,
-            'run_tags': run_tags, 'deleted_sessions': deleted_sess}
+            'run_tags': run_tags, 'deleted_sessions': deleted_sess,
+            'weather': weather, 'generated_reports': reports}
 
 
 def apply_full_sync(payload):
@@ -183,8 +197,66 @@ def apply_full_sync(payload):
         ''', sm)
     for rt in payload.get('run_tags', []):
         _apply_run_tag(conn, rt, coalesce=True)
+    for wx in payload.get('weather', []):
+        _apply_weather(conn, wx)
+    for gr in payload.get('generated_reports', []):
+        _apply_generated_report(conn, gr)
     conn.commit()
     conn.close()
+
+
+_WEATHER_VALUE_COLS = ('wind_speed', 'wind_dir', 'temp_min', 'temp_max',
+                       'precip', 'hourly_json')
+
+
+def _apply_weather(conn, wx):
+    """Upsert one peer weather row, keyed (date, serial). Caller commits.
+
+    COALESCE per column: full-sync is a catch-up, not an authority, so a
+    NULL from the peer (it never fetched, or an old-format sender without
+    hourly_json) must not erase a value already held here."""
+    if not wx.get('date'):
+        return
+    wx = _with_serial(conn, wx, key='serial')
+    for c in _WEATHER_VALUE_COLS:
+        wx.setdefault(c, None)
+    sets = ', '.join(f'{c}=COALESCE(excluded.{c}, weather.{c})'
+                     for c in _WEATHER_VALUE_COLS)
+    conn.execute(f'''
+        INSERT INTO weather (date, instrument_serial, {", ".join(_WEATHER_VALUE_COLS)})
+        VALUES (:date, :serial, {", ".join(":" + c for c in _WEATHER_VALUE_COLS)})
+        ON CONFLICT(date, instrument_serial) DO UPDATE SET {sets}
+    ''', wx)
+
+
+# Every generated_reports column except the local integer id, which never
+# crosses the wire: each Pi numbers its own rows, and the uid is the identity
+# the pair agrees on.
+_REPORT_COLS = ('uid', 'session_date', 'instrument_serial', 'run_number',
+                'run_label', 'template_id', 'template_name', 'model',
+                'thinking_level', 'sections_json', 'input_tokens',
+                'output_tokens', 'cost_usd', 'created_at', 'source_file',
+                'input_snapshot_json')
+
+
+def _apply_generated_report(conn, row):
+    """Upsert one peer report by uid — never by local id. Caller commits.
+
+    template_id is carried as provenance only: report templates are per-Pi
+    until F6, so the id may name a different (or no) template here;
+    template_name is the value everything renders."""
+    if not row.get('uid'):
+        return   # a row from a pre-WP9 peer has no replication identity
+    row = dict(row)
+    row['instrument_serial'] = resolve_serial(row.get('instrument_serial'), conn)
+    for c in _REPORT_COLS:
+        row.setdefault(c, None)
+    sets = ', '.join(f'{c}=excluded.{c}' for c in _REPORT_COLS if c != 'uid')
+    conn.execute(f'''
+        INSERT INTO generated_reports ({", ".join(_REPORT_COLS)})
+        VALUES ({", ".join(":" + c for c in _REPORT_COLS)})
+        ON CONFLICT(uid) DO UPDATE SET {sets}
+    ''', {c: row[c] for c in _REPORT_COLS})
 
 
 def _with_serial(conn, row, key='instrument_serial'):
@@ -282,6 +354,14 @@ def apply_sync_event(entity, action, data):
     elif entity == 'run_tag':
         if action == 'upsert':
             _apply_run_tag(conn, data)
+    elif entity == 'generated_report':
+        # Reports replicate by uid (append-only evidence). There is no
+        # 'report_template' entity on purpose — templates stay per-Pi until
+        # the F6 conflict machinery exists.
+        if action == 'upsert':
+            _apply_generated_report(conn, data)
+        elif action == 'delete' and data.get('uid'):
+            conn.execute('DELETE FROM generated_reports WHERE uid=?', (data['uid'],))
     conn.commit()
     conn.close()
 

@@ -1,6 +1,7 @@
 import os
 import json
 import sqlite3
+import uuid
 
 from nor140_format import SPECTRAL_TABLES, round_half_up
 # The session LAeq must be the same number whether it was written by an import
@@ -216,17 +217,54 @@ def _migrate(conn):
             'SELECT date, ?, deleted_at FROM deleted_sessions', (serial_default,))
         conn.execute('DROP TABLE deleted_sessions')
         conn.execute('ALTER TABLE deleted_sessions_new RENAME TO deleted_sessions')
+    # Weather belongs to the session — its time and location — so it is keyed
+    # like one: (date, instrument_serial). Keyed by date alone, two same-date
+    # sessions from different meters at different sites shared one weather row,
+    # and whichever fetch ran last won.
     conn.execute('''
         CREATE TABLE IF NOT EXISTS weather (
-            date        TEXT PRIMARY KEY,
+            date              TEXT NOT NULL,
+            instrument_serial TEXT NOT NULL DEFAULT '',
             wind_speed  REAL,
             wind_dir    REAL,
             temp_min    REAL,
             temp_max    REAL,
             precip      REAL,
-            hourly_json TEXT
+            hourly_json TEXT,
+            PRIMARY KEY (date, instrument_serial)
         )
     ''')
+    wx_cols = {row[1] for row in conn.execute('PRAGMA table_info(weather)').fetchall()}
+    if 'instrument_serial' not in wx_cols:
+        # A date-keyed table (pre-WP9). Every existing row was fetched for a
+        # session now filed under the default serial, so that is where the row
+        # goes; date was the PRIMARY KEY, so the new key cannot collide.
+        if 'date' not in wx_cols:
+            raise MigrationUnsafe(
+                'the weather table has neither instrument_serial nor date '
+                'columns (%s); it cannot be re-keyed automatically' %
+                sorted(wx_cols))
+        keep = [c for c in ('wind_speed', 'wind_dir', 'temp_min', 'temp_max',
+                            'precip', 'hourly_json') if c in wx_cols]
+        keep_sql = (', ' + ', '.join(keep)) if keep else ''
+        conn.executescript('''
+            CREATE TABLE weather_new (
+                date              TEXT NOT NULL,
+                instrument_serial TEXT NOT NULL DEFAULT '',
+                wind_speed  REAL,
+                wind_dir    REAL,
+                temp_min    REAL,
+                temp_max    REAL,
+                precip      REAL,
+                hourly_json TEXT,
+                PRIMARY KEY (date, instrument_serial)
+            );
+        ''')
+        conn.execute(
+            f'INSERT INTO weather_new (date, instrument_serial{keep_sql}) '
+            f'SELECT date, ?{keep_sql} FROM weather', (serial_default,))
+        conn.execute('DROP TABLE weather')
+        conn.execute('ALTER TABLE weather_new RENAME TO weather')
     conn.execute('''
         CREATE TABLE IF NOT EXISTS report_templates (
             id          INTEGER PRIMARY KEY,
@@ -241,6 +279,7 @@ def _migrate(conn):
     conn.execute('''
         CREATE TABLE IF NOT EXISTS generated_reports (
             id             INTEGER PRIMARY KEY,
+            uid            TEXT,
             session_date   TEXT NOT NULL,
             instrument_serial TEXT NOT NULL DEFAULT '',
             run_number     INTEGER,
@@ -329,6 +368,23 @@ def _migrate(conn):
                   AND r.run_number = generated_reports.run_number
             ) WHERE source_file IS NULL AND run_number IS NOT NULL
         ''')
+    if 'uid' not in gr_cols:
+        # WP9: generated reports replicate between the Pis, and the local
+        # integer id cannot be the replication key — both sides assign their
+        # own. The uid is minted once, at save time, and the peer upserts on
+        # it. Pre-WP9 rows get a fresh uuid4 here, which means the two Pis
+        # hold *different* uids for their pre-existing local rows — correct,
+        # because they ARE different local rows (reports never replicated
+        # before this), not two copies of one report.
+        conn.execute('ALTER TABLE generated_reports ADD COLUMN uid TEXT')
+    for (rid,) in conn.execute(
+            'SELECT id FROM generated_reports WHERE uid IS NULL').fetchall():
+        conn.execute('UPDATE generated_reports SET uid=? WHERE id=?',
+                     (str(uuid.uuid4()), rid))
+    conn.execute('''
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_generated_reports_uid
+            ON generated_reports(uid)
+    ''')
     if not conn.execute('SELECT COUNT(*) FROM report_templates').fetchone()[0]:
         # Imported here rather than at module scope: reports_db imports get_db
         # from this module, so a top-level import would be circular.
@@ -596,14 +652,21 @@ def import_sessions(sessions_data, metadata=None):
             )
             wx = sess.get('wx')
             if wx:
+                # 'hj' is the hourly blob, carried by a WP9+ peer; an older
+                # payload has no such key. COALESCE both ways so a summary-only
+                # payload can never erase an hourly series already stored here
+                # (fetched locally, or received from the peer earlier).
                 conn.execute(
-                    'INSERT INTO weather (date, wind_speed, wind_dir, temp_min, temp_max, precip, hourly_json) '
-                    'VALUES (?,?,?,?,?,?,?) '
-                    'ON CONFLICT(date) DO UPDATE SET '
+                    'INSERT INTO weather (date, instrument_serial, wind_speed, wind_dir, '
+                    '                     temp_min, temp_max, precip, hourly_json) '
+                    'VALUES (?,?,?,?,?,?,?,?) '
+                    'ON CONFLICT(date, instrument_serial) DO UPDATE SET '
                     '  wind_speed=excluded.wind_speed, wind_dir=excluded.wind_dir, '
                     '  temp_min=excluded.temp_min,     temp_max=excluded.temp_max, '
-                    '  precip=excluded.precip',
-                    (date, wx.get('ws'), wx.get('wd'), wx.get('tn'), wx.get('tx'), wx.get('pr'), None)
+                    '  precip=excluded.precip, '
+                    '  hourly_json=COALESCE(excluded.hourly_json, weather.hourly_json)',
+                    (date, serial, wx.get('ws'), wx.get('wd'), wx.get('tn'),
+                     wx.get('tx'), wx.get('pr'), wx.get('hj'))
                 )
             # Importing a date supersedes any earlier deletion of it, so drop the
             # tombstone — otherwise a legitimate SD-card re-import would be deleted
@@ -765,11 +828,18 @@ def _renumber_session_runs(conn, sess_id):
                      [(n, rid) for n, rid in enumerate(ids, 1)])
 
 
-def _wx(row):
-    if row['wind_speed'] is None:
+def _wx(row, hourly=False):
+    """The compact wx dict for a sessions⋈weather row. hourly=True adds 'hj'
+    (the raw hourly_json blob, ~24 rows × 4 series) — wanted by the peer-sync
+    payload, where it replicates, but not by the session-browser payload,
+    which only renders the summary chips."""
+    if row['wind_speed'] is None and not (hourly and row['hourly_json']):
         return None
-    return {'ws': row['wind_speed'], 'wd': row['wind_dir'],
-            'tn': row['temp_min'],   'tx': row['temp_max'], 'pr': row['precip']}
+    d = {'ws': row['wind_speed'], 'wd': row['wind_dir'],
+         'tn': row['temp_min'],   'tx': row['temp_max'], 'pr': row['precip']}
+    if hourly:
+        d['hj'] = row['hourly_json']
+    return d
 
 
 def _run_to_dict(r, full=False):
@@ -832,7 +902,8 @@ def get_all_sessions_json():
     conn = get_db()
     sessions = conn.execute(
         'SELECT s.*, w.wind_speed, w.wind_dir, w.temp_min, w.temp_max, w.precip '
-        'FROM sessions s LEFT JOIN weather w ON s.date=w.date '
+        'FROM sessions s LEFT JOIN weather w '
+        '  ON s.date=w.date AND s.instrument_serial=w.instrument_serial '
         'ORDER BY s.date DESC, s.instrument_serial'
     ).fetchall()
     # Build (session_date, serial) -> list of assessment names (one query, not N)
@@ -886,16 +957,21 @@ def get_all_sessions_json():
     return {'sessions': result}
 
 
-def save_weather(date, w):
+def save_weather(date, w, serial=None):
+    """Store the weather for the (date, serial) session. `serial` None or
+    blank means the default serial, which is what every pre-WP9 caller meant.
+    A full overwrite, hourly_json included: this is the local-fetch path, and
+    a fetch always produces the whole row."""
     conn = get_db()
     conn.execute(
-        'INSERT INTO weather (date, wind_speed, wind_dir, temp_min, temp_max, precip, hourly_json) '
-        'VALUES (?,?,?,?,?,?,?) '
-        'ON CONFLICT(date) DO UPDATE SET '
+        'INSERT INTO weather (date, instrument_serial, wind_speed, wind_dir, '
+        '                     temp_min, temp_max, precip, hourly_json) '
+        'VALUES (?,?,?,?,?,?,?,?) '
+        'ON CONFLICT(date, instrument_serial) DO UPDATE SET '
         '  wind_speed=excluded.wind_speed, wind_dir=excluded.wind_dir, '
         '  temp_min=excluded.temp_min,     temp_max=excluded.temp_max, '
         '  precip=excluded.precip,         hourly_json=excluded.hourly_json',
-        (date, w.get('wind_speed'), w.get('wind_dir'),
+        (date, resolve_serial(serial, conn), w.get('wind_speed'), w.get('wind_dir'),
          w.get('temp_min'), w.get('temp_max'),
          w.get('precip'), w.get('hourly_json'))
     )
@@ -903,9 +979,11 @@ def save_weather(date, w):
     conn.close()
 
 
-def get_weather(date):
+def get_weather(date, serial=None):
     conn = get_db()
-    row = conn.execute('SELECT * FROM weather WHERE date=?', (date,)).fetchone()
+    row = conn.execute(
+        'SELECT * FROM weather WHERE date=? AND instrument_serial=?',
+        (date, resolve_serial(serial, conn))).fetchone()
     conn.close()
     return dict(row) if row else None
 
@@ -942,8 +1020,10 @@ def get_sessions_since(since):
     """Return sessions imported/updated after `since` (ISO timestamp), in sync format."""
     conn = get_db()
     sessions = conn.execute(
-        'SELECT s.*, w.wind_speed, w.wind_dir, w.temp_min, w.temp_max, w.precip '
-        'FROM sessions s LEFT JOIN weather w ON s.date=w.date '
+        'SELECT s.*, w.wind_speed, w.wind_dir, w.temp_min, w.temp_max, w.precip, '
+        '       w.hourly_json '
+        'FROM sessions s LEFT JOIN weather w '
+        '  ON s.date=w.date AND s.instrument_serial=w.instrument_serial '
         'WHERE s.imported_at > ? ORDER BY s.date, s.instrument_serial', (since,)
     ).fetchall()
     result = []
@@ -962,7 +1042,7 @@ def get_sessions_since(since):
             'lat':   sess['lat'],
             'lng':   sess['lng'],
             'notes': sess['notes'],
-            'wx':    _wx(sess),
+            'wx':    _wx(sess, hourly=True),
             'projects': [_run_to_dict(r, full=True) for r in runs],
         })
     conn.close()
@@ -1150,8 +1230,11 @@ def delete_session(date, serial=None):
     peer's pre-WP8 delete event (date only) is applied.
 
     Records a tombstone so the deletion replicates to a peer that was offline
-    when it happened. Weather is deliberately left in place: it is keyed by
-    date, not by session, and is reference data rather than measurement data."""
+    when it happened. The session's weather row — (date, serial), the same key
+    as the session itself since WP9 — is deliberately left in place: it is
+    reference data rather than measurement data, and a re-import of the same
+    card should find it still there rather than trigger a re-fetch. Only
+    purge_sessions_before(), the bulk data-retention path, removes weather."""
     conn = get_db()
     serial = resolve_serial(serial, conn)
     conn.execute('DELETE FROM assessment_runs WHERE session_date=? AND instrument_serial=?',
@@ -1390,14 +1473,13 @@ def purge_sessions_before(before_date):
     if old:
         ph = ','.join('?' * len(old))
         conn.execute(f'DELETE FROM assessment_runs WHERE session_date IN ({ph})', old)
-        # weather table schema varies: some instances key by session_id, others by date
-        weather_cols = {r[1] for r in conn.execute('PRAGMA table_info(weather)').fetchall()}
-        if 'session_id' in weather_cols:
-            conn.execute(
-                f'DELETE FROM weather WHERE session_id IN '
-                f'(SELECT id FROM sessions WHERE date IN ({ph}))', old)
-        elif 'date' in weather_cols:
-            conn.execute(f'DELETE FROM weather WHERE date IN ({ph})', old)
+        # Weather goes with the purge. The table is keyed (date, serial) since
+        # WP9 (_migrate rebuilds any older variant before this can run), but
+        # the purge is date-scoped by definition — every serial's session
+        # before the cutoff is going — so deleting by date also sweeps up
+        # rows whose session was individually deleted earlier (delete_session
+        # keeps weather as reference data; the retention purge does not).
+        conn.execute(f'DELETE FROM weather WHERE date IN ({ph})', old)
         conn.execute(
             f'DELETE FROM runs WHERE session_id IN (SELECT id FROM sessions WHERE date IN ({ph}))', old)
         conn.execute(f'DELETE FROM sessions WHERE date IN ({ph})', old)
