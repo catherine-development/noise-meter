@@ -403,6 +403,79 @@ def _proj_key_from_filename(fname):
     return f"PROJ{digits}" if digits.isdigit() else 'PROJ0000'
 
 
+# ── ZIP expansion limits (F8a) ────────────────────────────────────────────────
+# MAX_CONTENT_LENGTH caps only the *compressed* request body; a zip bomb
+# expands far beyond it in memory. These bound what an upload may declare —
+# and what it may actually expand to — before a single byte is parsed. A real
+# NOR140 card is nowhere near any of them: GLOB files are a few KB, PROF files
+# a few MB, and a date folder holds a handful of PROJ pairs.
+ZIP_MAX_MEMBERS = 4096
+ZIP_MAX_MEMBER_BYTES = 32 * 1024 * 1024          # per member, uncompressed
+ZIP_MAX_TOTAL_BYTES = 512 * 1024 * 1024          # whole archive, uncompressed
+
+
+def _read_zip_members(zf):
+    """Extract every file member of `zf`, enforcing the F8a limits.
+
+    Returns ({path: bytes}, [skip dicts]). The declared sizes are checked
+    before extraction, and each member is then read through a capped stream —
+    never a blind .read() — because a ZIP's declared sizes can lie: a member
+    whose DEFLATE stream runs past its declared size is refused, not expanded.
+    Duplicate member names used to be resolved silently (last one won via the
+    dict); the first copy now wins and the rest are reported as skipped.
+
+    Raises ValueError with a human-readable reason on any refusal.
+    """
+    infos = [i for i in zf.infolist() if not i.filename.endswith('/')]
+    if len(infos) > ZIP_MAX_MEMBERS:
+        raise ValueError(
+            f'ZIP holds {len(infos)} files, more than the {ZIP_MAX_MEMBERS} '
+            f'an SD-card upload can contain — refusing to extract it')
+    total = 0
+    for info in infos:
+        if info.file_size > ZIP_MAX_MEMBER_BYTES:
+            raise ValueError(
+                f'ZIP member {info.filename} declares '
+                f'{info.file_size} bytes uncompressed, over the '
+                f'{ZIP_MAX_MEMBER_BYTES // (1024 * 1024)} MB per-file limit '
+                f'— refusing to extract it')
+        total += info.file_size
+    if total > ZIP_MAX_TOTAL_BYTES:
+        raise ValueError(
+            f'ZIP declares {total} bytes uncompressed in total, over the '
+            f'{ZIP_MAX_TOTAL_BYTES // (1024 * 1024)} MB limit — refusing to '
+            f'extract it')
+
+    files = {}
+    duplicates = []
+    for info in infos:
+        if info.filename in files:
+            duplicates.append({
+                'path': info.filename, 'date': None,
+                'reason': 'duplicate name in the ZIP — the first copy was '
+                          'kept and this one skipped'})
+            continue
+        try:
+            with zf.open(info) as fh:
+                data = fh.read(info.file_size + 1)
+        except ValueError:
+            raise
+        except Exception as e:
+            # zipfile raises BadZipFile ("Bad CRC-32") when a member's stream
+            # does not match its declared size — a forged header or a corrupt
+            # file. Name the member instead of leaking a bare traceback.
+            raise ValueError(
+                f'ZIP member {info.filename} did not decompress to its '
+                f'declared size ({type(e).__name__}: {e}) — corrupt file or '
+                f'forged size header') from e
+        if len(data) > info.file_size:
+            raise ValueError(
+                f'ZIP member {info.filename} expands past its declared size '
+                f'of {info.file_size} bytes — refusing a forged size header')
+        files[info.filename] = data
+    return files, duplicates
+
+
 def parse_files(file_pairs, serial=None):
     """
     Parse NOR140 data from a list of (relative_path, bytes) tuples.
@@ -438,17 +511,24 @@ def parse_zip(zip_bytes, serial=None):
     not imported, as {path, reason, date}. It used to drop those silently, so
     the user was told "Added N session(s)" with no hint that a run was missing.
 
-    complete_date is True when every run of that session came from under a
-    date folder (YYMMDD/...), i.e. the upload contained the whole day as the
-    SD card holds it. import_sessions() only ever deletes stored runs that are
-    absent from the payload when this is set; a single PROJ folder or flat DAT
-    pair is a partial upload and can only add or refresh runs. skipped_files
-    names the PROJ folders on that date that were present but could not be
-    parsed, so a complete-date re-import never deletes a stored run just
-    because its file has since become unreadable.
+    complete_date is always False here (F1). It used to be inferred from the
+    path shape — True whenever every run sat under a YYMMDD folder — but a ZIP
+    of one PROJ folder zipped from its parent carries exactly those paths
+    while holding a fraction of the day, and import_sessions() then deleted
+    every stored run absent from it. Path shape cannot prove completeness, so
+    no parse ever claims it: only a caller that genuinely enumerated the card
+    (import_sdcard.py walking the real card root, or an operator ticking the
+    upload form's prune checkbox) may set complete_date=True on the sessions
+    afterwards. skipped_files still names the PROJ folders on the date that
+    were present but could not be parsed, so an explicit prune never deletes
+    a stored run just because its file has become unreadable.
+
+    Raises ValueError (F8a) when the archive oversteps the decompression
+    limits above — too many members, an oversized or over-total declared
+    size, or a member whose stream runs past what it declared.
     """
     zf = zipfile.ZipFile(io.BytesIO(zip_bytes))
-    files = {n: zf.read(n) for n in zf.namelist() if not n.endswith('/')}
+    files, dup_skipped = _read_zip_members(zf)
 
     # Collect GLOB/PROF pairs keyed by (date_folder_or_sentinel, proj_key).
     # date_folder: a 6-digit string from the path, or '__from_glob__' if absent.
@@ -481,7 +561,7 @@ def parse_zip(zip_bytes, serial=None):
         entry = pairs.setdefault(key, {'dir': '/'.join(parts[:-1]) or proj_folder})
         entry[kind] = data
 
-    skipped = []
+    skipped = list(dup_skipped)
     # date -> set of PROJ keys that were present on that date but not parsed.
     unparsed = {}
 
@@ -495,7 +575,6 @@ def parse_zip(zip_bytes, serial=None):
 
     # Parse each complete GLOB+PROF pair and group by resolved date.
     by_date = {}
-    from_date_folder = {}  # date -> [bool per run]
     for (date_key, proj_folder), pair in sorted(pairs.items()):
         if 'glob' not in pair or 'prof' not in pair:
             have = 'GLOB' if 'glob' in pair else 'PROF'
@@ -511,7 +590,6 @@ def parse_zip(zip_bytes, serial=None):
                             'reason': f'factory/unset date {date}'})
             continue
         by_date.setdefault(date, []).append((proj_folder, run))
-        from_date_folder.setdefault(date, []).append(date_key != '__from_glob__')
 
     # Assemble into per-day session dicts.
     result = ParseResult()
@@ -530,7 +608,9 @@ def parse_zip(zip_bytes, serial=None):
             'serial':   (serial or '').strip(),
             'avg':      avg,
             'mx':       _round_db(max(p['mx'] for p in projects), 1),
-            'complete_date': all(from_date_folder[date]),
+            # Never inferred (F1): see the docstring. Explicit-prune callers
+            # overwrite this on the sessions they build.
+            'complete_date': False,
             'skipped_files': sorted(unparsed.get(date, ())),
             'projects': projects,
         })

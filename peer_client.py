@@ -37,8 +37,14 @@ def _describe_error(e):
     return f'{type(e).__name__}: {e}'
 
 
-def push_to_peer(sessions):
+def push_to_peer(sessions, prune=False):
     """Push sessions to peer Pi in a background thread (best-effort).
+
+    prune=True carries the operator's explicit complete-date authorisation
+    (WP11/F1) as the payload's top-level "prune": true, which the peer's
+    /import requires before honouring any per-session complete_date — so a
+    prune the operator asked for lands on both Pis instead of the peer's
+    copy resurrecting the runs on the next sync pull.
 
     Returns the thread (or None when there is nothing to do) so callers that
     need to know the outcome — tests, mainly — can join it. A failure is
@@ -50,7 +56,10 @@ def push_to_peer(sessions):
         return None
 
     def _do_push():
-        payload = json.dumps({'sessions': sessions}, separators=(',', ':')).encode()
+        body = {'sessions': sessions}
+        if prune:
+            body['prune'] = True
+        payload = json.dumps(body, separators=(',', ':')).encode()
         req = urllib.request.Request(
             PEER_URL.rstrip('/') + '/import',
             data=payload,

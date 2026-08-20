@@ -1,4 +1,5 @@
 import hashlib
+import logging
 import os
 import json
 import sqlite3
@@ -787,6 +788,25 @@ def init_db():
     conn.close()
 
 
+class ImportResult(int):
+    """What import_sessions() returns: the imported-session count, as ever —
+    an int subclass so every existing caller (arithmetic, jsonify, equality
+    in the suite) keeps working — plus the deletion report an explicit prune
+    produces. Deletion must never be silent: do_upload and /import read these
+    to tell the operator exactly what a complete-date import removed.
+
+    deleted_runs   — stored runs pruned because a complete_date session no
+                     longer contained them.
+    deleted_links  — assessment_runs rows that pointed at those runs, removed
+                     (and uid-tombstoned) with them; an assessor must know
+                     the packaging changed.
+    deleted_run_files — [(date, source_file), ...] naming the pruned runs.
+    """
+    deleted_runs = 0
+    deleted_links = 0
+    deleted_run_files = ()
+
+
 def import_sessions(sessions_data, metadata=None):
     """Import sessions. Per-session metadata/weather (as sent by
     get_sessions_since() for peer sync) takes precedence when present;
@@ -809,16 +829,29 @@ def import_sessions(sessions_data, metadata=None):
     are recomputed from every stored run rather than copied from the payload,
     which may have been a partial upload.
 
-    Deletion. A session dict may carry complete_date=True (parse_zip sets it
-    when the upload held the whole date folder). Only then are stored runs
-    absent from the payload deleted — and never one named in the session's
-    skipped_files, which are runs the parser saw but could not read. Payloads
-    without the flag (partial uploads, JSON, peer sync) only add or refresh.
+    Deletion. A session dict may carry complete_date=True. Since WP11 no
+    parse ever infers it (path shape cannot prove completeness — F1): it is
+    set only by a caller that genuinely enumerated the card, i.e.
+    import_sdcard.py walking the real card root, the upload form's explicit
+    prune checkbox, or an /import payload whose top level carries
+    "prune": true. Only then are stored runs absent from the payload deleted
+    — and never one named in the session's skipped_files, which are runs the
+    parser saw but could not read. Payloads without the flag (partial
+    uploads, JSON, peer sync) only add or refresh.
+
+    Pruning a run also removes, in the same transaction, every
+    assessment_runs row pointing at it via the stable key (F5 — the links
+    were left dangling before: stored but invisible in joins and silently
+    missing from assessment exports), and writes a WP10 uid tombstone for
+    each removed link so the deletion replicates and a peer's stale full
+    sync cannot resurrect it. The counts come back on the ImportResult.
     """
     meta = metadata or {}
     conn = get_db()
     imported = 0
     dates = []
+    deleted_run_files = []   # [(date, source_file)] pruned by complete_date
+    deleted_links = 0        # assessment_runs rows removed with them
     try:
         for sess in sessions_data:
             date = sess['d']
@@ -881,17 +914,44 @@ def import_sessions(sessions_data, metadata=None):
                 touched.append(_upsert_run(conn, sess_id, i, proj))
 
             if sess.get('complete_date') and touched:
-                # The upload held the whole date folder, so anything stored for the
-                # date that was not in it no longer exists on the card — except the
+                # The caller vouched for the whole date (explicit prune — see
+                # the docstring), so anything stored for the date that was not
+                # in the payload no longer exists on the card — except the
                 # files the parser saw and could not read, which are still there.
                 keep_files = [f for f in (sess.get('skipped_files') or []) if f]
                 ph_ids = ','.join('?' * len(touched))
-                sql = f'DELETE FROM runs WHERE session_id=? AND id NOT IN ({ph_ids})'
+                sql = (f'SELECT id, source_file FROM runs '
+                       f'WHERE session_id=? AND id NOT IN ({ph_ids})')
                 args = [sess_id, *touched]
                 if keep_files:
                     sql += f' AND (source_file IS NULL OR source_file NOT IN ({",".join("?" * len(keep_files))}))'
                     args += keep_files
-                conn.execute(sql, args)
+                doomed = conn.execute(sql, args).fetchall()
+                if doomed:
+                    # F5: the links first, via the stable key, in this same
+                    # transaction — with uid tombstones so the removal
+                    # replicates instead of resurrecting (the exact treatment
+                    # delete_session() gives its links). A legacy run with no
+                    # source_file has no stable key to match; its links, if
+                    # any, are what audit_assessment_run_keys() reports.
+                    link_uids = []
+                    for row in doomed:
+                        if not row['source_file']:
+                            continue
+                        link_uids += [u[0] for u in conn.execute(
+                            'SELECT uid FROM assessment_runs WHERE session_date=? '
+                            'AND instrument_serial=? AND source_file=? '
+                            'AND uid IS NOT NULL',
+                            (date, serial, row['source_file'])).fetchall()]
+                        deleted_links += conn.execute(
+                            'DELETE FROM assessment_runs WHERE session_date=? '
+                            'AND instrument_serial=? AND source_file=?',
+                            (date, serial, row['source_file'])).rowcount
+                    record_uid_tombstones(conn, 'assessment_runs', link_uids)
+                    conn.execute(
+                        f'DELETE FROM runs WHERE id IN ({",".join("?" * len(doomed))})',
+                        [row['id'] for row in doomed])
+                    deleted_run_files += [(date, row['source_file']) for row in doomed]
 
             _renumber_session_runs(conn, sess_id)
             dates.append(date)
@@ -903,7 +963,17 @@ def import_sessions(sessions_data, metadata=None):
         # One transaction per call: a constraint failure part-way through
         # leaves nothing behind, and the connection is released even then.
         conn.close()
-    return imported
+    if deleted_run_files:
+        logging.getLogger(__name__).info(
+            'import pruned %d run(s) (%s) and %d assessment link(s)',
+            len(deleted_run_files),
+            ', '.join(f'{d}/{sf or "?"}' for d, sf in deleted_run_files),
+            deleted_links)
+    result = ImportResult(imported)
+    result.deleted_runs = len(deleted_run_files)
+    result.deleted_links = deleted_links
+    result.deleted_run_files = tuple(deleted_run_files)
+    return result
 
 
 _PROF_COLS = [

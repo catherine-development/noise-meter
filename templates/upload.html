@@ -163,6 +163,19 @@ h2{font-size:14px;font-weight:600;color:var(--text2);margin-bottom:14px}
                onchange="onZipPicked(this)">
       </div>
 
+      <div class="field" style="margin-top:14px">
+        <label style="display:flex;align-items:flex-start;gap:8px;font-weight:normal;cursor:pointer">
+          <input type="checkbox" name="prune" value="1" style="margin-top:2px;flex:none">
+          <span>This upload is the complete SD card for its date(s):
+            remove stored runs missing from it</span>
+        </label>
+        <p class="note">Leave unchecked for partial uploads (a single session or
+          PROJ folder). Unchecked, an upload only adds or refreshes runs and never
+          deletes anything. Checked, runs stored for the uploaded date(s) but
+          absent from the upload are deleted — every removal, including any
+          assessment run assignments that went with it, is listed afterwards.</p>
+      </div>
+
       <button type="submit" id="submitBtn" class="btn" disabled>Upload and import</button>
     </form>
   </div>
