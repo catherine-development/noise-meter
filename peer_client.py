@@ -122,4 +122,21 @@ def startup_sync_from_peer():
             log.info('Startup peer sync: applied full payload from peer')
         except Exception as e:
             log.warning('Startup peer sync failed: %s', e)
+        # User sync (WP10 part B): same catch-up, for the flight-tracker
+        # logins. Additive only; best-effort; counts logged, never emails —
+        # see users_sync.py for the deliberate scope line on deactivation.
+        try:
+            from users_sync import apply_users
+            ureq = urllib.request.Request(
+                PEER_URL.rstrip('/') + '/api/users-sync',
+                headers={'X-Import-Key': IMPORT_KEY, 'User-Agent': _PEER_UA},
+                method='GET',
+            )
+            with urllib.request.urlopen(ureq, timeout=15) as resp:
+                udata = json.loads(resp.read())
+            applied = apply_users(udata.get('users', []))
+            log.info('Startup user sync: %d new user(s), %d gap-fill(s)',
+                     applied.get('inserted', 0), applied.get('filled', 0))
+        except Exception as e:
+            log.warning('Startup user sync failed: %s', e)
     threading.Thread(target=_do, daemon=True).start()

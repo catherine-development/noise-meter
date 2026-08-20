@@ -7,11 +7,27 @@ startup, the per-mutation events pushed after each edit, and the import log.
 Split out of noise_db.py. The outbound HTTP side of the protocol lives in
 peer_client.py; this module is only the database half.
 
+Since WP10 (F6) the mutable hand-entered tables — assessments,
+assessment_locations, assessment_runs, report_templates — replicate by uid,
+never by the local integer id: both Pis accept edits, and id-keyed upserts
+collided silently whenever the pair created rows apart. Every uid-keyed apply
+is gated by last-writer-wins on updated_at (string compare of SQLite
+datetime('now') UTC values, the same convention the session tombstones use);
+a stale incoming row is skipped and recorded in sync_conflicts so divergence
+is visible rather than silent. Deletes carry uid tombstones (deleted_uids) so
+a full sync from a Pi that still holds a row cannot resurrect it. Events from
+a pre-WP10 peer (no uid in the payload) fall back to the old id-keyed apply,
+so a mixed-version pair degrades to the old behaviour rather than breaking.
+
 Note that get_sessions_since() stays in noise_db: it is a core session/run read
 that the sync protocol happens to call, not part of the protocol itself.
 """
+import json
+import sqlite3
+
 from noise_db import (get_db, delete_session, purge_sessions_before, _record_tombstones,
-                      resolve_serial)
+                      resolve_serial, record_uid_tombstones,
+                      uid_for_assessment, uid_for_location, uid_for_assessment_run)
 
 
 def _apply_tombstones(conn, tombstones):
@@ -37,10 +53,17 @@ def _apply_tombstones(conn, tombstones):
             (date, serial)).fetchone()
         if row is not None and row['imported_at'] and row['imported_at'] >= deleted_at:
             continue  # re-imported here after the peer's delete — keep ours
+        # The links deleted with the session get uid tombstones, mirroring
+        # delete_session(): otherwise the next full sync from a third copy
+        # (or a not-yet-caught-up peer) re-creates dangling link rows.
+        ar_uids = [r[0] for r in conn.execute(
+            'SELECT uid FROM assessment_runs WHERE session_date=? AND '
+            'instrument_serial=? AND uid IS NOT NULL', (date, serial)).fetchall()]
         conn.execute('DELETE FROM assessment_runs WHERE session_date=? AND instrument_serial=?',
                      (date, serial))
         conn.execute('DELETE FROM sessions WHERE date=? AND instrument_serial=?', (date, serial))
         _record_tombstones(conn, [(date, serial)], deleted_at=deleted_at)
+        record_uid_tombstones(conn, 'assessment_runs', ar_uids, deleted_at=deleted_at)
 
 
 def get_last_sync_time():
@@ -87,7 +110,6 @@ def get_last_push_error():
     the upload page can say that the last upload did not reach the peer — it
     used to print() the failure to a log nobody reads.
     """
-    import json
     raw = get_sync_state('last_push_error')
     if not raw:
         return None
@@ -98,7 +120,12 @@ def get_last_push_error():
 
 
 def get_full_sync_payload():
-    """Return all syncable state for peer replication."""
+    """Return all syncable state for peer replication.
+
+    The uid-keyed tables carry BOTH their uids (what a WP10 receiver applies
+    by, exclusively) and their local integer ids (what a pre-WP10 receiver
+    still applies by — it ignores the uid keys, which is the documented
+    degraded mixed-version behaviour, not a breakage)."""
     conn = get_db()
     assessments  = [dict(r) for r in conn.execute('SELECT * FROM assessments').fetchall()]
     locations    = [dict(r) for r in conn.execute('SELECT * FROM assessment_locations').fetchall()]
@@ -118,6 +145,11 @@ def get_full_sync_payload():
     ).fetchall()]
     deleted_sess = [dict(r) for r in conn.execute(
         'SELECT date, instrument_serial AS serial, deleted_at FROM deleted_sessions').fetchall()]
+    # uid tombstones (F6): deletes of the uid-keyed tables keep propagating
+    # through the full payload, exactly like session tombstones. An old
+    # receiver ignores the key.
+    deleted_uids = [dict(r) for r in conn.execute(
+        'SELECT table_name, uid, deleted_at FROM deleted_uids').fetchall()]
     # Weather is session-keyed reference data and replicates in full (WP9), so
     # a Pi that was offline when the other side fetched — or received — a row
     # catches up here. hourly_json rides along: ~24 rows × 4 series per date,
@@ -125,63 +157,40 @@ def get_full_sync_payload():
     weather = [dict(r) for r in conn.execute(
         'SELECT date, instrument_serial AS serial, wind_speed, wind_dir, '
         'temp_min, temp_max, precip, hourly_json FROM weather').fetchall()]
-    # Generated reports replicate too — they are append-only evidence, keyed
-    # across the pair by uid, never by the local integer id. Report
-    # *templates* deliberately do not: they are mutable per-Pi state and need
-    # the F6 conflict machinery before they can replicate safely.
+    # Generated reports replicate (WP9) — append-only evidence, keyed across
+    # the pair by uid, never by the local integer id. Report templates
+    # replicate too since WP10, uid-keyed with LWW like the other mutable
+    # hand-entered tables.
     reports = [dict(r) for r in conn.execute(
         'SELECT * FROM generated_reports WHERE uid IS NOT NULL').fetchall()]
+    templates = [dict(r) for r in conn.execute(
+        'SELECT * FROM report_templates WHERE uid IS NOT NULL').fetchall()]
     conn.close()
     return {'assessments': assessments, 'assessment_locations': locations,
             'assessment_runs': assess_runs, 'sessions_meta': sess_meta,
             'run_tags': run_tags, 'deleted_sessions': deleted_sess,
-            'weather': weather, 'generated_reports': reports}
+            'deleted_uids': deleted_uids, 'weather': weather,
+            'generated_reports': reports, 'report_templates': templates}
 
 
 def apply_full_sync(payload):
-    """Upsert a full sync payload received from peer (startup catch-up)."""
+    """Upsert a full sync payload received from peer (startup catch-up and
+    every 15-minute tick)."""
     conn = get_db()
-    # Deletions are applied before the upserts below so that session metadata
-    # for a session the peer deleted is not re-applied to a row we are about
-    # to remove.
+    # Deletions are applied before the upserts below so that (a) metadata for
+    # a session the peer deleted is not re-applied to a row we are about to
+    # remove, and (b) an upsert of a row the peer deleted is refused by its
+    # fresh tombstone rather than resurrecting it.
     _apply_tombstones(conn, payload.get('deleted_sessions', []))
+    _apply_uid_tombstones(conn, payload.get('deleted_uids', []))
     for a in payload.get('assessments', []):
-        conn.execute('''
-            INSERT INTO assessments
-                (id,name,purpose,standard,address,postcode,lat,lng,client_ref,notes,created_at)
-            VALUES (:id,:name,:purpose,:standard,:address,:postcode,:lat,:lng,:client_ref,:notes,:created_at)
-            ON CONFLICT(id) DO UPDATE SET
-                name=excluded.name, purpose=excluded.purpose, standard=excluded.standard,
-                address=excluded.address, postcode=excluded.postcode,
-                lat=excluded.lat, lng=excluded.lng,
-                client_ref=excluded.client_ref, notes=excluded.notes
-        ''', a)
+        _apply_assessment(conn, a)
     for loc in payload.get('assessment_locations', []):
-        conn.execute('''
-            INSERT INTO assessment_locations
-                (id,assessment_id,label,description,lat,lng,sort_order,notes)
-            VALUES (:id,:assessment_id,:label,:description,:lat,:lng,:sort_order,:notes)
-            ON CONFLICT(id) DO UPDATE SET
-                label=excluded.label, description=excluded.description,
-                lat=excluded.lat, lng=excluded.lng,
-                sort_order=excluded.sort_order, notes=excluded.notes
-        ''', loc)
+        _apply_location(conn, loc)
     for ar in payload.get('assessment_runs', []):
-        # A peer on the older schema sends no source_file. Default it so the
-        # named parameter binds, and let COALESCE keep any value we already
-        # hold — an old peer's silence must not erase the stable key.
-        ar = _with_serial(conn, ar)
-        conn.execute('''
-            INSERT INTO assessment_runs
-                (id,assessment_id,location_id,session_date,instrument_serial,run_number,
-                 source_file,conditions,notes)
-            VALUES (:id,:assessment_id,:location_id,:session_date,:instrument_serial,:run_number,
-                    :source_file,:conditions,:notes)
-            ON CONFLICT(id) DO UPDATE SET
-                location_id=excluded.location_id,
-                source_file=COALESCE(excluded.source_file, assessment_runs.source_file),
-                conditions=excluded.conditions, notes=excluded.notes
-        ''', ar)
+        _apply_assessment_run(conn, ar)
+    for t in payload.get('report_templates', []):
+        _apply_report_template(conn, t)
     for sm in payload.get('sessions_meta', []):
         sm = _with_serial(conn, sm, key='serial')
         # COALESCE: never overwrite existing non-null with null from peer
@@ -203,6 +212,407 @@ def apply_full_sync(payload):
         _apply_generated_report(conn, gr)
     conn.commit()
     conn.close()
+
+
+# ── F6: uid-keyed apply with LWW and conflict surfacing ──────────────────────
+
+# The tables replication may touch by uid — a whitelist, because the table
+# name arrives inside tombstone payloads and is interpolated into SQL.
+_LWW_TABLES = ('assessments', 'assessment_locations', 'assessment_runs',
+               'report_templates')
+_UID_TABLES = _LWW_TABLES + ('generated_reports',)
+
+_ASSESSMENT_COLS = ('uid', 'name', 'purpose', 'standard', 'address', 'postcode',
+                    'lat', 'lng', 'client_ref', 'notes', 'created_at', 'updated_at')
+_LOCATION_COLS = ('uid', 'assessment_uid', 'label', 'description', 'lat', 'lng',
+                  'sort_order', 'notes', 'updated_at')
+_ARUN_COLS = ('uid', 'assessment_uid', 'location_uid', 'session_date',
+              'instrument_serial', 'run_number', 'source_file', 'conditions',
+              'notes', 'updated_at')
+_TEMPLATE_COLS = ('uid', 'name', 'description', 'prompt', 'is_default',
+                  'created_at', 'updated_at')
+
+
+def _now(conn):
+    return conn.execute("SELECT datetime('now')").fetchone()[0]
+
+
+def _tombstone_time(conn, table, uid):
+    row = conn.execute(
+        'SELECT deleted_at FROM deleted_uids WHERE table_name=? AND uid=?',
+        (table, uid)).fetchone()
+    return row['deleted_at'] if row else None
+
+
+def _record_conflict(conn, table, uid, local_updated_at, remote_updated_at, payload):
+    """One row per (table, uid), always the latest occurrence — the table is a
+    visibility surface (GET /api/sync-conflicts), not a journal."""
+    conn.execute('''
+        INSERT INTO sync_conflicts
+            (table_name, uid, local_updated_at, remote_updated_at, seen_at, payload_json)
+        VALUES (?,?,?,?,datetime('now'),?)
+        ON CONFLICT(table_name, uid) DO UPDATE SET
+            local_updated_at=excluded.local_updated_at,
+            remote_updated_at=excluded.remote_updated_at,
+            seen_at=excluded.seen_at,
+            payload_json=excluded.payload_json
+    ''', (table, uid, local_updated_at, remote_updated_at,
+          json.dumps(payload, default=str)))
+
+
+def _clear_conflict(conn, table, uid):
+    conn.execute('DELETE FROM sync_conflicts WHERE table_name=? AND uid=?',
+                 (table, uid))
+
+
+def _lww_should_apply(conn, table, uid, incoming_updated, payload):
+    """The last-writer-wins gate for one incoming uid-keyed row.
+
+    - uid tombstoned here: skip, unless the incoming edit is strictly newer
+      than the delete — then the edit wins, the tombstone goes, and the row
+      resurrects (the peer converges the same way when our row reaches it).
+    - local row strictly newer (string compare; NULL counts as older than
+      everything, which is what makes a never-edited pre-WP10 backfill row
+      lose to any real edit): skip and record the loser in sync_conflicts.
+    - otherwise apply; equal timestamps apply too, which keeps replays
+      idempotent, and any stale conflict entry for the uid is cleared.
+    """
+    ts = _tombstone_time(conn, table, uid)
+    if ts is not None:
+        if (incoming_updated or '') > ts:
+            conn.execute('DELETE FROM deleted_uids WHERE table_name=? AND uid=?',
+                         (table, uid))
+        else:
+            return False
+    row = conn.execute(f'SELECT updated_at FROM {table} WHERE uid=?',
+                       (uid,)).fetchone()
+    if row is not None and (row['updated_at'] or '') > (incoming_updated or ''):
+        _record_conflict(conn, table, uid, row['updated_at'], incoming_updated,
+                         payload)
+        return False
+    _clear_conflict(conn, table, uid)
+    return True
+
+
+def _ensure_assessment(conn, a_uid):
+    """Local id for an assessment uid. Events are fire-and-forget threads, so
+    a child can arrive before its parent: unseen parents get a stub row the
+    real upsert later fills (its updated_at is NULL, so anything beats it).
+    Returns None when the uid is tombstoned here — the delete wins, and the
+    caller must drop the child rather than resurrect the parent."""
+    row = conn.execute('SELECT id FROM assessments WHERE uid=?', (a_uid,)).fetchone()
+    if row:
+        return row['id']
+    if _tombstone_time(conn, 'assessments', a_uid) is not None:
+        return None
+    cur = conn.execute(
+        "INSERT INTO assessments (uid, name) VALUES (?, '(pending sync)')", (a_uid,))
+    return cur.lastrowid
+
+
+def _ensure_location(conn, l_uid, local_assessment_id):
+    """Like _ensure_assessment. None when tombstoned — the run link then keeps
+    a NULL location, matching the local ON DELETE SET NULL behaviour."""
+    row = conn.execute('SELECT id FROM assessment_locations WHERE uid=?',
+                       (l_uid,)).fetchone()
+    if row:
+        return row['id']
+    if _tombstone_time(conn, 'assessment_locations', l_uid) is not None:
+        return None
+    cur = conn.execute(
+        'INSERT INTO assessment_locations (uid, assessment_id, label) '
+        "VALUES (?, ?, '(pending sync)')", (l_uid, local_assessment_id))
+    return cur.lastrowid
+
+
+def _adopt_uid(conn, table, row_id, uid):
+    """Give an id-keyed row from a pre-WP10 peer the deterministic uid its
+    sender's own migration will compute, so the copies unify instead of
+    twinning when the peer upgrades. Leaves an existing uid alone; if the
+    deterministic uid already names another local row, this one stays NULL
+    rather than failing the whole apply."""
+    if row_id is None or not uid:
+        return
+    try:
+        conn.execute(f'UPDATE {table} SET uid=? WHERE id=? AND uid IS NULL',
+                     (uid, row_id))
+    except sqlite3.IntegrityError:
+        pass
+
+
+def _apply_assessment(conn, a):
+    """Upsert one peer assessment. uid-keyed with LWW when the sender is on
+    WP10; an id-keyed row from an older peer falls back to the old apply."""
+    a = dict(a)
+    if not a.get('uid'):
+        return _apply_assessment_legacy(conn, a)
+    for c in _ASSESSMENT_COLS:
+        a.setdefault(c, None)
+    a['name'] = a['name'] or ''
+    if not _lww_should_apply(conn, 'assessments', a['uid'], a['updated_at'], a):
+        return
+    conn.execute('''
+        INSERT INTO assessments
+            (uid,name,purpose,standard,address,postcode,lat,lng,client_ref,notes,
+             created_at,updated_at)
+        VALUES (:uid,:name,:purpose,:standard,:address,:postcode,:lat,:lng,
+                :client_ref,:notes,:created_at,:updated_at)
+        ON CONFLICT(uid) DO UPDATE SET
+            name=excluded.name, purpose=excluded.purpose, standard=excluded.standard,
+            address=excluded.address, postcode=excluded.postcode,
+            lat=excluded.lat, lng=excluded.lng,
+            client_ref=excluded.client_ref, notes=excluded.notes,
+            updated_at=excluded.updated_at
+    ''', {c: a[c] for c in _ASSESSMENT_COLS})
+
+
+def _apply_assessment_legacy(conn, a):
+    """Pre-WP10 peer: keyed on the local id — the pair's ids agree until they
+    diverge, which is exactly the status quo this package replaces. Last
+    payload wins, as before."""
+    for c in ('id', 'name', 'purpose', 'standard', 'address', 'postcode', 'lat',
+              'lng', 'client_ref', 'notes', 'created_at'):
+        a.setdefault(c, None)
+    conn.execute('''
+        INSERT INTO assessments
+            (id,name,purpose,standard,address,postcode,lat,lng,client_ref,notes,created_at)
+        VALUES (:id,:name,:purpose,:standard,:address,:postcode,:lat,:lng,:client_ref,:notes,:created_at)
+        ON CONFLICT(id) DO UPDATE SET
+            name=excluded.name, purpose=excluded.purpose, standard=excluded.standard,
+            address=excluded.address, postcode=excluded.postcode,
+            lat=excluded.lat, lng=excluded.lng,
+            client_ref=excluded.client_ref, notes=excluded.notes
+    ''', a)
+    _adopt_uid(conn, 'assessments', a['id'],
+               uid_for_assessment(a['created_at'], a['name']))
+
+
+def _apply_location(conn, loc):
+    loc = dict(loc)
+    if not loc.get('uid') or not loc.get('assessment_uid'):
+        return _apply_location_legacy(conn, loc)
+    aid = _ensure_assessment(conn, loc['assessment_uid'])
+    if aid is None:
+        return   # parent deleted here — the straggler child loses
+    for c in _LOCATION_COLS:
+        loc.setdefault(c, None)
+    loc['label'] = loc['label'] or ''
+    if not _lww_should_apply(conn, 'assessment_locations', loc['uid'],
+                             loc['updated_at'], loc):
+        return
+    loc['_aid'] = aid
+    conn.execute('''
+        INSERT INTO assessment_locations
+            (uid,assessment_uid,assessment_id,label,description,lat,lng,sort_order,notes,updated_at)
+        VALUES (:uid,:assessment_uid,:_aid,:label,:description,:lat,:lng,:sort_order,:notes,:updated_at)
+        ON CONFLICT(uid) DO UPDATE SET
+            assessment_uid=excluded.assessment_uid,
+            assessment_id=excluded.assessment_id,
+            label=excluded.label, description=excluded.description,
+            lat=excluded.lat, lng=excluded.lng,
+            sort_order=excluded.sort_order, notes=excluded.notes,
+            updated_at=excluded.updated_at
+    ''', {**{c: loc[c] for c in _LOCATION_COLS}, '_aid': aid})
+
+
+def _apply_location_legacy(conn, loc):
+    for c in ('id', 'assessment_id', 'label', 'description', 'lat', 'lng',
+              'sort_order', 'notes'):
+        loc.setdefault(c, None)
+    conn.execute('''
+        INSERT INTO assessment_locations
+            (id,assessment_id,label,description,lat,lng,sort_order,notes)
+        VALUES (:id,:assessment_id,:label,:description,:lat,:lng,:sort_order,:notes)
+        ON CONFLICT(id) DO UPDATE SET
+            label=excluded.label, description=excluded.description,
+            lat=excluded.lat, lng=excluded.lng,
+            sort_order=excluded.sort_order, notes=excluded.notes
+    ''', loc)
+    parent = conn.execute('SELECT uid FROM assessments WHERE id=?',
+                          (loc['assessment_id'],)).fetchone()
+    a_uid = parent['uid'] if parent else None
+    conn.execute('UPDATE assessment_locations SET assessment_uid=? '
+                 'WHERE id=? AND assessment_uid IS NULL', (a_uid, loc['id']))
+    _adopt_uid(conn, 'assessment_locations', loc['id'],
+               uid_for_location(a_uid, loc['label'], loc['sort_order']))
+
+
+def _apply_assessment_run(conn, ar):
+    ar = dict(ar)
+    if not ar.get('uid') or not ar.get('assessment_uid'):
+        return _apply_assessment_run_legacy(conn, ar)
+    aid = _ensure_assessment(conn, ar['assessment_uid'])
+    if aid is None:
+        return   # parent deleted here
+    lid = None
+    if ar.get('location_uid'):
+        lid = _ensure_location(conn, ar['location_uid'], aid)
+        if lid is None:
+            ar['location_uid'] = None   # location deleted here → SET NULL semantics
+    for c in _ARUN_COLS:
+        ar.setdefault(c, None)
+    ar['instrument_serial'] = resolve_serial(ar.get('instrument_serial'), conn)
+    # Both Pis can assign the same run to the same assessment while apart,
+    # each minting its own uid for the one physical link. The stable key
+    # (assessment, date, serial, source_file) says they are the same row;
+    # both sides converge on the lexically smaller uid without talking.
+    if ar['source_file']:
+        ex = conn.execute(
+            'SELECT id, uid, updated_at FROM assessment_runs WHERE assessment_id=? '
+            'AND session_date=? AND instrument_serial=? AND source_file=?',
+            (aid, ar['session_date'], ar['instrument_serial'],
+             ar['source_file'])).fetchone()
+        if ex and ex['uid'] is None:
+            # a legacy row for the same link: adopt the incoming identity
+            conn.execute('UPDATE assessment_runs SET uid=? WHERE id=?',
+                         (ar['uid'], ex['id']))
+        elif ex and ex['uid'] != ar['uid']:
+            if ar['uid'] < ex['uid']:
+                conn.execute('UPDATE assessment_runs SET uid=? WHERE id=?',
+                             (ar['uid'], ex['id']))
+                _clear_conflict(conn, 'assessment_runs', ex['uid'])
+            else:
+                # our uid wins the tie; the peer re-keys its copy the same
+                # way when our row reaches it. Made visible, not silent.
+                _record_conflict(conn, 'assessment_runs', ex['uid'],
+                                 ex['updated_at'], ar['updated_at'], ar)
+                return
+    if not _lww_should_apply(conn, 'assessment_runs', ar['uid'],
+                             ar['updated_at'], ar):
+        return
+    params = {**{c: ar[c] for c in _ARUN_COLS}, '_aid': aid, '_lid': lid}
+    try:
+        conn.execute('''
+            INSERT INTO assessment_runs
+                (uid,assessment_uid,location_uid,assessment_id,location_id,
+                 session_date,instrument_serial,run_number,source_file,conditions,
+                 notes,updated_at)
+            VALUES (:uid,:assessment_uid,:location_uid,:_aid,:_lid,:session_date,
+                    :instrument_serial,:run_number,:source_file,:conditions,
+                    :notes,:updated_at)
+            ON CONFLICT(uid) DO UPDATE SET
+                assessment_uid=excluded.assessment_uid,
+                location_uid=excluded.location_uid,
+                assessment_id=excluded.assessment_id,
+                location_id=excluded.location_id,
+                run_number=excluded.run_number,
+                source_file=COALESCE(excluded.source_file, assessment_runs.source_file),
+                conditions=excluded.conditions, notes=excluded.notes,
+                updated_at=excluded.updated_at
+        ''', params)
+    except sqlite3.IntegrityError:
+        # the stable-key index refused (two links under different uids whose
+        # source_files now collide) — surface it rather than fail the sync
+        _record_conflict(conn, 'assessment_runs', ar['uid'], None,
+                         ar['updated_at'], ar)
+
+
+def _apply_assessment_run_legacy(conn, ar):
+    """A peer on the older schema sends no uid (and possibly no source_file
+    or serial). Same id-keyed apply as before; COALESCE keeps any stored
+    source_file — an old peer's silence must not erase the stable key."""
+    ar = _with_serial(conn, ar)
+    for c in ('id', 'assessment_id', 'location_id', 'session_date',
+              'run_number', 'conditions', 'notes'):
+        ar.setdefault(c, None)
+    conn.execute('''
+        INSERT INTO assessment_runs
+            (id,assessment_id,location_id,session_date,instrument_serial,run_number,
+             source_file,conditions,notes)
+        VALUES (:id,:assessment_id,:location_id,:session_date,:instrument_serial,:run_number,
+                :source_file,:conditions,:notes)
+        ON CONFLICT(id) DO UPDATE SET
+            location_id=excluded.location_id,
+            source_file=COALESCE(excluded.source_file, assessment_runs.source_file),
+            conditions=excluded.conditions, notes=excluded.notes
+    ''', ar)
+    parent = conn.execute('SELECT uid FROM assessments WHERE id=?',
+                          (ar['assessment_id'],)).fetchone()
+    a_uid = parent['uid'] if parent else None
+    conn.execute('''
+        UPDATE assessment_runs SET
+            assessment_uid=COALESCE(assessment_uid, ?),
+            location_uid=COALESCE(location_uid,
+                (SELECT uid FROM assessment_locations l WHERE l.id=location_id))
+        WHERE id=?''', (a_uid, ar['id']))
+    _adopt_uid(conn, 'assessment_runs', ar['id'], uid_for_assessment_run(
+        a_uid, ar['session_date'], ar['instrument_serial'],
+        ar['source_file'], ar['run_number']))
+
+
+def _apply_report_template(conn, t):
+    """Templates replicate by uid since WP10 — there is no legacy fallback
+    because no older peer ever sent one."""
+    t = dict(t)
+    if not t.get('uid'):
+        return
+    for c in _TEMPLATE_COLS:
+        t.setdefault(c, None)
+    t['name'] = t['name'] or ''
+    t['prompt'] = t['prompt'] or ''
+    if not _lww_should_apply(conn, 'report_templates', t['uid'],
+                             t['updated_at'], t):
+        return
+    conn.execute('''
+        INSERT INTO report_templates
+            (uid,name,description,prompt,is_default,created_at,updated_at)
+        VALUES (:uid,:name,:description,:prompt,:is_default,:created_at,:updated_at)
+        ON CONFLICT(uid) DO UPDATE SET
+            name=excluded.name, description=excluded.description,
+            prompt=excluded.prompt, is_default=excluded.is_default,
+            updated_at=excluded.updated_at
+    ''', {c: t[c] for c in _TEMPLATE_COLS})
+
+
+def _apply_uid_tombstones(conn, tombs):
+    """Replay a peer's uid deletes. Caller commits.
+
+    A local row edited *after* the delete survives and is recorded as a
+    conflict — the newer edit re-propagates and clears the peer's tombstone
+    through _lww_should_apply, so both sides converge on the resurrected row.
+    Everything else is deleted (assessment children cascade via FK), and the
+    tombstone is stored locally so the delete keeps propagating. Replay-safe:
+    a tombstone for a uid already gone just refreshes deleted_at via MAX."""
+    for t in tombs:
+        table, uid = t.get('table_name'), t.get('uid')
+        if table not in _UID_TABLES or not uid:
+            continue
+        deleted_at = t.get('deleted_at') or _now(conn)
+        if table in _LWW_TABLES:
+            row = conn.execute(f'SELECT id, updated_at FROM {table} WHERE uid=?',
+                               (uid,)).fetchone()
+            if row is not None and (row['updated_at'] or '') > deleted_at:
+                _record_conflict(conn, table, uid, row['updated_at'], deleted_at,
+                                 {'deleted_at': deleted_at, 'action': 'delete'})
+                continue   # the local edit is newer than the delete — keep it
+            if row is not None:
+                conn.execute(f'DELETE FROM {table} WHERE id=?', (row['id'],))
+        else:   # generated_reports: append-only, no updated_at to weigh
+            conn.execute('DELETE FROM generated_reports WHERE uid=?', (uid,))
+        record_uid_tombstones(conn, table, [uid], deleted_at=deleted_at)
+
+
+def _apply_uid_delete(conn, table, data):
+    """One delete event. uid-keyed from a WP10 peer; an old peer names only
+    the local id — applied as before (ids agree until the pair diverges,
+    which is the pre-WP10 status quo the fallback deliberately preserves)."""
+    if data.get('uid'):
+        _apply_uid_tombstones(conn, [{'table_name': table, 'uid': data['uid'],
+                                      'deleted_at': data.get('deleted_at')}])
+    elif data.get('id') is not None:
+        conn.execute(f'DELETE FROM {table} WHERE id=?', (data['id'],))
+
+
+def get_sync_conflicts():
+    """Rows a peer tried to change here with an older edit (or delete),
+    newest first — the visibility surface behind GET /api/sync-conflicts."""
+    conn = get_db()
+    rows = conn.execute(
+        'SELECT table_name, uid, local_updated_at, remote_updated_at, seen_at, '
+        'payload_json FROM sync_conflicts ORDER BY seen_at DESC, table_name, uid'
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 
 _WEATHER_VALUE_COLS = ('wind_speed', 'wind_dir', 'temp_min', 'temp_max',
@@ -242,11 +652,13 @@ _REPORT_COLS = ('uid', 'session_date', 'instrument_serial', 'run_number',
 def _apply_generated_report(conn, row):
     """Upsert one peer report by uid — never by local id. Caller commits.
 
-    template_id is carried as provenance only: report templates are per-Pi
-    until F6, so the id may name a different (or no) template here;
+    template_id crosses the wire as provenance only: the id may name a
+    different (or no) template here even now that templates replicate;
     template_name is the value everything renders."""
     if not row.get('uid'):
         return   # a row from a pre-WP9 peer has no replication identity
+    if _tombstone_time(conn, 'generated_reports', row['uid']) is not None:
+        return   # deleted here — a straggler copy must not resurrect it (F6)
     row = dict(row)
     row['instrument_serial'] = resolve_serial(row.get('instrument_serial'), conn)
     for c in _REPORT_COLS:
@@ -288,7 +700,11 @@ def _apply_run_tag(conn, rt, coalesce=False):
 
 
 def apply_sync_event(entity, action, data):
-    """Apply a single sync event pushed from the peer after a mutation."""
+    """Apply a single sync event pushed from the peer after a mutation.
+
+    The uid-keyed entities accept both shapes: a WP10 peer sends uids (and
+    LWW timestamps), an older peer sends bare local ids — the fallback keeps
+    a mixed-version pair on the old id-keyed behaviour instead of breaking."""
     # Session deletions run through the same noise_db functions the local
     # routes use, so they record their own tombstone here too and will keep
     # propagating if this Pi has a peer of its own that is currently offline.
@@ -303,47 +719,26 @@ def apply_sync_event(entity, action, data):
     conn = get_db()
     if entity == 'assessment':
         if action == 'upsert':
-            conn.execute('''
-                INSERT INTO assessments
-                    (id,name,purpose,standard,address,postcode,lat,lng,client_ref,notes,created_at)
-                VALUES (:id,:name,:purpose,:standard,:address,:postcode,:lat,:lng,:client_ref,:notes,:created_at)
-                ON CONFLICT(id) DO UPDATE SET
-                    name=excluded.name, purpose=excluded.purpose, standard=excluded.standard,
-                    address=excluded.address, postcode=excluded.postcode,
-                    lat=excluded.lat, lng=excluded.lng,
-                    client_ref=excluded.client_ref, notes=excluded.notes
-            ''', data)
+            _apply_assessment(conn, data)
         elif action == 'delete':
-            conn.execute('DELETE FROM assessments WHERE id=?', (data['id'],))
+            _apply_uid_delete(conn, 'assessments', data)
     elif entity == 'assessment_location':
         if action == 'upsert':
-            conn.execute('''
-                INSERT INTO assessment_locations
-                    (id,assessment_id,label,description,lat,lng,sort_order,notes)
-                VALUES (:id,:assessment_id,:label,:description,:lat,:lng,:sort_order,:notes)
-                ON CONFLICT(id) DO UPDATE SET
-                    label=excluded.label, description=excluded.description,
-                    lat=excluded.lat, lng=excluded.lng,
-                    sort_order=excluded.sort_order, notes=excluded.notes
-            ''', data)
+            _apply_location(conn, data)
         elif action == 'delete':
-            conn.execute('DELETE FROM assessment_locations WHERE id=?', (data['id'],))
+            _apply_uid_delete(conn, 'assessment_locations', data)
     elif entity == 'assessment_run':
         if action == 'upsert':
-            data = _with_serial(conn, data)   # older peer — see above
-            conn.execute('''
-                INSERT INTO assessment_runs
-                    (id,assessment_id,location_id,session_date,instrument_serial,run_number,
-                     source_file,conditions,notes)
-                VALUES (:id,:assessment_id,:location_id,:session_date,:instrument_serial,:run_number,
-                        :source_file,:conditions,:notes)
-                ON CONFLICT(id) DO UPDATE SET
-                    location_id=excluded.location_id,
-                    source_file=COALESCE(excluded.source_file, assessment_runs.source_file),
-                    conditions=excluded.conditions, notes=excluded.notes
-            ''', data)
+            _apply_assessment_run(conn, data)
         elif action == 'delete':
-            conn.execute('DELETE FROM assessment_runs WHERE id=?', (data['id'],))
+            _apply_uid_delete(conn, 'assessment_runs', data)
+    elif entity == 'report_template':
+        # Replicated since WP10 (uid + LWW). An older peer never sends this
+        # entity, and sent none of these events to begin with.
+        if action == 'upsert':
+            _apply_report_template(conn, data)
+        elif action == 'delete':
+            _apply_uid_delete(conn, 'report_templates', data)
     elif entity == 'session_meta':
         if action == 'upsert':
             conn.execute('''
@@ -355,13 +750,14 @@ def apply_sync_event(entity, action, data):
         if action == 'upsert':
             _apply_run_tag(conn, data)
     elif entity == 'generated_report':
-        # Reports replicate by uid (append-only evidence). There is no
-        # 'report_template' entity on purpose — templates stay per-Pi until
-        # the F6 conflict machinery exists.
+        # Reports replicate by uid (append-only evidence). Deletes tombstone
+        # the uid (F6) so a later full sync cannot resurrect the row.
         if action == 'upsert':
             _apply_generated_report(conn, data)
         elif action == 'delete' and data.get('uid'):
-            conn.execute('DELETE FROM generated_reports WHERE uid=?', (data['uid'],))
+            _apply_uid_tombstones(conn, [{'table_name': 'generated_reports',
+                                          'uid': data['uid'],
+                                          'deleted_at': data.get('deleted_at')}])
     conn.commit()
     conn.close()
 

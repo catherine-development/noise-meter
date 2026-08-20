@@ -380,6 +380,8 @@ def api_create_template():
         prompt=(data.get('prompt') or '').strip(),
         is_default=bool(data.get('is_default')),
     )
+    # Templates replicate since WP10 (F6): uid-keyed, LWW on updated_at.
+    sync_event_to_peer('report_template', 'upsert', get_report_template(tid))
     return jsonify({'id': tid})
 
 
@@ -397,13 +399,16 @@ def api_update_template(tid):
         prompt=(data.get('prompt') or '').strip(),
         is_default=data.get('is_default'),
     )
+    sync_event_to_peer('report_template', 'upsert', get_report_template(tid))
     return jsonify({'ok': True})
 
 
 @bp.route('/api/report-templates/<int:tid>', methods=['DELETE'])
 @login_required
 def api_delete_template(tid):
-    delete_report_template(tid)
+    info = delete_report_template(tid)
+    if info:
+        sync_event_to_peer('report_template', 'delete', info)
     return jsonify({'ok': True})
 
 
@@ -651,11 +656,11 @@ def api_list_reports():
 @bp.route('/api/generated-reports/<int:rid>', methods=['DELETE'])
 @login_required
 def api_delete_report(rid):
-    # The uid is read before the row goes: it is the only name the peer knows
-    # the report by (local ids differ per Pi). A pre-WP9 row with no uid never
-    # replicated, so there is nothing to tell the peer about.
-    row = get_generated_report(rid)
-    delete_generated_report(rid)
-    if row and row.get('uid'):
-        sync_event_to_peer('generated_report', 'delete', {'uid': row['uid']})
+    # The delete tombstones the uid (F6) and the event carries it with
+    # deleted_at: the uid is the only name the peer knows the report by
+    # (local ids differ per Pi). A pre-WP9 row with no uid never replicated,
+    # so there is nothing to tell the peer about (info is None).
+    info = delete_generated_report(rid)
+    if info:
+        sync_event_to_peer('generated_report', 'delete', info)
     return jsonify({'ok': True})

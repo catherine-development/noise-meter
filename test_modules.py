@@ -1199,7 +1199,16 @@ def main(meas_root):
               'offline peer deletes the session on full-sync catch-up')
         check(n_of(b, 'runs') == 0, 'peer runs cascaded')
         check(n_of(b, 'assessment_runs') == 0, 'peer assessment_runs cleared')
-        check(n_of(b, 'assessments') == 1, 'peer assessment itself survives')
+        # Pre-WP10 this asserted == 1: the sender's assessment (same local id)
+        # silently overwrote the peer's own on every full sync — the F6
+        # finding. uid-keyed replication keeps the peer's row AND lands the
+        # sender's as rows of their own.
+        check(n_of(b, 'assessments') == n_of(a, 'assessments') + 1,
+              "peer's own assessment survives, and the sender's arrive beside it "
+              '(uid-keyed since WP10)',
+              f"b={n_of(b, 'assessments')}, a={n_of(a, 'assessments')}")
+        check(b.sql("SELECT COUNT(*) FROM assessments WHERE name='Peer side'")[0][0] == 1,
+              "and the peer's row was not renamed by an id collision")
         check(b.tombstones().get(SESSION_DATE) == tomb[SESSION_DATE],
               'peer relays the tombstone with the original deletion time')
 
@@ -2826,8 +2835,10 @@ def main(meas_root):
         _fp15 = xa.sync.get_full_sync_payload()
         check('generated_reports' in _fp15 and 'weather' in _fp15,
               'the full-sync payload carries reports and weather')
-        check('report_templates' not in _fp15,
-              'and deliberately not report templates (per-Pi until F6)')
+        # WP10/F6: templates replicate now too, uid-keyed with LWW — this
+        # asserted their absence while they were still per-Pi.
+        check('report_templates' in _fp15,
+              'and report templates (replicated by uid since WP10/F6)')
         zc = Side(os.path.join(tmp, 'wp9-full.db'))
         zc.sync.apply_full_sync(json.loads(json.dumps(_fp15, default=str)))
         _zrep = [dict(r) for r in zc.sql(
@@ -2861,8 +2872,8 @@ def main(meas_root):
         _rp15 = open(os.path.join(REPO, 'reports.py'), encoding='utf-8').read()
         check("sync_event_to_peer('generated_report', 'upsert', get_generated_report(rid))" in _rp15,
               'the generate route mirrors the saved row to the peer')
-        check("sync_event_to_peer('generated_report', 'delete', {'uid': row['uid']})" in _rp15,
-              'the delete route mirrors the uid')
+        check("sync_event_to_peer('generated_report', 'delete', info)" in _rp15,
+              'the delete route mirrors the uid (with its tombstone time since WP10)')
 
         # ── 15b. migration of a pre-WP9 database ─────────────────────────────
         print('\n15b. migration of a pre-WP9 database')
@@ -2985,6 +2996,444 @@ def main(meas_root):
               and _sp15.index('= import_sessions(sessions)')
                   < _sp15.index('fill_weather_gaps(sessions)'),
               'sync_peer.py gap-fills right after importing the pull')
+
+
+        # ── 16. F6: uid-keyed replication of the mutable hand-entered data ──
+        print('\n16. F6: uid replication — offline creates, LWW, tombstones')
+        # assessments / locations / run links replicated by autoincrement id,
+        # so two Pis creating rows apart collided silently and the next full
+        # sync overwrote one side. Since WP10 they replicate by uid with
+        # last-writer-wins on updated_at; deletes tombstone the uid; stale
+        # writes land in sync_conflicts instead of vanishing.
+        def _wire16(obj):
+            return json.loads(json.dumps(obj, default=str))
+
+        fa = Side(os.path.join(tmp, 'wp10-a.db'))
+        fb = Side(os.path.join(tmp, 'wp10-b.db'))
+        _s16 = _payload_copy('F6-M')
+        fa.db.import_sessions([_wire16(_s16)])
+        fb.db.import_sessions([_wire16(_s16)])
+        _src16 = {r['run_number']: r['source_file'] for r in fa.sql(
+            "SELECT r.run_number, r.source_file FROM runs r "
+            "JOIN sessions s ON s.id=r.session_id WHERE s.instrument_serial='F6-M'")}
+
+        # (a) the two Sides create different assessments while apart
+        aidA = fa.assess.create_assessment('Front garden', standard='bs4142')
+        locA = fa.assess.add_assessment_location(aidA, 'A kerbside')
+        fa.assess.assign_runs(aidA, locA, [(SESSION_DATE, 1, _src16[1], 'F6-M')])
+        aidB = fb.assess.create_assessment('Back terrace')
+        locB = fb.assess.add_assessment_location(aidB, 'B patio')
+        fb.assess.assign_runs(aidB, locB, [(SESSION_DATE, 2, _src16[2], 'F6-M')])
+        uidA = fa.sql('SELECT uid FROM assessments WHERE id=?', aidA)[0][0]
+        uidB = fb.sql('SELECT uid FROM assessments WHERE id=?', aidB)[0][0]
+        check(bool(uidA) and bool(uidB) and uidA != uidB,
+              'each side minted its own uid for its own record')
+
+        fb.sync.apply_full_sync(_wire16(fa.sync.get_full_sync_payload()))
+        fa.sync.apply_full_sync(_wire16(fb.sync.get_full_sync_payload()))
+        for _sd, _nm in ((fa, 'A'), (fb, 'B')):
+            check(_sd.sql('SELECT COUNT(*) FROM assessments')[0][0] == 2,
+                  f'side {_nm} holds both assessments after the exchange')
+        check(sorted(r[0] for r in fa.sql('SELECT uid FROM assessments'))
+              == sorted(r[0] for r in fb.sql('SELECT uid FROM assessments')),
+              'the pair agrees on the uids (no overwrite, no twin)')
+        check(fa.sql('SELECT COUNT(*) FROM assessment_runs ar '
+                     'JOIN assessments a ON a.id=ar.assessment_id '
+                     'WHERE a.uid=ar.assessment_uid')[0][0] == 2
+              and fb.sql('SELECT COUNT(*) FROM assessment_runs ar '
+                         'JOIN assessments a ON a.id=ar.assessment_id '
+                         'WHERE a.uid=ar.assessment_uid')[0][0] == 2,
+              'run links resolved their parents to LOCAL ids by uid on both sides')
+        check(fb.sql('SELECT COUNT(*) FROM assessment_locations al '
+                     'JOIN assessments a ON a.id=al.assessment_id '
+                     'WHERE a.uid=al.assessment_uid')[0][0] == 2,
+              'locations too')
+        fb.sync.apply_full_sync(_wire16(fa.sync.get_full_sync_payload()))
+        check(fb.sql('SELECT COUNT(*) FROM assessments')[0][0] == 2
+              and fb.sql('SELECT COUNT(*) FROM assessment_locations')[0][0] == 2
+              and fb.sql('SELECT COUNT(*) FROM assessment_runs')[0][0] == 2,
+              'a replayed full sync twins nothing')
+
+        # (b) LWW in both directions; the stale write is skipped AND visible.
+        # Timestamps are pinned to yesterday so the real datetime('now') of
+        # every later delete outranks them.
+        for _sd in (fa, fb):
+            _sd.exec("UPDATE assessments SET updated_at='2026-08-19 08:00:00' "
+                     'WHERE uid=?', uidA)
+        fa.assess.update_assessment(aidA, name='Front garden (fixed)',
+                                    purpose='', standard='bs4142', address='',
+                                    postcode='', lat=None, lng=None,
+                                    client_ref='', notes='')
+        fa.exec("UPDATE assessments SET updated_at='2026-08-19 10:00:00' WHERE uid=?", uidA)
+        rowA10 = _wire16(dict(fa.sql('SELECT * FROM assessments WHERE uid=?', uidA)[0]))
+        fb.sync.apply_sync_event('assessment', 'upsert', rowA10)
+        check(fb.sql('SELECT name FROM assessments WHERE uid=?', uidA)[0][0]
+              == 'Front garden (fixed)', 'the newer edit lands on the peer')
+        _stale = dict(rowA10)
+        _stale['name'] = 'Front garden (stale)'
+        _stale['updated_at'] = '2026-08-19 09:00:00'
+        fb.sync.apply_sync_event('assessment', 'upsert', _stale)
+        check(fb.sql('SELECT name FROM assessments WHERE uid=?', uidA)[0][0]
+              == 'Front garden (fixed)', 'a stale incoming write is skipped')
+        _cf = [dict(r) for r in fb.sql(
+            'SELECT * FROM sync_conflicts WHERE uid=?', uidA)]
+        check(len(_cf) == 1 and _cf[0]['remote_updated_at'] == '2026-08-19 09:00:00'
+              and _cf[0]['local_updated_at'] == '2026-08-19 10:00:00',
+              'and recorded in sync_conflicts, not silently dropped', str(_cf))
+        check(json.loads(_cf[0]['payload_json'])['name'] == 'Front garden (stale)',
+              'with the losing payload attached')
+        # the other direction: an even newer edit on B wins on A
+        fb.exec("UPDATE assessments SET name='Front garden (B newer)', "
+                "updated_at='2026-08-19 11:00:00' WHERE uid=?", uidA)
+        fa.sync.apply_sync_event('assessment', 'upsert',
+            _wire16(dict(fb.sql('SELECT * FROM assessments WHERE uid=?', uidA)[0])))
+        check(fa.sql('SELECT name FROM assessments WHERE uid=?', uidA)[0][0]
+              == 'Front garden (B newer)', 'LWW works in the other direction too')
+        # a replayed equal-timestamp row is an idempotent apply, not a conflict
+        check(fa.sql('SELECT COUNT(*) FROM sync_conflicts WHERE uid=?', uidA)[0][0] == 0,
+              'the winning apply cleared any stale conflict entry on A')
+
+        # (c) deletes propagate and do NOT resurrect on a later full sync —
+        # for an assessment (with its children) and for a generated report.
+        rid16 = fa.reports_db.save_generated_report(
+            SESSION_DATE, None, 'WP10 del test', 'claude-sonnet-5', 'none',
+            '{}', 1, 1, 0.0, instrument_serial='F6-M')
+        rowR = fa.reports_db.get_generated_report(rid16)
+        fb.sync.apply_sync_event('generated_report', 'upsert', _wire16(rowR))
+        check(fb.sql('SELECT COUNT(*) FROM generated_reports WHERE uid=?',
+                     rowR['uid'])[0][0] == 1, 'the report replicated to B first')
+        # B goes offline holding everything; capture what it would later send
+        offline_b = _wire16(fb.sync.get_full_sync_payload())
+        infoR = fa.reports_db.delete_generated_report(rid16)
+        check(bool(infoR) and infoR['uid'] == rowR['uid'] and infoR['deleted_at'],
+              'deleting a report returns its uid and tombstone time', str(infoR))
+        infoA = fa.assess.delete_assessment(aidA)
+        check(bool(infoA) and infoA['uid'] == uidA,
+              'deleting an assessment returns its uid', str(infoA))
+        check(fa.sql('SELECT COUNT(*) FROM assessment_locations WHERE assessment_uid=?',
+                     uidA)[0][0] == 0, 'children went with it locally (FK cascade)')
+        fb.sync.apply_sync_event('generated_report', 'delete', _wire16(infoR))
+        fb.sync.apply_sync_event('assessment', 'delete',
+                                 _wire16({'id': aidA, **infoA}))
+        check(fb.sql('SELECT COUNT(*) FROM assessments WHERE uid=?', uidA)[0][0] == 0
+              and fb.sql('SELECT COUNT(*) FROM assessment_locations '
+                         'WHERE assessment_uid=?', uidA)[0][0] == 0
+              and fb.sql('SELECT COUNT(*) FROM generated_reports WHERE uid=?',
+                         rowR['uid'])[0][0] == 0,
+              'the delete events removed assessment, children and report on B')
+        # the offline holder's stale payload must not resurrect anything on A
+        fa.sync.apply_full_sync(offline_b)
+        check(fa.sql('SELECT COUNT(*) FROM assessments WHERE uid=?', uidA)[0][0] == 0,
+              "a stale full sync does not resurrect the deleted assessment")
+        check(fa.sql('SELECT COUNT(*) FROM assessment_locations WHERE assessment_uid=?',
+                     uidA)[0][0] == 0,
+              'nor its children (a tombstoned parent refuses stragglers)')
+        check(fa.sql('SELECT COUNT(*) FROM generated_reports WHERE uid=?',
+                     rowR['uid'])[0][0] == 0,
+              'nor the deleted report — the WP9 resurrect gap is closed')
+        check(fb.sql("SELECT COUNT(*) FROM deleted_uids WHERE table_name='assessments' "
+                     'AND uid=?', uidA)[0][0] == 1,
+              'B stored the tombstone, so the delete keeps propagating')
+
+        # (d) delete vs newer edit: the edit survives as a conflict and wins
+        aidE = fa.assess.create_assessment('Evening site')
+        fa.exec("UPDATE assessments SET updated_at='2026-08-19 08:00:00' WHERE id=?", aidE)
+        uidE = fa.sql('SELECT uid FROM assessments WHERE id=?', aidE)[0][0]
+        fa.sync_rowE = _wire16(dict(fa.sql('SELECT * FROM assessments WHERE id=?', aidE)[0]))
+        fb.sync.apply_sync_event('assessment', 'upsert', fa.sync_rowE)
+        fa.assess.delete_assessment(aidE)                      # deleted_at = real now
+        fb.exec("UPDATE assessments SET name='edited after the delete', "
+                "updated_at=datetime('now', '+1 hour') WHERE uid=?", uidE)
+        fb.sync.apply_full_sync(_wire16(fa.sync.get_full_sync_payload()))
+        check(fb.sql('SELECT COUNT(*) FROM assessments WHERE uid=?', uidE)[0][0] == 1,
+              'a local edit NEWER than the delete survives the tombstone')
+        check(fb.sql("SELECT COUNT(*) FROM sync_conflicts WHERE uid=?", uidE)[0][0] == 1,
+              'and the divergence is recorded as a conflict')
+        fa.sync.apply_full_sync(_wire16(fb.sync.get_full_sync_payload()))
+        check(fa.sql('SELECT name FROM assessments WHERE uid=?', uidE)[0][0]
+              == 'edited after the delete',
+              'the newer edit re-propagates and resurrects the row on A')
+        check(fa.sql("SELECT COUNT(*) FROM deleted_uids WHERE table_name='assessments' "
+                     'AND uid=?', uidE)[0][0] == 0,
+              "clearing A's tombstone — both sides converge on the edit")
+
+        # (e) report templates: defaults unified, user templates replicate
+        check(sorted(r[0] for r in fa.sql('SELECT uid FROM report_templates'))
+              == sorted(r[0] for r in fb.sql('SELECT uid FROM report_templates')),
+              'the seeded default templates carry identical deterministic uids')
+        tid16 = fa.reports_db.save_report_template('WP10 user tpl', 'd', 'prompt X {{session_data}}', 0)
+        fa.exec("UPDATE report_templates SET updated_at='2026-08-19 08:00:00' WHERE id=?", tid16)
+        rowT1 = _wire16(dict(fa.sql('SELECT * FROM report_templates WHERE id=?', tid16)[0]))
+        fb.sync.apply_sync_event('report_template', 'upsert', rowT1)
+        check(fb.sql("SELECT COUNT(*) FROM report_templates")[0][0] == 4
+              and fb.sql('SELECT name FROM report_templates WHERE uid=?',
+                         rowT1['uid'])[0][0] == 'WP10 user tpl',
+              'a user template replicates as its own record (defaults did not twin)')
+        fa.reports_db.update_report_template(tid16, 'WP10 user tpl v2', 'd',
+                                             'prompt X {{session_data}}', None)
+        fa.exec("UPDATE report_templates SET updated_at='2026-08-19 09:00:00' WHERE id=?", tid16)
+        fb.sync.apply_sync_event('report_template', 'upsert',
+            _wire16(dict(fa.sql('SELECT * FROM report_templates WHERE id=?', tid16)[0])))
+        check(fb.sql('SELECT name FROM report_templates WHERE uid=?',
+                     rowT1['uid'])[0][0] == 'WP10 user tpl v2',
+              'a template edit reaches the peer (LWW applies)')
+        fb.sync.apply_sync_event('report_template', 'upsert', rowT1)   # stale replay
+        check(fb.sql('SELECT name FROM report_templates WHERE uid=?',
+                     rowT1['uid'])[0][0] == 'WP10 user tpl v2',
+              'a stale template row is skipped')
+        infoT = fa.reports_db.delete_report_template(tid16)
+        fb.sync.apply_sync_event('report_template', 'delete', _wire16(infoT))
+        check(fb.sql('SELECT COUNT(*) FROM report_templates WHERE uid=?',
+                     rowT1['uid'])[0][0] == 0
+              and fb.sql('SELECT COUNT(*) FROM report_templates')[0][0] == 3,
+              'a template delete propagates, leaving the defaults alone')
+        fb.sync.apply_full_sync(_wire16(fb.sync.get_full_sync_payload()))
+        check(fb.sql('SELECT COUNT(*) FROM report_templates')[0][0] == 3,
+              'and its tombstone holds against a full sync')
+        _rp16 = open(os.path.join(REPO, 'reports.py'), encoding='utf-8').read()
+        check(_rp16.count("sync_event_to_peer('report_template', 'upsert'") == 2
+              and "sync_event_to_peer('report_template', 'delete'" in _rp16,
+              'the template CRUD routes mirror to the peer')
+
+        # ── 16b. migration: the pair unifies, and re-migration twins nothing ─
+        print('\n16b. pre-WP10 rows unify under one deterministic uid')
+        _PRE16 = """
+            CREATE TABLE assessments(id INTEGER PRIMARY KEY, name TEXT NOT NULL,
+              purpose TEXT, standard TEXT DEFAULT 'noise_act', address TEXT,
+              postcode TEXT, lat REAL, lng REAL, client_ref TEXT, notes TEXT,
+              created_at TEXT DEFAULT (datetime('now','localtime')));
+            CREATE TABLE assessment_locations(id INTEGER PRIMARY KEY,
+              assessment_id INTEGER NOT NULL REFERENCES assessments(id) ON DELETE CASCADE,
+              label TEXT NOT NULL, description TEXT, lat REAL, lng REAL,
+              sort_order INTEGER DEFAULT 0, notes TEXT);
+            CREATE TABLE assessment_runs(id INTEGER PRIMARY KEY,
+              assessment_id INTEGER NOT NULL REFERENCES assessments(id) ON DELETE CASCADE,
+              location_id INTEGER REFERENCES assessment_locations(id) ON DELETE SET NULL,
+              session_date TEXT NOT NULL, instrument_serial TEXT NOT NULL DEFAULT '',
+              run_number INTEGER, source_file TEXT, conditions TEXT, notes TEXT);
+            CREATE TABLE report_templates(id INTEGER PRIMARY KEY, name TEXT NOT NULL,
+              description TEXT, prompt TEXT NOT NULL, is_default INTEGER DEFAULT 0,
+              created_at TEXT DEFAULT (datetime('now')),
+              updated_at TEXT DEFAULT (datetime('now')));
+            CREATE TABLE app_settings(key TEXT PRIMARY KEY, value TEXT);
+            INSERT INTO app_settings VALUES('instrument_serial','1402755');
+            INSERT INTO assessments(id,name,standard,created_at)
+              VALUES(1,'Shared site','bs4142','2026-08-01 10:00:00'),
+                    (2,'Shared site','bs4142','2026-08-01 10:00:00');
+            INSERT INTO assessment_locations(id,assessment_id,label,sort_order)
+              VALUES(1,1,'Kerbside',0);
+            INSERT INTO assessment_runs(id,assessment_id,location_id,session_date,
+                                        instrument_serial,run_number,source_file)
+              VALUES(1,1,1,'2026-08-12','1402755',1,'PROJ0001');
+            INSERT INTO report_templates(id,name,prompt)
+              VALUES(1,'Shared user template','P {{session_data}}');
+        """
+        _pa16 = os.path.join(tmp, 'prewp10-a.db')
+        _pb16 = os.path.join(tmp, 'prewp10-b.db')
+        for _pp in (_pa16, _pb16):
+            _cx = _sq.connect(_pp); _cx.executescript(_PRE16); _cx.commit(); _cx.close()
+        pa = Side(_pa16)
+        pb = Side(_pb16)
+        _ua16 = {r['id']: r['uid'] for r in pa.sql('SELECT id, uid FROM assessments')}
+        _ub16 = {r['id']: r['uid'] for r in pb.sql('SELECT id, uid FROM assessments')}
+        check(all(_ua16.values()) and _ua16 == _ub16,
+              'both Pis compute the same uids for their id-replicated rows',
+              str(_ua16))
+        check(_ua16[1] != _ua16[2],
+              'two local rows with identical seed fields stay distinct (|dup suffix)')
+        check(pa.sql('SELECT uid FROM assessment_locations')[0][0]
+              == pb.sql('SELECT uid FROM assessment_locations')[0][0]
+              and pa.sql('SELECT uid FROM assessment_runs')[0][0]
+              == pb.sql('SELECT uid FROM assessment_runs')[0][0],
+              'and for the child rows, seeded through the parent uid')
+        check(pa.sql("SELECT uid FROM report_templates WHERE name='Shared user template'")[0][0]
+              == pb.sql("SELECT uid FROM report_templates WHERE name='Shared user template'")[0][0],
+              'an identical user template unifies; distinct content would not')
+        check(pa.sql('SELECT assessment_uid FROM assessment_runs')[0][0] == _ua16[1],
+              'the uid FK references were populated from the local int FKs')
+        _pre_counts = {t: pb.sql(f'SELECT COUNT(*) FROM {t}')[0][0]
+                       for t in ('assessments', 'assessment_locations',
+                                 'assessment_runs', 'report_templates')}
+        pb.sync.apply_full_sync(_wire16(pa.sync.get_full_sync_payload()))
+        _post_counts = {t: pb.sql(f'SELECT COUNT(*) FROM {t}')[0][0]
+                        for t in _pre_counts}
+        check(_pre_counts == _post_counts,
+              'the first post-migration full sync twins nothing',
+              f'{_pre_counts} vs {_post_counts}')
+        pa.db.init_db()   # idempotency: a second migration pass
+        check({r['id']: r['uid'] for r in pa.sql('SELECT id, uid FROM assessments')} == _ua16,
+              're-running the migration keeps every uid (identity, not state)')
+
+        # ── 16c. mixed-version: id-keyed events from an old peer still apply ─
+        print('\n16c. id-keyed events from a pre-WP10 peer still apply')
+        fo = Side(os.path.join(tmp, 'wp10-old.db'))
+        _oldA = {'id': 501, 'name': 'Old peer site', 'purpose': None,
+                 'standard': 'noise_act', 'address': None, 'postcode': None,
+                 'lat': None, 'lng': None, 'client_ref': None, 'notes': None,
+                 'created_at': '2026-08-01 09:00:00'}
+        fo.sync.apply_sync_event('assessment', 'upsert', dict(_oldA))
+        _got = fo.sql('SELECT * FROM assessments WHERE id=501')
+        check(len(_got) == 1 and _got[0]['name'] == 'Old peer site',
+              'an id-keyed assessment event (no uid) applies as before')
+        check(_got[0]['uid'] == fo.db.uid_for_assessment('2026-08-01 09:00:00',
+                                                         'Old peer site'),
+              "and the row adopts the deterministic uid the old peer's own "
+              'migration will compute — so the copies unify, not twin')
+        fo.sync.apply_sync_event('assessment_location', 'upsert', {
+            'id': 301, 'assessment_id': 501, 'label': 'L1', 'description': None,
+            'lat': None, 'lng': None, 'sort_order': 0, 'notes': None})
+        _gl = fo.sql('SELECT * FROM assessment_locations WHERE id=301')[0]
+        check(_gl['assessment_uid'] == _got[0]['uid']
+              and _gl['uid'] == fo.db.uid_for_location(_got[0]['uid'], 'L1', 0),
+              'an id-keyed location event resolves and adopts uids too')
+        fo.sync.apply_sync_event('assessment_run', 'upsert', {
+            'id': 401, 'assessment_id': 501, 'location_id': 301,
+            'session_date': SESSION_DATE, 'run_number': 1,
+            'conditions': None, 'notes': None})
+        _gr16 = fo.sql('SELECT * FROM assessment_runs WHERE id=401')[0]
+        check(_gr16['assessment_uid'] == _got[0]['uid'] and bool(_gr16['uid']),
+              'an id-keyed run-link event (no source_file, no serial) applies')
+        fo.sync.apply_sync_event('assessment_run', 'delete', {'id': 401})
+        fo.sync.apply_sync_event('assessment', 'delete', {'id': 501})
+        check(fo.sql('SELECT COUNT(*) FROM assessments WHERE id=501')[0][0] == 0
+              and fo.sql('SELECT COUNT(*) FROM assessment_locations')[0][0] == 0,
+              'id-keyed deletes still apply (with the FK cascade)')
+        # out-of-order arrival: a child event before its parent gets a stub
+        fo.sync.apply_sync_event('assessment_location', 'upsert', {
+            'uid': 'loc-first', 'assessment_uid': 'parent-later',
+            'label': 'Early bird', 'description': None, 'lat': None, 'lng': None,
+            'sort_order': 0, 'notes': None, 'updated_at': '2026-08-19 09:00:00'})
+        _stub = fo.sql("SELECT name, updated_at FROM assessments WHERE uid='parent-later'")
+        check(len(_stub) == 1 and _stub[0]['name'] == '(pending sync)'
+              and _stub[0]['updated_at'] is None,
+              'a child arriving first creates a stub parent any real upsert outranks')
+        fo.sync.apply_sync_event('assessment', 'upsert', {
+            'uid': 'parent-later', 'name': 'The real parent',
+            'created_at': '2026-08-19 08:00:00', 'updated_at': '2026-08-19 08:30:00'})
+        check(fo.sql("SELECT name FROM assessments WHERE uid='parent-later'")[0][0]
+              == 'The real parent'
+              and fo.sql('SELECT COUNT(*) FROM assessments')[0][0] == 1,
+              'the real parent fills the stub in place — one row, not two')
+
+        # ── 16d. the routes: /api/sync-conflicts and /api/users-sync ─────────
+        print('\n16d. conflict visibility and user sync over HTTP')
+        sys.modules.pop('noise_app', None)
+        fr = Side(os.path.join(tmp, 'wp10-route.db'))
+        fr.exec('INSERT INTO sync_conflicts (table_name, uid, local_updated_at, '
+                "remote_updated_at, payload_json) VALUES ('assessments', 'u-16d', "
+                "'2026-08-19 10:00:00', '2026-08-19 09:00:00', '{}')")
+        _app16 = importlib.import_module('noise_app').app
+        _app16.config['TESTING'] = True
+        _cl16 = _app16.test_client()
+        with _cl16.session_transaction() as _s:
+            _s['user'] = 'test'
+            _s['logged_in'] = True
+            _s['_csrf_token'] = SUITE_CSRF
+        _r = _cl16.get('/api/sync-conflicts')
+        check(_r.status_code == 200, '/api/sync-conflicts answers a login', str(_r.status_code))
+        _body = _r.get_json()
+        check(isinstance(_body, list) and len(_body) == 1
+              and _body[0]['uid'] == 'u-16d'
+              and _body[0]['remote_updated_at'] == '2026-08-19 09:00:00',
+              'and lists the recorded conflict', str(_body))
+
+        import webauth as _wa16
+        import users_sync as _us16
+        _saved_key16 = _wa16.IMPORT_KEY
+        _saved_fdb = os.environ.get('FLIGHTS_DB_PATH')
+        _wa16.IMPORT_KEY = 'wp10-users-key'
+        try:
+            _absent = os.path.join(tmp, 'no-flights-here.db')
+            os.environ['FLIGHTS_DB_PATH'] = _absent
+            _r = _cl16.get('/api/users-sync',
+                           headers={'X-Import-Key': 'wp10-users-key'})
+            check(_r.status_code == 200 and _r.get_json() == {'users': [], 'count': 0},
+                  'with no flights DB the route is a clean empty 200',
+                  str(_r.get_json()))
+            check(not os.path.exists(_absent),
+                  'and serving it never CREATED a flights database')
+            _r = _cl16.get('/api/users-sync')
+            check(_r.status_code == 403, 'the route requires the API key',
+                  str(_r.status_code))
+
+            # ── 16e. user sync itself, on fake flight-tracker databases ──────
+            print('\n16e. flight-tracker user rows: additive-only replication')
+            _USERS_SCHEMA = ('CREATE TABLE users (id INTEGER PRIMARY KEY, '
+                             'email TEXT UNIQUE NOT NULL, is_admin INTEGER DEFAULT 0, '
+                             'is_active INTEGER DEFAULT 1, invited_by INTEGER, '
+                             'created_at TEXT, name TEXT, phone TEXT, status TEXT, '
+                             'digest_enabled INTEGER, digest_hour INTEGER);')
+            _fda = os.path.join(tmp, 'flights-a.db')
+            _fdb = os.path.join(tmp, 'flights-b.db')
+            _cx = _sq.connect(_fda)
+            _cx.executescript(_USERS_SCHEMA + """
+                INSERT INTO users (id,email,is_admin,is_active,invited_by,created_at,
+                                   name,phone,status,digest_enabled,digest_hour)
+                VALUES (1,'catherine@ives.org.uk',1,0,NULL,'2026-01-01',
+                        'Catherine Ives-Yim','+44 7700 900001','active',1,7),
+                       (2,'newuser@example.org',0,1,1,'2026-08-19',
+                        'New User','+44 7700 900002','invited',0,NULL),
+                       (3,'gapfill@example.org',0,1,1,'2026-05-01',
+                        'Gap Fill',NULL,'active',NULL,NULL);
+            """)
+            _cx.commit(); _cx.close()
+            _cx = _sq.connect(_fdb)
+            _cx.executescript(_USERS_SCHEMA + """
+                INSERT INTO users (id,email,is_admin,is_active,invited_by,created_at,
+                                   name,phone,status,digest_enabled,digest_hour)
+                VALUES (7,'catherine@ives.org.uk',1,1,NULL,'2026-01-01',
+                        'Catherine Ives-Yim','+44 7700 900001','active',1,7),
+                       (9,'gapfill@example.org',0,1,7,'2026-05-01',
+                        NULL,'+44 7700 999999','active',NULL,NULL);
+            """)
+            _cx.commit(); _cx.close()
+
+            os.environ['FLIGHTS_DB_PATH'] = _fda
+            _rows16 = _us16.export_users()
+            check(len(_rows16) == 3
+                  and all('id' not in r and 'invited_by' not in r for r in _rows16),
+                  'the export carries every user minus the per-Pi id columns',
+                  str(sorted(_rows16[0])))
+            _rows_wire = _wire16(_rows16)   # as the JSON hop delivers them
+
+            os.environ['FLIGHTS_DB_PATH'] = _fdb
+            _res16 = _us16.apply_users(_rows_wire)
+            check(_res16 == {'inserted': 1, 'filled': 1},
+                  'one new user inserted, one NULL gap filled', str(_res16))
+            _cx = _sq.connect(_fdb); _cx.row_factory = _sq.Row
+            _bu = {r['email']: dict(r) for r in _cx.execute('SELECT * FROM users')}
+            _cx.close()
+            check(len(_bu) == 3 and _bu['newuser@example.org']['name'] == 'New User'
+                  and _bu['newuser@example.org']['is_admin'] == 0,
+                  "the new user landed on B with A's values")
+            check(_bu['gapfill@example.org']['name'] == 'Gap Fill',
+                  "B's NULL name was filled from A")
+            check(_bu['gapfill@example.org']['phone'] == '+44 7700 999999',
+                  "B's non-NULL phone was NOT overwritten by A's NULL")
+            check(_bu['catherine@ives.org.uk']['is_active'] == 1,
+                  'is_active does NOT propagate: deactivation stays per-Pi',
+                  'A holds is_active=0, B keeps 1 by design')
+            _res16 = _us16.apply_users(_rows_wire)
+            check(_res16 == {'inserted': 0, 'filled': 0},
+                  'a second apply is a no-op (no duplicates, no re-fills)')
+
+            os.environ['FLIGHTS_DB_PATH'] = _absent
+            check(_us16.export_users() == [], 'export with no DB returns []')
+            check(_us16.apply_users(_rows_wire) == {'inserted': 0, 'filled': 0}
+                  and not os.path.exists(_absent),
+                  'apply with no DB is a no-op and creates nothing')
+            _sp16 = open(os.path.join(REPO, 'sync_peer.py'), encoding='utf-8').read()
+            check('/api/users-sync' in _sp16 and 'apply_users(' in _sp16,
+                  'the 15-minute pull applies the user sync')
+            _pc16 = open(os.path.join(REPO, 'peer_client.py'), encoding='utf-8').read()
+            check('/api/users-sync' in _pc16 and 'apply_users(' in _pc16,
+                  'and so does the startup catch-up')
+        finally:
+            _wa16.IMPORT_KEY = _saved_key16
+            if _saved_fdb is None:
+                os.environ.pop('FLIGHTS_DB_PATH', None)
+            else:
+                os.environ['FLIGHTS_DB_PATH'] = _saved_fdb
 
         print(f'\nAll {_checks} checks passed.')
     finally:
