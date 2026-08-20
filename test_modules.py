@@ -3012,8 +3012,10 @@ def main(meas_root):
         check(_wxmod15.fill_weather_gaps(_plnc, fetch=_boom15) == [],
               'a failing fetch is contained (best-effort)')
         _sp15 = open(os.path.join(REPO, 'sync_peer.py'), encoding='utf-8').read()
+        # WP14: the tick's import call is origin='peer' now — same ordering
+        # assertion, updated substring.
         check('fill_weather_gaps(sessions)' in _sp15
-              and _sp15.index('= import_sessions(sessions)')
+              and _sp15.index("= import_sessions(sessions, origin='peer')")
                   < _sp15.index('fill_weather_gaps(sessions)'),
               'sync_peer.py gap-fills right after importing the pull')
 
@@ -4367,17 +4369,416 @@ def main(meas_root):
             check(r3_18.sql('SELECT COUNT(*) FROM generated_reports WHERE uid=?',
                             _rrow18['uid'])[0][0] == 1,
                   "an old peer's full payload still lands reports (fallback path)")
+            # WP14/F3: the light pull + digest diff + chunked fetch moved into
+            # sync_db.pull_full_sync_from_peer(), shared by the tick and the
+            # startup sync — assert the endpoints live there and the tick
+            # calls the helper.
             _sp18b = open(os.path.join(REPO, 'sync_peer.py'), encoding='utf-8').read()
-            check('/api/peer-sync-full?light=1' in _sp18b
-                  and 'generated_reports_digest' in _sp18b
-                  and '/api/reports-sync?uids=' in _sp18b,
-                  'the 15-minute tick pulls light and fetches the digest gaps')
+            _sd18b = open(os.path.join(REPO, 'sync_db.py'), encoding='utf-8').read()
+            check('pull_full_sync_from_peer(PEER_URL, IMPORT_KEY' in _sp18b
+                  and '/api/peer-sync-full?light=1' in _sd18b
+                  and 'generated_reports_digest' in _sd18b
+                  and '/api/reports-sync?uids=' in _sd18b,
+                  'the 15-minute tick pulls light and fetches the digest gaps '
+                  '(via the shared helper since WP14)')
         finally:
             _wa18.IMPORT_KEY = _saved_key18
             if _saved_pi18 is None:
                 os.environ.pop('PI_NAME', None)
             else:
                 os.environ['PI_NAME'] = _saved_pi18
+
+        # ── 20. WP14: operator restoration vs peer replay (F1, F2, F3, F4) ───
+        print('\n20. WP14/F1: a peer measurement replay cannot bypass the meta stamp gate')
+        # import_sessions' metadata COALESCE overwrote non-null stored values
+        # WITHOUT touching meta_updated_at/meta_writer — so a peer's stale
+        # copy, arriving through the measurement pull, replaced a newer hand
+        # edit and then CARRIED the newer stamp: the corruption replicated
+        # onward as the apparent LWW winner. Since WP14 the caller declares
+        # its origin: operator imports overwrite AND stamp (a first-class LWW
+        # write); peer replay routes metadata through the stamp gate.
+        import webauth as _wa20
+        import urllib.request as _ur20
+        from datetime import datetime as _dt20
+        _saved_key20 = _wa20.IMPORT_KEY
+        _saved_pi20 = os.environ.get('PI_NAME')
+        _saved_urlopen20 = _ur20.urlopen
+        try:
+            os.environ['PI_NAME'] = 'wp14-a'
+            qa = Side(os.path.join(tmp, 'wp14-f1-a.db'))
+            qb = Side(os.path.join(tmp, 'wp14-f1-b.db'))
+            for _sd20 in (qa, qb):
+                _sd20.db.import_sessions([_w18(_payload_copy('WP14-F1'))],
+                                         metadata=META)
+
+            _pull20 = _w18(qb.db.get_sessions_since('1970-01-01 00:00:00'))
+            check(all(k in _pull20[0] for k in
+                      ('imported_at', 'meta_updated_at', 'meta_writer')),
+                  'get_sessions_since carries imported_at and the meta stamps '
+                  '(the WP14 wire keys)', str(sorted(_pull20[0].keys())))
+
+            # the exact F1 repro: a newer stamped hand edit here, the peer
+            # holding the stale copy under an older stamp
+            os.environ['PI_NAME'] = 'review-a'
+            _edit20 = qa.db.update_session_metadata(
+                SESSION_DATE, 'Catherine Ives-Yim', 'NEW HAND EDIT', 'LS1 1AA',
+                53.8, -1.55, notes='the newer edit', serial='WP14-F1')
+            qb.exec("UPDATE sessions SET recorder_name='Stale Name', "
+                    "location_label='STALE COPY', "
+                    "meta_updated_at='2020-01-01 00:00:00.000', "
+                    "meta_writer='old-writer' WHERE instrument_serial='WP14-F1'")
+            _stale_pull20 = _w18(qb.db.get_sessions_since('1970-01-01 00:00:00'))
+            qa.db.import_sessions(_stale_pull20, origin='peer')
+            _row20 = dict(qa.sql(
+                'SELECT recorder_name, location_label, notes, meta_updated_at, '
+                "meta_writer FROM sessions WHERE instrument_serial='WP14-F1'")[0])
+            check(_row20['location_label'] == 'NEW HAND EDIT'
+                  and _row20['notes'] == 'the newer edit'
+                  and _row20['meta_updated_at'] == _edit20['meta_updated_at']
+                  and _row20['meta_writer'] == 'review-a',
+                  "a peer measurement replay of the stale copy loses to the "
+                  'newer stamped hand edit — values AND stamps untouched (F1: '
+                  'the old COALESCE overwrote the values and kept the newer '
+                  'stamp, spreading the stale copy as the LWW winner)',
+                  str(_row20))
+            # the same path DOES apply a genuinely newer stamped copy
+            _fresh_pull20 = _w18(qa.db.get_sessions_since('1970-01-01 00:00:00'))
+            qb.db.import_sessions(_fresh_pull20, origin='peer')
+            _brow20 = dict(qb.sql(
+                'SELECT location_label, meta_updated_at, meta_writer '
+                "FROM sessions WHERE instrument_serial='WP14-F1'")[0])
+            check(_brow20['location_label'] == 'NEW HAND EDIT'
+                  and _brow20['meta_updated_at'] == _edit20['meta_updated_at']
+                  and _brow20['meta_writer'] == 'review-a',
+                  'a strictly newer stamped copy applies through the same '
+                  'peer path, stamps riding along', str(_brow20))
+
+            # the operator path DOES update — and stamps the change
+            os.environ['PI_NAME'] = 'wp14-a'
+            _card20 = _w18(_payload_copy('WP14-F1'))
+            _card20['loc'] = 'From the card'
+            qa.db.import_sessions([_card20])   # origin='operator', the default
+            _orow20 = dict(qa.sql(
+                'SELECT location_label, meta_updated_at, meta_writer '
+                "FROM sessions WHERE instrument_serial='WP14-F1'")[0])
+            check(_orow20['location_label'] == 'From the card'
+                  and _orow20['meta_updated_at'] > _edit20['meta_updated_at']
+                  and _orow20['meta_writer'] == 'wp14-a',
+                  'an operator import still overwrites — and now stamps the '
+                  'change, so it replicates as a first-class LWW write',
+                  str(_orow20))
+            # …but a metadata-less re-import changes nothing and bumps nothing
+            qa.db.import_sessions([_w18(_payload_copy('WP14-F1'))])
+            check(qa.sql('SELECT meta_updated_at FROM sessions '
+                         "WHERE instrument_serial='WP14-F1'")[0][0]
+                  == _orow20['meta_updated_at'],
+                  'an operator re-import that changes no value does not bump '
+                  'the stamp (no phantom edits)')
+
+            # stampless old-peer payload: fill-NULL-only, no stamp invented
+            _old20 = _w18(_payload_copy('WP14-U'))
+            _old20['loc'] = 'Old fills'
+            for k in ('imported_at', 'meta_updated_at', 'meta_writer'):
+                _old20.pop(k, None)
+            qa.db.import_sessions([_old20], origin='peer')
+            _urow20 = dict(qa.sql(
+                'SELECT location_label, meta_updated_at FROM sessions '
+                "WHERE instrument_serial='WP14-U'")[0])
+            check(_urow20['location_label'] == 'Old fills'
+                  and _urow20['meta_updated_at'] is None,
+                  'a stampless (old-peer) payload still fills a never-edited '
+                  'row, without inventing a stamp', str(_urow20))
+            os.environ['PI_NAME'] = 'review-a'
+            qa.db.update_session_metadata(
+                SESSION_DATE, None, 'Edited since', None, None, None,
+                notes=None, serial='WP14-U')   # a stamped edit that CLEARS fields
+            _old20['loc'] = 'Stale again'
+            _old20['name'] = 'Ghost'
+            qa.db.import_sessions([_old20], origin='peer')
+            _urow20 = dict(qa.sql(
+                'SELECT recorder_name, location_label FROM sessions '
+                "WHERE instrument_serial='WP14-U'")[0])
+            check(_urow20['location_label'] == 'Edited since'
+                  and _urow20['recorder_name'] is None,
+                  'a stampless payload cannot touch a stamped row — not even '
+                  'to fill a field the edit deliberately cleared', str(_urow20))
+
+            # ── 20b. F2: replay cannot resurrect; operator restoration wins ──
+            print('\n20b. WP14/F2: peer replay cannot resurrect a deletion; '
+                  'an operator restoration converges')
+            # WP12's watermark overlap re-sends the recent past on purpose.
+            # import_sessions dropped the session tombstone unconditionally
+            # ("importing supersedes deletion"), so a peer replay of a
+            # recently-imported-then-deleted session resurrected it
+            # (reproduced: 0 sessions / 1 tombstone → 1 session / 0
+            # tombstones). Now only an operator — or a copy that proves, by
+            # its sender imported_at, that it postdates the deletion — may
+            # restore.
+            ra = Side(os.path.join(tmp, 'wp14-f2-a.db'))
+            rb = Side(os.path.join(tmp, 'wp14-f2-b.db'))
+            ra.db.import_sessions([_w18(_payload_copy('WP14-F2'))])
+            rb.db.import_sessions(
+                _w18(ra.db.get_sessions_since('1970-01-01 00:00:00')),
+                origin='peer')
+            # the peer's copy predates the deletion (imported earlier)
+            rb.exec("UPDATE sessions SET imported_at='2026-01-01 00:00:00' "
+                    "WHERE instrument_serial='WP14-F2'")
+            _replay20 = _w18(rb.db.get_sessions_since('1970-01-01 00:00:00'))
+            ra.db.delete_session(SESSION_DATE, serial='WP14-F2')
+
+            def _state20(side):
+                return (side.sql('SELECT COUNT(*) FROM sessions '
+                                 "WHERE instrument_serial='WP14-F2'")[0][0],
+                        side.sql('SELECT COUNT(*) FROM deleted_sessions '
+                                 "WHERE instrument_serial='WP14-F2'")[0][0])
+
+            check(_state20(ra) == (0, 1), 'deleted: 0 sessions, 1 tombstone')
+            _n20 = ra.db.import_sessions(_replay20, origin='peer')
+            check(_state20(ra) == (0, 1) and int(_n20) == 0,
+                  'a peer replay inside the watermark overlap does NOT '
+                  'resurrect the deletion (the exact F2 repro, inverted)',
+                  str(_state20(ra)))
+            _nostamp20 = _w18(_replay20)
+            for _s20 in _nostamp20:
+                _s20.pop('imported_at', None)
+            ra.db.import_sessions(_nostamp20, origin='peer')
+            check(_state20(ra) == (0, 1),
+                  'a stampless (old-peer) payload can never resurrect')
+            _newer20 = _w18(_replay20)
+            for _s20 in _newer20:
+                _s20['imported_at'] = '2030-01-01 00:00:00'
+            ra.db.import_sessions(_newer20, origin='peer')
+            check(_state20(ra) == (1, 0),
+                  'a copy whose sender imported_at postdates the deletion '
+                  'restores and clears the tombstone (>= — the '
+                  '_apply_tombstones convention, so both Pis pick the same '
+                  'survivor)', str(_state20(ra)))
+
+            # the WP1-era scenario, kept working: operator restores, and the
+            # restoration propagates instead of being re-deleted
+            ra.db.delete_session(SESSION_DATE, serial='WP14-F2')
+            rb.exec("UPDATE sessions SET imported_at='2026-01-01 00:00:00' "
+                    "WHERE instrument_serial='WP14-F2'")
+            rb.sync.apply_full_sync(_w18(ra.sync.get_full_sync_payload()))
+            check(_state20(ra) == (0, 1) and _state20(rb) == (0, 1),
+                  'the deletion replicated: both Pis deleted and tombstoned')
+            ra.db.import_sessions([_w18(_payload_copy('WP14-F2'))])   # operator
+            check(_state20(ra) == (1, 0),
+                  'an operator re-import restores the date and clears the '
+                  'tombstone (deliberate restoration)')
+            # do_upload's immediate push relays the restore as operator-relay
+            rb.db.import_sessions([_w18(_payload_copy('WP14-F2'))],
+                                  origin='operator-relay')
+            check(_state20(rb) == (1, 0),
+                  "the relay clears the peer's tombstone too — both Pis "
+                  'converge on restored')
+            ra.sync.apply_full_sync(_w18(rb.sync.get_full_sync_payload()))
+            rb.sync.apply_full_sync(_w18(ra.sync.get_full_sync_payload()))
+            check(_state20(ra) == (1, 0) and _state20(rb) == (1, 0),
+                  'and no later full sync re-deletes the restoration')
+            # had the relay never arrived, the next measurement pull restores:
+            # the fresh operator import's imported_at postdates the tombstone
+            rb.db.delete_session(SESSION_DATE, serial='WP14-F2')
+            ra.exec("UPDATE sessions SET imported_at='2030-01-01 00:00:00' "
+                    "WHERE instrument_serial='WP14-F2'")
+            rb.db.import_sessions(
+                _w18(ra.db.get_sessions_since('1970-01-01 00:00:00')),
+                origin='peer')
+            check(_state20(rb) == (1, 0),
+                  'if the relay is lost, the pull restores anyway — the '
+                  'operator import is provably newer than the deletion')
+
+            try:
+                ra.db.import_sessions([], origin='bogus')
+                check(False, 'import_sessions refuses an unknown origin')
+            except ValueError:
+                check(True, 'import_sessions refuses an unknown origin')
+
+            # the /import route speaks all three origins (API-key gated)
+            rr = Side(os.path.join(tmp, 'wp14-route.db'))
+            sys.modules.pop('noise_app', None)
+            _app20 = importlib.import_module('noise_app').app
+            _app20.config['TESTING'] = True
+            _cl20 = _app20.test_client()
+            _wa20.IMPORT_KEY = 'wp14-key'
+            _key20 = {'X-Import-Key': 'wp14-key'}
+            rr.db.import_sessions([_w18(_payload_copy('WP14-RT'))])
+            rr.db.delete_session(SESSION_DATE, serial='WP14-RT')
+
+            def _rstate20():
+                return (rr.sql('SELECT COUNT(*) FROM sessions '
+                               "WHERE instrument_serial='WP14-RT'")[0][0],
+                        rr.sql('SELECT COUNT(*) FROM deleted_sessions '
+                               "WHERE instrument_serial='WP14-RT'")[0][0])
+
+            _rp20 = [_w18(_payload_copy('WP14-RT'))]
+            _r20 = _cl20.post('/import', json={'sessions': _rp20,
+                                               'origin': 'peer'},
+                              headers=_key20)
+            check(_r20.status_code == 200 and _r20.get_json()['imported'] == 0
+                  and _rstate20() == (0, 1),
+                  "/import with origin='peer' respects the tombstone "
+                  '(stampless payload: skipped, imported 0)')
+            _r20 = _cl20.post('/import', json={'sessions': _rp20,
+                                               'origin': 'operator-relay'},
+                              headers=_key20)
+            check(_r20.status_code == 200 and _r20.get_json()['imported'] == 1
+                  and _rstate20() == (1, 0),
+                  "/import with origin='operator-relay' restores — the relay "
+                  'of a deliberate operator action')
+            rr.db.delete_session(SESSION_DATE, serial='WP14-RT')
+            _r20 = _cl20.post('/import', json={'sessions': _rp20},
+                              headers=_key20)
+            check(_r20.status_code == 200 and _rstate20() == (1, 0),
+                  'a payload naming no origin imports as operator — an old '
+                  "peer's push or import_sdcard keeps today's behaviour "
+                  '(the documented one-version window)')
+            _pc20 = open(os.path.join(REPO, 'peer_client.py'),
+                         encoding='utf-8').read()
+            _na20 = open(os.path.join(REPO, 'noise_app.py'),
+                         encoding='utf-8').read()
+            check("'origin': origin" in _pc20
+                  and "origin='operator-relay'" in _pc20,
+                  "push_to_peer's payload names its origin "
+                  "(default operator-relay)")
+            check("push_to_peer(new_sessions, prune=prune, "
+                  "origin='operator-relay')" in _na20,
+                  'do_upload relays a fresh import with operator-relay '
+                  'semantics')
+
+            # ── 20c. F3: the startup sync is light and chunked ───────────────
+            print('\n20c. WP14/F3: the startup sync is bounded '
+                  '(light + digest fetch, shared helper)')
+            # startup_sync_from_peer still fetched the full payload — every
+            # report body, every restart, forever: the one unbounded transfer
+            # left after WP12. The tick's light pull is now
+            # sync_db.pull_full_sync_from_peer(), shared by both.
+            ss = Side(os.path.join(tmp, 'wp14-f3-srv.db'))
+            ss.db.import_sessions([_w18(_payload_copy('WP14-F3'))])
+            _srid20 = ss.reports_db.save_generated_report(
+                SESSION_DATE, None, 'WP14 tpl', 'claude-sonnet-5', 'none',
+                json.dumps({'executive_summary': '<p>the heavy body</p>'}),
+                10, 20, 0.01, run_number=1, source_file='PROJ0001',
+                input_snapshot_json='{"stats":{"laeq":55.5}}',
+                instrument_serial='WP14-F3')
+            _srow20 = ss.reports_db.get_generated_report(_srid20)
+            sys.modules.pop('noise_app', None)
+            _sapp20 = importlib.import_module('noise_app').app
+            _sapp20.config['TESTING'] = True
+            _scl20 = _sapp20.test_client()
+            _wa20.IMPORT_KEY = 'wp14-key'
+
+            _calls20 = []
+
+            def _mk_urlopen20(strip_light):
+                def _fake(req, timeout=None):
+                    url = req.full_url
+                    _calls20.append((url, timeout))
+                    path = url.split('http://peer', 1)[1]
+                    if strip_light:   # an old peer: no light support
+                        path = path.replace('?light=1', '')
+                    resp = _scl20.get(path, headers=_key20)
+
+                    class _R:
+                        def __enter__(self):
+                            return self
+
+                        def __exit__(self, *a):
+                            return False
+
+                        def read(self):
+                            return resp.data
+                    return _R()
+                return _fake
+
+            sp = Side(os.path.join(tmp, 'wp14-f3-pull.db'))
+            _ur20.urlopen = _mk_urlopen20(strip_light=False)
+            _fetched20 = sp.sync.pull_full_sync_from_peer(
+                'http://peer', 'wp14-key', light_timeout=15)
+            check(_calls20[0][0] == 'http://peer/api/peer-sync-full?light=1'
+                  and _calls20[0][1] == 15,
+                  'the pull is light, with the caller-chosen 15 s timeout on '
+                  'the light call', str(_calls20[0]))
+            check(len(_calls20) == 2
+                  and _calls20[1][0].startswith(
+                      'http://peer/api/reports-sync?uids=')
+                  and _calls20[1][1] == 30,
+                  'the missing report is fetched by uid, on the chunked '
+                  "fetch's own timeout", str(_calls20[1:]))
+            _landed20 = [dict(r) for r in sp.sql(
+                'SELECT * FROM generated_reports WHERE uid=?', _srow20['uid'])]
+            check(_fetched20 == 1 and len(_landed20) == 1
+                  and _landed20[0]['sections_json'] == _srow20['sections_json'],
+                  'and lands with its body intact')
+            check(sp.sql('SELECT COUNT(*) FROM sessions '
+                         "WHERE instrument_serial='WP14-F3'")[0][0] == 0,
+                  'the full payload still carries no measurement sessions — '
+                  'those arrive only through the /api/sync pull')
+
+            _calls20.clear()
+            sp2 = Side(os.path.join(tmp, 'wp14-f3-old.db'))
+            _ur20.urlopen = _mk_urlopen20(strip_light=True)
+            _fetched20b = sp2.sync.pull_full_sync_from_peer(
+                'http://peer', 'wp14-key', light_timeout=15)
+            check(_fetched20b == 0 and len(_calls20) == 1
+                  and sp2.sql('SELECT COUNT(*) FROM generated_reports '
+                              'WHERE uid=?', _srow20['uid'])[0][0] == 1,
+                  'old-peer fallback: a full payload (no digest) still '
+                  'applies, nothing extra fetched')
+            _ur20.urlopen = _saved_urlopen20
+
+            check('pull_full_sync_from_peer(PEER_URL, IMPORT_KEY' in _pc20
+                  and 'light_timeout=15' in _pc20
+                  and "'/api/peer-sync-full'" not in _pc20,
+                  'startup_sync_from_peer uses the shared light pull — the '
+                  'last unbounded transfer is gone')
+
+            # ── 20d. F4: peer clock skew is measured and exposed ─────────────
+            print('\n20d. WP14/F4: peer clock skew — measured, stored, '
+                  'logged, exposed')
+            # LWW ordering is wall-clock: a slow clock's genuinely-later edit
+            # loses, silently. Full logical clocks are out of scope; this is
+            # the observability hook — every tick measures the skew from the
+            # peer's server_now, sync_state keeps it, /health shows it.
+            _r20 = _scl20.get('/health')
+            check(_r20.get_json()['peer_clock_skew_s'] is None,
+                  '/health reports peer_clock_skew_s null before any '
+                  'measurement')
+            _skew20 = ss.sync.record_peer_clock_skew(
+                '2026-08-19 12:00:00',
+                local_now=_dt20(2026, 8, 19, 12, 0, 45))
+            check(_skew20 == 45.0,
+                  'skew is local minus peer, seconds', str(_skew20))
+            check(ss.sync.record_peer_clock_skew(
+                      '2026-08-19T12:01:00',
+                      local_now=_dt20(2026, 8, 19, 12, 0, 45)) == -15.0,
+                  'a peer clock ahead of ours reads negative (and the old '
+                  'T-format parses)')
+            check(ss.sync.record_peer_clock_skew(None) is None
+                  and ss.sync.record_peer_clock_skew('garbage') is None,
+                  'an absent or unparseable server_now measures nothing '
+                  '(old peer)')
+            _got20 = ss.sync.get_peer_clock_skew()
+            check(_got20 == {'skew_s': -15.0, 'at': '2026-08-19 12:00:45'},
+                  'the last measurement survives, dated — a stale reading is '
+                  'visibly stale', str(_got20))
+            _h20 = _scl20.get('/health').get_json()
+            check(_h20['peer_clock_skew_s'] == -15.0
+                  and _h20['peer_clock_skew_at'] == '2026-08-19 12:00:45',
+                  '/health exposes the skew and its timestamp', str(_h20))
+            _sp20 = open(os.path.join(REPO, 'sync_peer.py'),
+                         encoding='utf-8').read()
+            check("record_peer_clock_skew(data.get('server_now'))" in _sp20
+                  and 'abs(skew) > CLOCK_SKEW_WARN_S' in _sp20
+                  and sp.sync.CLOCK_SKEW_WARN_S == 30,
+                  'the tick records the skew every pull and warns past 30 s')
+        finally:
+            _ur20.urlopen = _saved_urlopen20
+            _wa20.IMPORT_KEY = _saved_key20
+            if _saved_pi20 is None:
+                os.environ.pop('PI_NAME', None)
+            else:
+                os.environ['PI_NAME'] = _saved_pi20
 
         print(f'\nAll {_checks} checks passed.')
     finally:

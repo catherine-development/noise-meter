@@ -45,7 +45,9 @@ that the sync protocol happens to call, not part of the protocol itself.
 """
 import json
 import sqlite3
-from datetime import datetime, timedelta
+import urllib.parse
+import urllib.request
+from datetime import datetime, timedelta, timezone
 
 from noise_db import (get_db, delete_session, purge_sessions_before, _record_tombstones,
                       resolve_serial, record_uid_tombstones, LWW_NOW_SQL,
@@ -1032,6 +1034,95 @@ def apply_report_rows(rows):
     conn.commit()
     conn.close()
     return n
+
+
+def pull_full_sync_from_peer(peer_url, import_key, light_timeout=30,
+                             ua='noise-meter/1.0'):
+    """Pull the peer's full-sync state the bounded way and apply it (WP14/F3
+    made this shared: sync_peer.py's 15-minute tick and peer_client's startup
+    sync used to duplicate it, and the startup copy still fetched the full
+    unbounded payload — the one transfer left that grew with every report).
+
+    GET /api/peer-sync-full?light=1 (generated reports as {uid, created_at}
+    digests), apply it, then fetch only the reports the digest shows missing
+    through GET /api/reports-sync, chunked at REPORTS_SYNC_MAX with the
+    fetches' own 30 s timeout — `light_timeout` covers only the light call
+    (the tick passes 30 s, the startup sync keeps its old 15 s). Old-peer
+    fallback: a peer that predates light mode ignores the parameter and
+    returns the full payload, which apply_full_sync() applies as before (no
+    digest key, nothing extra to fetch). Returns the number of report rows
+    fetched by uid. Exceptions propagate — both callers are best-effort and
+    log rather than fail their run."""
+    base = peer_url.rstrip('/')
+    headers = {'X-Import-Key': import_key, 'User-Agent': ua}
+    req = urllib.request.Request(base + '/api/peer-sync-full?light=1',
+                                 headers=headers)
+    with urllib.request.urlopen(req, timeout=light_timeout) as resp:
+        payload = json.loads(resp.read())
+    apply_full_sync(payload)
+    digest = payload.get('generated_reports_digest')
+    fetched = 0
+    if digest is not None:
+        need = report_uids_to_fetch(digest)
+        for i in range(0, len(need), REPORTS_SYNC_MAX):
+            chunk = need[i:i + REPORTS_SYNC_MAX]
+            rep_req = urllib.request.Request(
+                base + '/api/reports-sync?uids='
+                + urllib.parse.quote(','.join(chunk)),
+                headers=headers)
+            with urllib.request.urlopen(rep_req, timeout=30) as resp:
+                fetched += apply_report_rows(
+                    json.loads(resp.read()).get('reports', []))
+    return fetched
+
+
+# ── F4 (WP14): peer clock skew — observability, not correction ───────────────
+
+# |skew| above this is logged as a WARNING by the sync tick. 30 s is far
+# beyond healthy NTP (chrony holds the Pis within milliseconds) but well
+# inside what matters: every LWW comparison in this file is wall-clock
+# ordered, so a Pi whose clock runs slow loses edits it genuinely made later.
+CLOCK_SKEW_WARN_S = 30
+
+
+def record_peer_clock_skew(server_now, local_now=None):
+    """Measure and store the peer clock skew from /api/sync's `server_now`.
+
+    skew_s = local UTC now minus the peer's server_now (positive: the peer's
+    clock is behind ours). Coarse by design — it includes the response's
+    transfer time and second resolution — because its job is monitoring, not
+    correction: full logical clocks are out of scope, LWW correctness
+    degrades with skew, and this number (stored in sync_state as
+    peer_clock_skew_s, surfaced by /health) is how an operator sees that
+    hazard growing before it bites. Returns the skew in seconds, or None for
+    an absent/unparseable server_now (an old peer sends none) — in which
+    case the last stored measurement is left in place, dated by its 'at'."""
+    for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%dT%H:%M:%S'):
+        try:
+            peer_dt = datetime.strptime(server_now, fmt)
+            break
+        except (ValueError, TypeError):
+            continue
+    else:
+        return None
+    local = local_now or datetime.now(timezone.utc).replace(tzinfo=None)
+    skew = round((local - peer_dt).total_seconds(), 1)
+    set_sync_state('peer_clock_skew_s', json.dumps({
+        'skew_s': skew, 'at': local.strftime('%Y-%m-%d %H:%M:%S')}))
+    return skew
+
+
+def get_peer_clock_skew():
+    """The last stored skew measurement as {'skew_s': float, 'at': ts}, or
+    None when no tick has measured one yet (or the peer is pre-WP12 and
+    sends no server_now)."""
+    raw = get_sync_state('peer_clock_skew_s')
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except ValueError:
+        return None
 
 
 def get_import_log(limit=20):
