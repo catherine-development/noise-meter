@@ -10,7 +10,8 @@ noise_db._migrate(), which remains the single schema authority for the app.
 """
 import uuid
 
-from noise_db import get_db, resolve_serial, record_uid_tombstones
+from noise_db import (get_db, resolve_serial, record_uid_tombstones,
+                      LWW_NOW_SQL, local_writer)
 
 
 DEFAULT_TEMPLATES = [
@@ -98,14 +99,17 @@ def save_report_template(name, description, prompt, is_default=0):
     conn = get_db()
     if is_default:
         # Clearing the old default is an edit of those rows too: bump their
-        # updated_at so the change replicates (LWW) instead of leaving the
-        # peer with two defaults.
-        conn.execute("UPDATE report_templates SET is_default=0, "
-                     "updated_at=datetime('now') WHERE is_default=1")
+        # updated_at (millisecond, with writer, since WP12) so the change
+        # replicates (LWW) instead of leaving the peer with two defaults.
+        conn.execute(f'UPDATE report_templates SET is_default=0, '
+                     f'updated_at={LWW_NOW_SQL}, writer=? WHERE is_default=1',
+                     (local_writer(),))
     cur = conn.execute(
-        'INSERT INTO report_templates (uid, name, description, prompt, is_default) '
-        'VALUES (?,?,?,?,?)',
-        (str(uuid.uuid4()), name, description, prompt, 1 if is_default else 0)
+        f'INSERT INTO report_templates (uid, name, description, prompt, is_default, '
+        f'  updated_at, writer) '
+        f'VALUES (?,?,?,?,?,{LWW_NOW_SQL},?)',
+        (str(uuid.uuid4()), name, description, prompt, 1 if is_default else 0,
+         local_writer())
     )
     tid = cur.lastrowid
     conn.commit()
@@ -116,10 +120,11 @@ def save_report_template(name, description, prompt, is_default=0):
 def update_report_template(tid, name, description, prompt, is_default=None):
     conn = get_db()
     if is_default:
-        conn.execute("UPDATE report_templates SET is_default=0, "
-                     "updated_at=datetime('now') WHERE is_default=1")
-    fields = 'name=?, description=?, prompt=?, updated_at=datetime(\'now\')'
-    params = [name, description, prompt]
+        conn.execute(f'UPDATE report_templates SET is_default=0, '
+                     f'updated_at={LWW_NOW_SQL}, writer=? WHERE is_default=1',
+                     (local_writer(),))
+    fields = f'name=?, description=?, prompt=?, updated_at={LWW_NOW_SQL}, writer=?'
+    params = [name, description, prompt, local_writer()]
     if is_default is not None:
         fields += ', is_default=?'
         params.append(1 if is_default else 0)

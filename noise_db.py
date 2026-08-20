@@ -123,6 +123,35 @@ def resolve_serial(serial, conn=None):
 F6_NAMESPACE = uuid.uuid5(uuid.NAMESPACE_DNS, 'noise-meter.ives.org.uk/f6')
 
 
+# ── WP12: total-order LWW stamps ────────────────────────────────────────────
+#
+# datetime('now') is second-resolution, and the WP10 gate applied equal
+# timestamps — so two Pis editing the same row in the same second swapped
+# values on every exchange, forever, with no conflict recorded (F3). Since
+# WP12 every LWW timestamp (updated_at on the uid-replicated tables, their
+# uid tombstones' deleted_at, and the F4 metadata/tag stamps) is written at
+# millisecond resolution, and every local mutation also records its writer
+# (the Pi's PI_NAME). The replication gate orders on the string tuple
+# (updated_at, writer), which is total: any two distinct writes resolve the
+# same way on both Pis without talking.
+#
+# Transition semantics: stored second-resolution timestamps stay valid — as a
+# string, 'HH:MM:SS' orders before any same-second 'HH:MM:SS.mmm' (the
+# shorter string is a prefix of neither but differs first at '.', 0x2e, which
+# is greater than end-of-string) — and a row without a writer compares with
+# writer '', losing same-timestamp ties to any named writer.
+
+LWW_NOW_SQL = "strftime('%Y-%m-%d %H:%M:%f','now')"
+
+
+def local_writer():
+    """The writer id stamped on local mutations: the Pi's PI_NAME.
+
+    Read from the environment at call time, not import time, so the test
+    suite's two Sides (one process, two databases) can be two writers."""
+    return os.environ.get('PI_NAME', 'Pi')
+
+
 def new_uid():
     """Identity for a row created here and now: uuid4, minted once."""
     return str(uuid.uuid4())
@@ -160,9 +189,16 @@ def record_uid_tombstones(conn, table_name, uids, deleted_at=None):
         if not u:
             continue
         if deleted_at is None:
+            # Millisecond deleted_at (WP12): the tombstone competes with edit
+            # updated_at values in the LWW gate, so it carries the same
+            # resolution. An exact tie (same millisecond) resolves delete-wins
+            # on both sides — the edit is not strictly newer than the delete
+            # here, and on the deleting side the local row is already gone —
+            # so the pair still converges without a writer column.
             conn.execute(
-                'INSERT INTO deleted_uids (table_name, uid) VALUES (?,?) '
-                "ON CONFLICT(table_name, uid) DO UPDATE SET deleted_at=datetime('now')",
+                f'INSERT INTO deleted_uids (table_name, uid, deleted_at) '
+                f'VALUES (?,?,{LWW_NOW_SQL}) '
+                f'ON CONFLICT(table_name, uid) DO UPDATE SET deleted_at={LWW_NOW_SQL}',
                 (table_name, u))
         else:
             conn.execute(
@@ -712,6 +748,30 @@ def _migrate(conn):
     conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_report_templates_uid '
                  'ON report_templates(uid)')
 
+    # ── WP12: total-order LWW (F3) and metadata/tag stamps (F4) ─────────────
+    # Additive only. `writer` (the Pi's PI_NAME) is stamped beside updated_at
+    # on every local mutation of the uid-replicated tables; the LWW gate
+    # orders on the string tuple (updated_at, writer), so same-timestamp
+    # writes from the two Pis resolve identically on both sides instead of
+    # swapping forever. sessions.meta_updated_at/meta_writer and
+    # runs.tag_updated_at/tag_writer bring the hand-edited session metadata
+    # and run location tags (previously COALESCE-merged with no ordering at
+    # all) under the same gate. All NULL for existing rows on purpose: NULL
+    # means "never hand-edited since WP12" and always loses to a stamped edit
+    # without generating a conflict.
+    for _tbl, _cols in (
+        ('assessments',          ('writer TEXT',)),
+        ('assessment_locations', ('writer TEXT',)),
+        ('assessment_runs',      ('writer TEXT',)),
+        ('report_templates',     ('writer TEXT',)),
+        ('sessions',             ('meta_updated_at TEXT', 'meta_writer TEXT')),
+        ('runs',                 ('tag_updated_at TEXT', 'tag_writer TEXT')),
+    ):
+        _have = {r[1] for r in conn.execute(f'PRAGMA table_info({_tbl})').fetchall()}
+        for _cd in _cols:
+            if _cd.split()[0] not in _have:
+                conn.execute(f'ALTER TABLE {_tbl} ADD COLUMN {_cd}')
+
     # Tombstones for uid-keyed deletes (assessments, locations, run links,
     # templates, generated reports). Without them a full sync from a Pi that
     # still holds a row resurrects it on the Pi that deleted it while the
@@ -1216,14 +1276,20 @@ def get_existing_run_starts():
 
 
 def get_sessions_since(since):
-    """Return sessions imported/updated after `since` (ISO timestamp), in sync format."""
+    """Return sessions imported/updated at or after `since`, in sync format.
+
+    >= rather than > (WP12/F2): the puller's watermark is now this sender's
+    own clock (the `server_now` /api/sync returns), so a session whose
+    imported_at equals the watermark to the second sits exactly on the
+    boundary — with strict >, it was never sent again. Re-sending a boundary
+    session is harmless: import_sessions is a stable-key idempotent upsert."""
     conn = get_db()
     sessions = conn.execute(
         'SELECT s.*, w.wind_speed, w.wind_dir, w.temp_min, w.temp_max, w.precip, '
         '       w.hourly_json '
         'FROM sessions s LEFT JOIN weather w '
         '  ON s.date=w.date AND s.instrument_serial=w.instrument_serial '
-        'WHERE s.imported_at > ? ORDER BY s.date, s.instrument_serial', (since,)
+        'WHERE s.imported_at >= ? ORDER BY s.date, s.instrument_serial', (since,)
     ).fetchall()
     result = []
     for sess in sessions:
@@ -1269,15 +1335,24 @@ def get_all_sessions_list():
 
 def update_session_metadata(date, recorder_name, location_label, postcode, lat, lng,
                             notes=None, serial=None):
+    """Set the session's hand-entered metadata, stamping meta_updated_at /
+    meta_writer (WP12/F4) so the edit replicates under the LWW gate instead
+    of the old unordered COALESCE merge. Returns the stamps so the caller can
+    put them in the sync event it pushes to the peer."""
     conn = get_db()
+    ts = conn.execute(f'SELECT {LWW_NOW_SQL}').fetchone()[0]
+    writer = local_writer()
     conn.execute(
-        'UPDATE sessions SET recorder_name=?, location_label=?, postcode=?, lat=?, lng=?, notes=? '
+        'UPDATE sessions SET recorder_name=?, location_label=?, postcode=?, lat=?, lng=?, notes=?, '
+        '  meta_updated_at=?, meta_writer=? '
         'WHERE date=? AND instrument_serial=?',
         (recorder_name or None, location_label or None,
-         postcode or None, lat, lng, notes or None, date, resolve_serial(serial, conn))
+         postcode or None, lat, lng, notes or None, ts, writer,
+         date, resolve_serial(serial, conn))
     )
     conn.commit()
     conn.close()
+    return {'meta_updated_at': ts, 'meta_writer': writer}
 
 
 def _session_id(conn, date, serial):
@@ -1408,17 +1483,25 @@ def get_run_prof_by_source(date, source_file, serial=None):
 
 def update_run_location_tag(date, run_number, tag, serial=None, source_file=None):
     """Set a run's location tag. The run is named by source_file when given
-    (its stable identity), else by its current run_number."""
+    (its stable identity), else by its current run_number.
+
+    Stamps tag_updated_at / tag_writer (WP12/F4) so the edit replicates under
+    the LWW gate; returns the stamps for the caller's sync event."""
     conn = get_db()
     sid = _session_id(conn, date, serial)
+    ts = conn.execute(f'SELECT {LWW_NOW_SQL}').fetchone()[0]
+    writer = local_writer()
     if source_file:
-        conn.execute('UPDATE runs SET location_tag=? WHERE session_id=? AND source_file=?',
-                     (tag or None, sid, source_file))
+        conn.execute('UPDATE runs SET location_tag=?, tag_updated_at=?, tag_writer=? '
+                     'WHERE session_id=? AND source_file=?',
+                     (tag or None, ts, writer, sid, source_file))
     else:
-        conn.execute('UPDATE runs SET location_tag=? WHERE session_id=? AND run_number=?',
-                     (tag or None, sid, run_number))
+        conn.execute('UPDATE runs SET location_tag=?, tag_updated_at=?, tag_writer=? '
+                     'WHERE session_id=? AND run_number=?',
+                     (tag or None, ts, writer, sid, run_number))
     conn.commit()
     conn.close()
+    return {'tag_updated_at': ts, 'tag_writer': writer}
 
 
 def delete_session(date, serial=None):

@@ -8,6 +8,7 @@ import os
 import json
 import urllib.request
 import urllib.error
+import urllib.parse
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -28,7 +29,8 @@ if _env_file.exists():
 
 from noise_db import init_db, import_sessions
 from sync_db import (get_last_sync_time, update_last_sync_time,
-                     apply_full_sync)
+                     apply_full_sync, request_since,
+                     report_uids_to_fetch, apply_report_rows, REPORTS_SYNC_MAX)
 from users_sync import apply_users
 from weather import fill_weather_gaps
 
@@ -41,13 +43,20 @@ if not PEER_URL:
     exit(0)
 
 init_db()
-since = get_last_sync_time()
+# The request's `since` (WP12/F2): the stored watermark minus a 300 s safety
+# overlap, reformatted to the sender's imported_at convention. Re-receiving
+# the overlap is harmless — import_sessions is a stable-key idempotent
+# upsert — and the overlap absorbs commit-vs-clock ordering races on the
+# sender. The watermark itself is stored from the peer's own `server_now`
+# below, not from this Pi's wall clock, so clock skew between the pair can no
+# longer strand a session permanently behind the watermark.
+since = request_since(get_last_sync_time())
 synced_at = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S')
 
 log.info('Syncing from %s (since %s)', PEER_URL, since)
 
 try:
-    url = f"{PEER_URL.rstrip('/')}/api/sync?since={since}"
+    url = f"{PEER_URL.rstrip('/')}/api/sync?since={urllib.parse.quote(since)}"
     # Cloudflare's edge bot-protection blocks urllib's default User-Agent
     # ("Python-urllib/3.x") with a 1010 error before the request even reaches
     # the app — a normal-looking UA is required to get through the tunnel.
@@ -80,24 +89,53 @@ try:
     else:
         log.info('Nothing new')
 
-    update_last_sync_time(synced_at)
+    # Sender-issued watermark (WP12/F2): store the PEER's clock — the one its
+    # imported_at values are stamped by — not our own. A peer still on the old
+    # code sends no server_now; fall back to the old local-clock behaviour
+    # (never worse than before WP12, and self-heals when the peer upgrades).
+    update_last_sync_time(data.get('server_now') or synced_at)
 
     # Catch-up for hand-entered data (assessments, session metadata, weather,
-    # generated reports, tombstones). The live mirror of these is a
+    # tombstones, report digests). The live mirror of these is a
     # fire-and-forget event: if this Pi was unreachable when the peer applied
     # an edit, that event is gone. The full payload is idempotent and
-    # COALESCE-guarded (see sync_db.apply_full_sync), so pulling it on every
-    # 15-minute tick — not only at service startup — bounds the divergence
-    # window to one tick instead of one restart. Best-effort: a failure here
-    # must not fail the sync run that already imported the measurement data.
+    # LWW-gated (see sync_db), so pulling it on every 15-minute tick — not
+    # only at service startup — bounds the divergence window to one tick
+    # instead of one restart. light=1 (WP12/F8b): generated reports arrive as
+    # {uid, created_at} digests rather than full bodies, and only the ones
+    # missing here are fetched by uid — the tick used to re-ship every
+    # report's sections_json and input snapshot forever. An old peer ignores
+    # the parameter and sends the full payload, which apply_full_sync still
+    # handles (no digest key → nothing extra to fetch). Best-effort: a
+    # failure here must not fail the sync run that already imported the
+    # measurement data.
     try:
         full_req = urllib.request.Request(
-            f"{PEER_URL.rstrip('/')}/api/peer-sync-full",
+            f"{PEER_URL.rstrip('/')}/api/peer-sync-full?light=1",
             headers={'X-Import-Key': IMPORT_KEY,
                      'User-Agent': 'noise-meter-sync/1.0'})
         with urllib.request.urlopen(full_req, timeout=30) as resp:
-            apply_full_sync(json.loads(resp.read()))
-        log.info('Full-sync catch-up applied')
+            full_payload = json.loads(resp.read())
+        apply_full_sync(full_payload)
+        digest = full_payload.get('generated_reports_digest')
+        fetched = 0
+        if digest is not None:
+            need = report_uids_to_fetch(digest)
+            for i in range(0, len(need), REPORTS_SYNC_MAX):
+                chunk = need[i:i + REPORTS_SYNC_MAX]
+                rep_req = urllib.request.Request(
+                    f"{PEER_URL.rstrip('/')}/api/reports-sync?uids="
+                    + urllib.parse.quote(','.join(chunk)),
+                    headers={'X-Import-Key': IMPORT_KEY,
+                             'User-Agent': 'noise-meter-sync/1.0'})
+                with urllib.request.urlopen(rep_req, timeout=30) as resp:
+                    fetched += apply_report_rows(
+                        json.loads(resp.read()).get('reports', []))
+        if fetched:
+            log.info('Full-sync catch-up applied (%d report(s) fetched by uid)',
+                     fetched)
+        else:
+            log.info('Full-sync catch-up applied')
     except Exception as e:
         log.warning('Full-sync catch-up failed (will retry next tick): %s', e)
 

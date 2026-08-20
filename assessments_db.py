@@ -14,7 +14,12 @@ import json
 
 from nor140_format import round_half_up
 from noise_db import (get_db, percentile, resolve_serial, new_uid,
-                      record_uid_tombstones)
+                      record_uid_tombstones, LWW_NOW_SQL, local_writer)
+
+# WP12 (F3): every local mutation stamps updated_at at millisecond resolution
+# (LWW_NOW_SQL) and records the writing Pi (local_writer()). The replication
+# gate in sync_db orders on the (updated_at, writer) tuple, so two Pis editing
+# the same row in the same second no longer swap values on every exchange.
 
 
 def _with_end(row):
@@ -98,9 +103,10 @@ def create_assessment(name, purpose='', standard='noise_act', address='',
     conn = get_db()
     cur = conn.execute(
         'INSERT INTO assessments (uid, name, purpose, standard, address, postcode, '
-        "  lat, lng, client_ref, notes, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,datetime('now'))",
+        f'  lat, lng, client_ref, notes, updated_at, writer) '
+        f'VALUES (?,?,?,?,?,?,?,?,?,?,{LWW_NOW_SQL},?)',
         (new_uid(), name, purpose or None, standard, address or None, postcode or None,
-         lat, lng, client_ref or None, notes or None)
+         lat, lng, client_ref or None, notes or None, local_writer())
     )
     aid = cur.lastrowid
     conn.commit()
@@ -138,10 +144,11 @@ def update_assessment(aid, name, purpose, standard, address, postcode,
     conn = get_db()
     conn.execute(
         'UPDATE assessments SET name=?, purpose=?, standard=?, address=?, '
-        "  postcode=?, lat=?, lng=?, client_ref=?, notes=?, updated_at=datetime('now') "
+        f'  postcode=?, lat=?, lng=?, client_ref=?, notes=?, '
+        f'  updated_at={LWW_NOW_SQL}, writer=? '
         'WHERE id=?',
         (name, purpose or None, standard, address or None, postcode or None,
-         lat, lng, client_ref or None, notes or None, aid)
+         lat, lng, client_ref or None, notes or None, local_writer(), aid)
     )
     conn.commit()
     conn.close()
@@ -194,10 +201,11 @@ def add_assessment_location(assessment_id, label, description='', lat=None, lng=
     cur = conn.execute(
         'INSERT INTO assessment_locations '
         '  (uid, assessment_uid, assessment_id, label, description, lat, lng, '
-        '   sort_order, notes, updated_at) '
-        "VALUES (?,?,?,?,?,?,?,?,?,datetime('now'))",
+        f'   sort_order, notes, updated_at, writer) '
+        f'VALUES (?,?,?,?,?,?,?,?,?,{LWW_NOW_SQL},?)',
         (new_uid(), _uid_of(conn, 'assessments', assessment_id), assessment_id,
-         label, description or None, lat, lng, max_order + 1, notes or None)
+         label, description or None, lat, lng, max_order + 1, notes or None,
+         local_writer())
     )
     loc_id = cur.lastrowid
     conn.commit()
@@ -216,8 +224,8 @@ def update_assessment_location(loc_id, label, description, lat, lng, notes):
     conn = get_db()
     conn.execute(
         'UPDATE assessment_locations SET label=?, description=?, lat=?, lng=?, '
-        "  notes=?, updated_at=datetime('now') WHERE id=?",
-        (label, description or None, lat, lng, notes or None, loc_id)
+        f'  notes=?, updated_at={LWW_NOW_SQL}, writer=? WHERE id=?',
+        (label, description or None, lat, lng, notes or None, local_writer(), loc_id)
     )
     conn.commit()
     conn.close()
@@ -282,15 +290,16 @@ def assign_runs(assessment_id, location_id, run_pairs):
             if legacy:
                 conn.execute(
                     'UPDATE assessment_runs SET source_file=?, location_id=?, '
-                    "  location_uid=?, updated_at=datetime('now') WHERE id=?",
-                    (source_file, location_id, loc_uid, legacy['id']))
+                    f'  location_uid=?, updated_at={LWW_NOW_SQL}, writer=? WHERE id=?',
+                    (source_file, location_id, loc_uid, local_writer(), legacy['id']))
                 touched.append(legacy['id'])
                 continue
             conn.execute(
                 'INSERT INTO assessment_runs '
                 '  (uid, assessment_uid, location_uid, assessment_id, location_id, '
-                '   session_date, instrument_serial, run_number, source_file, updated_at) '
-                "VALUES (?,?,?,?,?,?,?,?,?,datetime('now')) "
+                '   session_date, instrument_serial, run_number, source_file, '
+                f'   updated_at, writer) '
+                f'VALUES (?,?,?,?,?,?,?,?,?,{LWW_NOW_SQL},?) '
                 # The index is partial, so the conflict target has to repeat
                 # its WHERE clause for SQLite to match it. The existing row
                 # keeps its uid — identity is minted once.
@@ -298,9 +307,10 @@ def assign_runs(assessment_id, location_id, run_pairs):
                 '  WHERE source_file IS NOT NULL '
                 'DO UPDATE SET location_id=excluded.location_id, '
                 '  location_uid=excluded.location_uid, '
-                '  run_number=excluded.run_number, updated_at=excluded.updated_at',
+                '  run_number=excluded.run_number, updated_at=excluded.updated_at, '
+                '  writer=excluded.writer',
                 (new_uid(), a_uid, loc_uid, assessment_id, location_id,
-                 date, serial, run_num, source_file)
+                 date, serial, run_num, source_file, local_writer())
             )
             row = conn.execute(
                 'SELECT id FROM assessment_runs WHERE assessment_id=? AND session_date=? '
@@ -318,17 +328,17 @@ def assign_runs(assessment_id, location_id, run_pairs):
             if existing:
                 conn.execute(
                     'UPDATE assessment_runs SET location_id=?, location_uid=?, '
-                    "  updated_at=datetime('now') WHERE id=?",
-                    (location_id, loc_uid, existing['id']))
+                    f'  updated_at={LWW_NOW_SQL}, writer=? WHERE id=?',
+                    (location_id, loc_uid, local_writer(), existing['id']))
                 touched.append(existing['id'])
             else:
                 cur = conn.execute(
                     'INSERT INTO assessment_runs '
                     '  (uid, assessment_uid, location_uid, assessment_id, location_id, '
-                    '   session_date, instrument_serial, run_number, updated_at) '
-                    "VALUES (?,?,?,?,?,?,?,?,datetime('now'))",
+                    f'   session_date, instrument_serial, run_number, updated_at, writer) '
+                    f'VALUES (?,?,?,?,?,?,?,?,{LWW_NOW_SQL},?)',
                     (new_uid(), a_uid, loc_uid, assessment_id, location_id,
-                     date, serial, run_num))
+                     date, serial, run_num, local_writer()))
                 touched.append(cur.lastrowid)
     conn.commit()
     rows = [dict(r) for r in conn.execute(
@@ -375,9 +385,10 @@ def unassign_run(ar_id):
 def update_assessment_run(ar_id, conditions, notes):
     conn = get_db()
     conn.execute(
-        "UPDATE assessment_runs SET conditions=?, notes=?, updated_at=datetime('now') "
+        f'UPDATE assessment_runs SET conditions=?, notes=?, '
+        f'  updated_at={LWW_NOW_SQL}, writer=? '
         'WHERE id=?',
-        (conditions or None, notes or None, ar_id)
+        (conditions or None, notes or None, local_writer(), ar_id)
     )
     conn.commit()
     conn.close()
