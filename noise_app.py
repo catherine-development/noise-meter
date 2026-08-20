@@ -35,7 +35,9 @@ from noise_db import (init_db, import_sessions, get_all_sessions_json,
                       get_setting, set_setting, get_full_run_row,
                       default_serial, resolve_serial)
 from sync_db import (get_import_log, get_full_sync_payload,
-                     apply_full_sync, apply_sync_event, get_last_push_error)
+                     apply_full_sync, apply_sync_event, get_last_push_error,
+                     get_sync_conflicts)
+import users_sync
 from noise_parser import parse_zip, parse_files
 from webauth import (AUTH_AVAILABLE, login_required, require_api_key,
                      login_or_api_key, check_upload_auth,
@@ -691,6 +693,27 @@ def api_peer_sync():
 def api_peer_sync_full():
     """Return full syncable state so peer can catch up after being offline."""
     return jsonify(get_full_sync_payload())
+
+
+@app.route('/api/sync-conflicts')
+@login_required
+def api_sync_conflicts():
+    """Rows the peer tried to change here with an older edit or delete (F6).
+
+    Divergence between the two Pis is skipped by the last-writer-wins gate in
+    sync_db and lands here — latest occurrence per (table, uid) — instead of
+    silently overwriting. Read-only; no UI beyond this endpoint yet."""
+    return jsonify(get_sync_conflicts())
+
+
+@app.route('/api/users-sync')
+@require_api_key
+def api_users_sync():
+    """The flight-tracker login users, for the peer to merge (additive only —
+    see users_sync.py for the deliberate scope line on deactivation). Empty
+    on an instance with no flights DB (the dev Mac)."""
+    users = users_sync.export_users()
+    return jsonify({'users': users, 'count': len(users)})
 
 
 @app.route('/admin/purge-before', methods=['POST'])

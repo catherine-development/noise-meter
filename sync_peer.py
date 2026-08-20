@@ -29,6 +29,7 @@ if _env_file.exists():
 from noise_db import init_db, import_sessions
 from sync_db import (get_last_sync_time, update_last_sync_time,
                      apply_full_sync)
+from users_sync import apply_users
 from weather import fill_weather_gaps
 
 PEER_URL  = os.environ.get('PEER_URL', '')
@@ -99,6 +100,27 @@ try:
         log.info('Full-sync catch-up applied')
     except Exception as e:
         log.warning('Full-sync catch-up failed (will retry next tick): %s', e)
+
+    # User sync (WP10 part B): the flight-tracker logins live outside this
+    # repo with no replication of their own, so this app carries them over
+    # the same authenticated channel. Additive only — new users and NULL
+    # name/phone gap-fills; deactivation stays a per-Pi manual act (see
+    # users_sync.py). Best-effort like the weather gap-fill; a Pi with no
+    # flights DB applies nothing and a peer with none serves an empty list.
+    # PII: log counts only, never emails.
+    try:
+        users_req = urllib.request.Request(
+            f"{PEER_URL.rstrip('/')}/api/users-sync",
+            headers={'X-Import-Key': IMPORT_KEY,
+                     'User-Agent': 'noise-meter-sync/1.0'})
+        with urllib.request.urlopen(users_req, timeout=30) as resp:
+            users_payload = json.loads(resp.read())
+        applied = apply_users(users_payload.get('users', []))
+        if applied['inserted'] or applied['filled']:
+            log.info('User sync: %d new user(s), %d gap-fill(s)',
+                     applied['inserted'], applied['filled'])
+    except Exception as e:
+        log.warning('User sync failed (will retry next tick): %s', e)
 
 except Exception as e:
     log.error('Sync failed: %s', e)
