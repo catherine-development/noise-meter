@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Noise Assessment Report · {{ date }}</title>
-<style>
+<style{% if csp_nonce %} nonce="{{ csp_nonce }}"{% endif %}>
 :root{
   --ink:#1A2235;--ink2:#3D5270;--ink3:#7A92AE;
   --rule:#C8D4E8;--rule2:#E0E8F4;
@@ -67,6 +67,7 @@ body{
 .stat-lbl{font-family:var(--font-ui);font-size:9.5px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--ink3);display:block;margin-bottom:4px}
 .stat-val{font-family:var(--font-data);font-size:18px;font-weight:500;font-variant-numeric:tabular-nums;line-height:1.2}
 .stat-val.warn{color:var(--warn)}
+.stat-val.duration{font-size:15px}
 .stat-val.ok{color:var(--ok)}
 
 /* ── Tables ── */
@@ -132,6 +133,9 @@ tbody tr:hover{background:var(--bg)}
 .provenance ul{margin:6px 0 0 18px}
 .provenance li{font-family:var(--font-data);font-size:11.5px}
 
+/* ── Table footnote ── */
+.table-note{font-size:11px;color:var(--ink3);margin-top:6px;font-family:var(--font-ui)}
+
 @media print{
   body{background:#fff;font-size:11pt}
   .shell{max-width:none;padding:0}
@@ -156,7 +160,7 @@ tbody tr:hover{background:var(--bg)}
 
   <div class="print-bar">
     <span class="print-label">Generated {{ generated_at }} · {{ pi_name }}</span>
-    <button class="print-btn" onclick="window.print()">Print / Save PDF</button>
+    <button class="print-btn" id="printBtn">Print / Save PDF</button>
   </div>
 
   <div class="cover">
@@ -196,6 +200,16 @@ tbody tr:hover{background:var(--bg)}
     </div>
     {% endif %}
 
+    {#
+      The six sections below are HTML written by Claude and rendered with
+      `| safe`. That is only safe because view_report() has already passed
+      every one of them through html_sanitize.sanitize_sections() — an
+      allowlist of structural tags with every attribute stripped (WP13 / F6).
+      Do not add a section here without sanitizing it, and do not remove the
+      `| safe` filters: escaping them would print the report's own markup.
+      The page also carries a nonce-based Content-Security-Policy set by the
+      route, which is why the <style> and <script> blocks here are nonced.
+    #}
     <!-- Executive summary -->
     <div class="section">
       <div class="section-title">Executive Summary</div>
@@ -228,7 +242,7 @@ tbody tr:hover{background:var(--bg)}
         </div>
         <div class="stat-tile">
           <span class="stat-lbl">Total duration</span>
-          <span class="stat-val" style="font-size:15px">
+          <span class="stat-val duration">
             {% set m = (total_duration_s // 60) %}
             {% set s_ = total_duration_s % 60 %}
             {{ m }}m {% if s_ %}{{ s_ }}s{% endif %}
@@ -312,7 +326,7 @@ tbody tr:hover{background:var(--bg)}
           {% endfor %}
         </tbody>
       </table>
-      <div style="font-size:11px;color:var(--ink3);margin-top:6px;font-family:var(--font-ui)">
+      <div class="table-note">
         All values in dB(A) except LC<sub>peak</sub> (dB(C)). LA90 = background level (exceeded 90% of time). LA10 = exceeded 10% of time. ≥85dB = proportion of measurement period at or above 85 dB(A).
       </div>
     </div>
@@ -358,5 +372,8 @@ tbody tr:hover{background:var(--bg)}
 
   </div><!-- /report-body -->
 </div><!-- /shell -->
+<script{% if csp_nonce %} nonce="{{ csp_nonce }}"{% endif %}>
+  document.getElementById('printBtn').addEventListener('click', function () { window.print(); });
+</script>
 </body>
 </html>
