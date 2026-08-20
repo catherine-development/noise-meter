@@ -13,7 +13,8 @@ created by noise_db._migrate(), which remains the single schema authority.
 import json
 
 from nor140_format import round_half_up
-from noise_db import get_db, percentile, resolve_serial
+from noise_db import (get_db, percentile, resolve_serial, new_uid,
+                      record_uid_tombstones)
 
 
 def _with_end(row):
@@ -96,9 +97,9 @@ def create_assessment(name, purpose='', standard='noise_act', address='',
                       postcode='', lat=None, lng=None, client_ref='', notes=''):
     conn = get_db()
     cur = conn.execute(
-        'INSERT INTO assessments (name, purpose, standard, address, postcode, '
-        '  lat, lng, client_ref, notes) VALUES (?,?,?,?,?,?,?,?,?)',
-        (name, purpose or None, standard, address or None, postcode or None,
+        'INSERT INTO assessments (uid, name, purpose, standard, address, postcode, '
+        "  lat, lng, client_ref, notes, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,datetime('now'))",
+        (new_uid(), name, purpose or None, standard, address or None, postcode or None,
          lat, lng, client_ref or None, notes or None)
     )
     aid = cur.lastrowid
@@ -137,7 +138,8 @@ def update_assessment(aid, name, purpose, standard, address, postcode,
     conn = get_db()
     conn.execute(
         'UPDATE assessments SET name=?, purpose=?, standard=?, address=?, '
-        '  postcode=?, lat=?, lng=?, client_ref=?, notes=? WHERE id=?',
+        "  postcode=?, lat=?, lng=?, client_ref=?, notes=?, updated_at=datetime('now') "
+        'WHERE id=?',
         (name, purpose or None, standard, address or None, postcode or None,
          lat, lng, client_ref or None, notes or None, aid)
     )
@@ -146,10 +148,41 @@ def update_assessment(aid, name, purpose, standard, address, postcode,
 
 
 def delete_assessment(aid):
+    """Delete an assessment (locations and run links cascade via FK) and
+    tombstone its uid so the delete replicates and cannot be resurrected by a
+    full sync from a Pi that still holds the row. The children need no
+    tombstones of their own: the peer's apply deletes the parent by uid and
+    its own FKs cascade, and an incoming child row whose parent uid is
+    tombstoned is skipped. Returns {'uid', 'deleted_at'} for the sync event,
+    or None if the row (or its uid) was absent."""
     conn = get_db()
-    conn.execute('DELETE FROM assessments WHERE id=?', (aid,))
+    info = _delete_with_tombstone(conn, 'assessments', aid)
     conn.commit()
     conn.close()
+    return info
+
+
+def _delete_with_tombstone(conn, table, row_id):
+    """Delete one row by local id, tombstoning its uid. Caller commits."""
+    row = conn.execute(f'SELECT uid FROM {table} WHERE id=?', (row_id,)).fetchone()
+    conn.execute(f'DELETE FROM {table} WHERE id=?', (row_id,))
+    if not (row and row['uid']):
+        return None
+    record_uid_tombstones(conn, table, [row['uid']])
+    ts = conn.execute(
+        'SELECT deleted_at FROM deleted_uids WHERE table_name=? AND uid=?',
+        (table, row['uid'])).fetchone()
+    return {'uid': row['uid'], 'deleted_at': ts['deleted_at'] if ts else None}
+
+
+def _uid_of(conn, table, row_id):
+    """The uid of a local row, or None — the uid-based FK reference columns
+    (assessment_uid, location_uid) are populated from the local integer FKs
+    at write time so every replication payload can key on them."""
+    if row_id is None:
+        return None
+    row = conn.execute(f'SELECT uid FROM {table} WHERE id=?', (row_id,)).fetchone()
+    return row['uid'] if row else None
 
 
 def add_assessment_location(assessment_id, label, description='', lat=None, lng=None, notes=''):
@@ -160,9 +193,11 @@ def add_assessment_location(assessment_id, label, description='', lat=None, lng=
     ).fetchone()[0]
     cur = conn.execute(
         'INSERT INTO assessment_locations '
-        '  (assessment_id, label, description, lat, lng, sort_order, notes) '
-        'VALUES (?,?,?,?,?,?,?)',
-        (assessment_id, label, description or None, lat, lng, max_order + 1, notes or None)
+        '  (uid, assessment_uid, assessment_id, label, description, lat, lng, '
+        '   sort_order, notes, updated_at) '
+        "VALUES (?,?,?,?,?,?,?,?,?,datetime('now'))",
+        (new_uid(), _uid_of(conn, 'assessments', assessment_id), assessment_id,
+         label, description or None, lat, lng, max_order + 1, notes or None)
     )
     loc_id = cur.lastrowid
     conn.commit()
@@ -180,8 +215,8 @@ def get_assessment_location(loc_id):
 def update_assessment_location(loc_id, label, description, lat, lng, notes):
     conn = get_db()
     conn.execute(
-        'UPDATE assessment_locations SET label=?, description=?, lat=?, lng=?, notes=? '
-        'WHERE id=?',
+        'UPDATE assessment_locations SET label=?, description=?, lat=?, lng=?, '
+        "  notes=?, updated_at=datetime('now') WHERE id=?",
         (label, description or None, lat, lng, notes or None, loc_id)
     )
     conn.commit()
@@ -189,10 +224,13 @@ def update_assessment_location(loc_id, label, description, lat, lng, notes):
 
 
 def delete_assessment_location(loc_id):
+    """Run links keep their rows (location_id goes NULL via the FK); only the
+    location itself is tombstoned. Returns {'uid','deleted_at'} or None."""
     conn = get_db()
-    conn.execute('DELETE FROM assessment_locations WHERE id=?', (loc_id,))
+    info = _delete_with_tombstone(conn, 'assessment_locations', loc_id)
     conn.commit()
     conn.close()
+    return info
 
 
 def assign_runs(assessment_id, location_id, run_pairs):
@@ -207,6 +245,8 @@ def assign_runs(assessment_id, location_id, run_pairs):
     silently rebound the existing link to a different measurement.
     """
     conn = get_db()
+    a_uid = _uid_of(conn, 'assessments', assessment_id)
+    loc_uid = _uid_of(conn, 'assessment_locations', location_id)
     touched = []
     for pair in run_pairs:
         date, run_num = pair[0], pair[1]
@@ -241,22 +281,26 @@ def assign_runs(assessment_id, location_id, run_pairs):
                 (assessment_id, date, serial, run_num)).fetchone()
             if legacy:
                 conn.execute(
-                    'UPDATE assessment_runs SET source_file=?, location_id=? WHERE id=?',
-                    (source_file, location_id, legacy['id']))
+                    'UPDATE assessment_runs SET source_file=?, location_id=?, '
+                    "  location_uid=?, updated_at=datetime('now') WHERE id=?",
+                    (source_file, location_id, loc_uid, legacy['id']))
                 touched.append(legacy['id'])
                 continue
             conn.execute(
                 'INSERT INTO assessment_runs '
-                '  (assessment_id, location_id, session_date, instrument_serial, '
-                '   run_number, source_file) '
-                'VALUES (?,?,?,?,?,?) '
+                '  (uid, assessment_uid, location_uid, assessment_id, location_id, '
+                '   session_date, instrument_serial, run_number, source_file, updated_at) '
+                "VALUES (?,?,?,?,?,?,?,?,?,datetime('now')) "
                 # The index is partial, so the conflict target has to repeat
-                # its WHERE clause for SQLite to match it.
+                # its WHERE clause for SQLite to match it. The existing row
+                # keeps its uid — identity is minted once.
                 'ON CONFLICT(assessment_id, session_date, instrument_serial, source_file) '
                 '  WHERE source_file IS NOT NULL '
                 'DO UPDATE SET location_id=excluded.location_id, '
-                '  run_number=excluded.run_number',
-                (assessment_id, location_id, date, serial, run_num, source_file)
+                '  location_uid=excluded.location_uid, '
+                '  run_number=excluded.run_number, updated_at=excluded.updated_at',
+                (new_uid(), a_uid, loc_uid, assessment_id, location_id,
+                 date, serial, run_num, source_file)
             )
             row = conn.execute(
                 'SELECT id FROM assessment_runs WHERE assessment_id=? AND session_date=? '
@@ -272,15 +316,19 @@ def assign_runs(assessment_id, location_id, run_pairs):
                 'AND instrument_serial=? AND run_number=? AND source_file IS NULL',
                 (assessment_id, date, serial, run_num)).fetchone()
             if existing:
-                conn.execute('UPDATE assessment_runs SET location_id=? WHERE id=?',
-                             (location_id, existing['id']))
+                conn.execute(
+                    'UPDATE assessment_runs SET location_id=?, location_uid=?, '
+                    "  updated_at=datetime('now') WHERE id=?",
+                    (location_id, loc_uid, existing['id']))
                 touched.append(existing['id'])
             else:
                 cur = conn.execute(
                     'INSERT INTO assessment_runs '
-                    '  (assessment_id, location_id, session_date, instrument_serial, run_number) '
-                    'VALUES (?,?,?,?,?)',
-                    (assessment_id, location_id, date, serial, run_num))
+                    '  (uid, assessment_uid, location_uid, assessment_id, location_id, '
+                    '   session_date, instrument_serial, run_number, updated_at) '
+                    "VALUES (?,?,?,?,?,?,?,?,datetime('now'))",
+                    (new_uid(), a_uid, loc_uid, assessment_id, location_id,
+                     date, serial, run_num))
                 touched.append(cur.lastrowid)
     conn.commit()
     rows = [dict(r) for r in conn.execute(
@@ -316,16 +364,19 @@ def get_assessment_runs_by_pairs(assessment_id, pairs):
 
 
 def unassign_run(ar_id):
+    """Returns {'uid','deleted_at'} for the sync event, or None."""
     conn = get_db()
-    conn.execute('DELETE FROM assessment_runs WHERE id=?', (ar_id,))
+    info = _delete_with_tombstone(conn, 'assessment_runs', ar_id)
     conn.commit()
     conn.close()
+    return info
 
 
 def update_assessment_run(ar_id, conditions, notes):
     conn = get_db()
     conn.execute(
-        'UPDATE assessment_runs SET conditions=?, notes=? WHERE id=?',
+        "UPDATE assessment_runs SET conditions=?, notes=?, updated_at=datetime('now') "
+        'WHERE id=?',
         (conditions or None, notes or None, ar_id)
     )
     conn.commit()

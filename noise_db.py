@@ -1,3 +1,4 @@
+import hashlib
 import os
 import json
 import sqlite3
@@ -92,6 +93,100 @@ def resolve_serial(serial, conn=None):
     if s:
         return s
     return _default_serial(conn) if conn is not None else default_serial()
+
+
+# ── F6 / WP10: replication identity for mutable hand-entered rows ───────────
+#
+# assessments, assessment_locations, assessment_runs and report_templates are
+# edited on either Pi, so they need an identity the pair agrees on without
+# talking. New rows mint a uuid4 (the WP9 generated_reports pattern). Rows
+# that already existed at migration time get a *deterministic* uuid5 of stable
+# replicated content, because both Pis hold the same rows (replicated by id
+# until WP10) and independently-minted uids would twin every one of them on
+# the first full sync. The seed fields are chosen to be identical on both Pis
+# precisely because they replicated: created_at/name for assessments (both
+# cross the wire and neither is rewritten on apply), the parent uid + label +
+# sort_order for locations, the parent uid + session key + source_file for
+# run links, and name + prompt hash for templates.
+#
+# Collision behaviour: two rows in ONE database whose seed fields coincide
+# (e.g. two assessments created in the same second with the same name) are
+# disambiguated deterministically by id order ('|dup1', '|dup2', …) — the ids
+# replicated too, so both Pis assign the same suffixes. Across databases, a
+# seed collision between rows that are genuinely the same record is the
+# point; between rows that merely *look* the same (same name, same second,
+# created independently on the two Pis before WP10) it would wrongly unify
+# them — accepted: the sync events and 15-minute full-sync pulls make
+# unsynced same-second twins vanishingly unlikely, and the unified row keeps
+# one side's content rather than losing the record.
+
+F6_NAMESPACE = uuid.uuid5(uuid.NAMESPACE_DNS, 'noise-meter.ives.org.uk/f6')
+
+
+def new_uid():
+    """Identity for a row created here and now: uuid4, minted once."""
+    return str(uuid.uuid4())
+
+
+def uid_for_assessment(created_at, name):
+    return str(uuid.uuid5(F6_NAMESPACE,
+                          'assessment|%s|%s' % (created_at or '', name or '')))
+
+
+def uid_for_location(assessment_uid, label, sort_order):
+    return str(uuid.uuid5(F6_NAMESPACE, 'location|%s|%s|%s' % (
+        assessment_uid or '', label or '',
+        '' if sort_order is None else sort_order)))
+
+
+def uid_for_assessment_run(assessment_uid, session_date, serial, source_file,
+                           run_number):
+    ident = source_file or ('run:%s' % ('' if run_number is None else run_number))
+    return str(uuid.uuid5(F6_NAMESPACE, 'assessment_run|%s|%s|%s|%s' % (
+        assessment_uid or '', session_date or '', serial or '', ident)))
+
+
+def uid_for_template(name, prompt):
+    return str(uuid.uuid5(F6_NAMESPACE, 'template|%s|%s' % (
+        name or '', hashlib.sha256((prompt or '').encode()).hexdigest())))
+
+
+def record_uid_tombstones(conn, table_name, uids, deleted_at=None):
+    """Mark uid-keyed rows as deleted so the deletion replicates. Caller
+    commits. Mirrors _record_tombstones for sessions: deleted_at is supplied
+    when replaying a peer's tombstone so the original time propagates, and
+    MAX() keeps the newest time when both Pis deleted the same row."""
+    for u in uids:
+        if not u:
+            continue
+        if deleted_at is None:
+            conn.execute(
+                'INSERT INTO deleted_uids (table_name, uid) VALUES (?,?) '
+                "ON CONFLICT(table_name, uid) DO UPDATE SET deleted_at=datetime('now')",
+                (table_name, u))
+        else:
+            conn.execute(
+                'INSERT INTO deleted_uids (table_name, uid, deleted_at) VALUES (?,?,?) '
+                'ON CONFLICT(table_name, uid) DO UPDATE SET '
+                '  deleted_at=MAX(deleted_uids.deleted_at, excluded.deleted_at)',
+                (table_name, u, deleted_at))
+
+
+def _backfill_uids(conn, table, rows, seed_fn):
+    """Assign uuid5(F6_NAMESPACE, seed_fn(row)) to each row (uid currently
+    NULL), in id order, deterministically suffixing local duplicates. Both
+    Pis hold the same rows in the same ids, so both compute the same uids."""
+    used = {r[0] for r in conn.execute(
+        f'SELECT uid FROM {table} WHERE uid IS NOT NULL').fetchall()}
+    for row in rows:
+        seed = seed_fn(row)
+        cand, k = seed, 0
+        while str(uuid.uuid5(F6_NAMESPACE, cand)) in used:
+            k += 1
+            cand = f'{seed}|dup{k}'
+        u = str(uuid.uuid5(F6_NAMESPACE, cand))
+        used.add(u)
+        conn.execute(f'UPDATE {table} SET uid=? WHERE id=?', (u, row['id']))
 
 
 # Column order for the sessions table when it has to be rebuilt. SQLite cannot
@@ -538,6 +633,110 @@ def _migrate(conn):
     conn.execute('''
         CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_stable
             ON runs(session_id, source_file) WHERE source_file IS NOT NULL
+    ''')
+
+    # ── F6 / WP10: uid sync keys + LWW timestamps for the mutable tables ────
+    # One ADD COLUMN per statement (SQLite). updated_at is left NULL for
+    # pre-existing rows on purpose: NULL means "age unknown", and the LWW gate
+    # in sync_db treats it as older than any real timestamp — so the first
+    # timestamped edit anywhere wins over every untouched pre-WP10 copy.
+    # (report_templates already has updated_at, with a non-NULL default.)
+    for _tbl, _cols in (
+        ('assessments',          ('uid TEXT', 'updated_at TEXT')),
+        ('assessment_locations', ('uid TEXT', 'assessment_uid TEXT',
+                                  'updated_at TEXT')),
+        ('assessment_runs',      ('uid TEXT', 'assessment_uid TEXT',
+                                  'location_uid TEXT', 'updated_at TEXT')),
+        ('report_templates',     ('uid TEXT',)),
+    ):
+        _have = {r[1] for r in conn.execute(f'PRAGMA table_info({_tbl})').fetchall()}
+        for _cd in _cols:
+            if _cd.split()[0] not in _have:
+                conn.execute(f'ALTER TABLE {_tbl} ADD COLUMN {_cd}')
+
+    # Deterministic uid backfill, parents before children (the child seeds
+    # embed the parent uid). See the F6 block above _SESSION_COLUMNS for why
+    # these are content hashes rather than fresh uuid4s. Seed columns a
+    # hand-built database might lack read as NULL rather than failing the
+    # whole migration.
+    def _sel(table, *cols):
+        have = {r[1] for r in conn.execute(f'PRAGMA table_info({table})').fetchall()}
+        named = ', '.join(c if c in have else f'NULL AS {c}' for c in cols)
+        return conn.execute(f'SELECT id, {named} FROM {table} WHERE uid IS NULL '
+                            'ORDER BY id').fetchall()
+
+    _backfill_uids(conn, 'assessments', _sel('assessments', 'created_at', 'name'),
+        lambda r: 'assessment|%s|%s' % (r['created_at'] or '', r['name'] or ''))
+    # uid-based FK references, populated from the local integer FKs — the ints
+    # stay for local integrity (and the CASCADE/SET NULL behaviour), but every
+    # replication payload and apply uses the uids exclusively.
+    conn.execute('''
+        UPDATE assessment_locations SET assessment_uid =
+            (SELECT uid FROM assessments a WHERE a.id = assessment_locations.assessment_id)
+        WHERE assessment_uid IS NULL''')
+    _backfill_uids(conn, 'assessment_locations',
+        _sel('assessment_locations', 'assessment_uid', 'label', 'sort_order'),
+        lambda r: 'location|%s|%s|%s' % (r['assessment_uid'] or '', r['label'] or '',
+                                         '' if r['sort_order'] is None else r['sort_order']))
+    conn.execute('''
+        UPDATE assessment_runs SET assessment_uid =
+            (SELECT uid FROM assessments a WHERE a.id = assessment_runs.assessment_id)
+        WHERE assessment_uid IS NULL''')
+    conn.execute('''
+        UPDATE assessment_runs SET location_uid =
+            (SELECT uid FROM assessment_locations l WHERE l.id = assessment_runs.location_id)
+        WHERE location_uid IS NULL AND location_id IS NOT NULL''')
+    _backfill_uids(conn, 'assessment_runs',
+        _sel('assessment_runs', 'assessment_uid', 'session_date',
+             'instrument_serial', 'source_file', 'run_number'),
+        lambda r: 'assessment_run|%s|%s|%s|%s' % (
+            r['assessment_uid'] or '', r['session_date'] or '',
+            r['instrument_serial'] or '',
+            r['source_file'] or ('run:%s' % ('' if r['run_number'] is None
+                                             else r['run_number']))))
+    # Templates: name + prompt hash, so the three DEFAULT_TEMPLATES rows the
+    # two Pis each seeded independently unify under one uid apiece, while a
+    # user-written template (different prompt) stays its own record.
+    _backfill_uids(conn, 'report_templates',
+        _sel('report_templates', 'name', 'prompt'),
+        lambda r: 'template|%s|%s' % (
+            r['name'] or '',
+            hashlib.sha256((r['prompt'] or '').encode()).hexdigest()))
+
+    conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_assessments_uid '
+                 'ON assessments(uid)')
+    conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_assessment_locations_uid '
+                 'ON assessment_locations(uid)')
+    conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_assessment_runs_uid '
+                 'ON assessment_runs(uid)')
+    conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_report_templates_uid '
+                 'ON report_templates(uid)')
+
+    # Tombstones for uid-keyed deletes (assessments, locations, run links,
+    # templates, generated reports). Without them a full sync from a Pi that
+    # still holds a row resurrects it on the Pi that deleted it while the
+    # holder was offline — the gap WP9 documented for reports.
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS deleted_uids (
+            table_name TEXT NOT NULL,
+            uid        TEXT NOT NULL,
+            deleted_at TEXT DEFAULT (datetime('now')),
+            PRIMARY KEY (table_name, uid)
+        )
+    ''')
+    # Divergence made visible (F6): an incoming row older than the local edit
+    # is skipped, and the skip lands here — latest occurrence per (table, uid),
+    # so the table stays small. Read via GET /api/sync-conflicts.
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS sync_conflicts (
+            table_name        TEXT NOT NULL,
+            uid               TEXT NOT NULL,
+            local_updated_at  TEXT,
+            remote_updated_at TEXT,
+            seen_at           TEXT DEFAULT (datetime('now')),
+            payload_json      TEXT,
+            PRIMARY KEY (table_name, uid)
+        )
     ''')
 
     conn.commit()
@@ -1237,10 +1436,17 @@ def delete_session(date, serial=None):
     purge_sessions_before(), the bulk data-retention path, removes weather."""
     conn = get_db()
     serial = resolve_serial(serial, conn)
+    # The links removed with the session get uid tombstones (F6): without
+    # them, a full sync from a Pi still holding this session's assessment
+    # links would re-create dangling rows here after the delete.
+    ar_uids = [r[0] for r in conn.execute(
+        'SELECT uid FROM assessment_runs WHERE session_date=? AND '
+        'instrument_serial=? AND uid IS NOT NULL', (date, serial)).fetchall()]
     conn.execute('DELETE FROM assessment_runs WHERE session_date=? AND instrument_serial=?',
                  (date, serial))
     conn.execute('DELETE FROM sessions WHERE date=? AND instrument_serial=?', (date, serial))
     _record_tombstones(conn, [(date, serial)])
+    record_uid_tombstones(conn, 'assessment_runs', ar_uids)
     conn.commit()
     conn.close()
 
@@ -1472,6 +1678,9 @@ def purge_sessions_before(before_date):
     old = sorted({d for d, _ in keys})
     if old:
         ph = ','.join('?' * len(old))
+        ar_uids = [r[0] for r in conn.execute(
+            f'SELECT uid FROM assessment_runs WHERE session_date IN ({ph}) '
+            'AND uid IS NOT NULL', old).fetchall()]
         conn.execute(f'DELETE FROM assessment_runs WHERE session_date IN ({ph})', old)
         # Weather goes with the purge. The table is keyed (date, serial) since
         # WP9 (_migrate rebuilds any older variant before this can run), but
@@ -1484,6 +1693,7 @@ def purge_sessions_before(before_date):
             f'DELETE FROM runs WHERE session_id IN (SELECT id FROM sessions WHERE date IN ({ph}))', old)
         conn.execute(f'DELETE FROM sessions WHERE date IN ({ph})', old)
         _record_tombstones(conn, keys)
+        record_uid_tombstones(conn, 'assessment_runs', ar_uids)
         conn.commit()
     conn.close()
     return old

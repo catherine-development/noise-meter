@@ -10,7 +10,7 @@ noise_db._migrate(), which remains the single schema authority for the app.
 """
 import uuid
 
-from noise_db import get_db, resolve_serial
+from noise_db import get_db, resolve_serial, record_uid_tombstones
 
 
 DEFAULT_TEMPLATES = [
@@ -74,10 +74,11 @@ DEFAULT_TEMPLATES = [
 
 
 # ── Report templates ──────────────────────────────────────────────────────────
-# Per-Pi on purpose. Templates are mutable rows edited on either side, so
-# replicating them needs the F6 machinery (UUID keys + conflict surfacing);
-# until then, a template lives on the Pi it was written on. Generated reports,
-# below, are append-only evidence and DO replicate (WP9), keyed by uid.
+# Replicated since WP10 (F6): keyed across the pair by uid with LWW on
+# updated_at, like the other hand-entered tables. The three DEFAULT_TEMPLATES
+# rows each Pi seeded independently unify under one deterministic uid apiece
+# (the migration hashes name + prompt); user templates replicate as their own
+# records. Deletes tombstone the uid so a full sync cannot resurrect them.
 
 def get_report_templates():
     conn = get_db()
@@ -96,10 +97,15 @@ def get_report_template(tid):
 def save_report_template(name, description, prompt, is_default=0):
     conn = get_db()
     if is_default:
-        conn.execute('UPDATE report_templates SET is_default=0')
+        # Clearing the old default is an edit of those rows too: bump their
+        # updated_at so the change replicates (LWW) instead of leaving the
+        # peer with two defaults.
+        conn.execute("UPDATE report_templates SET is_default=0, "
+                     "updated_at=datetime('now') WHERE is_default=1")
     cur = conn.execute(
-        'INSERT INTO report_templates (name, description, prompt, is_default) VALUES (?,?,?,?)',
-        (name, description, prompt, 1 if is_default else 0)
+        'INSERT INTO report_templates (uid, name, description, prompt, is_default) '
+        'VALUES (?,?,?,?,?)',
+        (str(uuid.uuid4()), name, description, prompt, 1 if is_default else 0)
     )
     tid = cur.lastrowid
     conn.commit()
@@ -110,7 +116,8 @@ def save_report_template(name, description, prompt, is_default=0):
 def update_report_template(tid, name, description, prompt, is_default=None):
     conn = get_db()
     if is_default:
-        conn.execute('UPDATE report_templates SET is_default=0')
+        conn.execute("UPDATE report_templates SET is_default=0, "
+                     "updated_at=datetime('now') WHERE is_default=1")
     fields = 'name=?, description=?, prompt=?, updated_at=datetime(\'now\')'
     params = [name, description, prompt]
     if is_default is not None:
@@ -123,10 +130,25 @@ def update_report_template(tid, name, description, prompt, is_default=None):
 
 
 def delete_report_template(tid):
+    """Returns {'uid','deleted_at'} for the sync event, or None. The uid is
+    tombstoned so the delete replicates and survives full syncs (F6)."""
     conn = get_db()
-    conn.execute('DELETE FROM report_templates WHERE id=?', (tid,))
+    info = _delete_by_uid(conn, 'report_templates', tid)
     conn.commit()
     conn.close()
+    return info
+
+
+def _delete_by_uid(conn, table, row_id):
+    row = conn.execute(f'SELECT uid FROM {table} WHERE id=?', (row_id,)).fetchone()
+    conn.execute(f'DELETE FROM {table} WHERE id=?', (row_id,))
+    if not (row and row['uid']):
+        return None
+    record_uid_tombstones(conn, table, [row['uid']])
+    ts = conn.execute(
+        'SELECT deleted_at FROM deleted_uids WHERE table_name=? AND uid=?',
+        (table, row['uid'])).fetchone()
+    return {'uid': row['uid'], 'deleted_at': ts['deleted_at'] if ts else None}
 
 
 # ── Generated reports ─────────────────────────────────────────────────────────
@@ -184,7 +206,12 @@ def get_generated_report(rid):
 
 
 def delete_generated_report(rid):
+    """Returns {'uid','deleted_at'} or None (a pre-WP9 row has no uid and
+    never replicated — nothing to tombstone). The tombstone closes the WP9
+    gap: without it, a full sync from a Pi still holding the row resurrected
+    it on the Pi that deleted while the holder was offline."""
     conn = get_db()
-    conn.execute('DELETE FROM generated_reports WHERE id=?', (rid,))
+    info = _delete_by_uid(conn, 'generated_reports', rid)
     conn.commit()
     conn.close()
+    return info
