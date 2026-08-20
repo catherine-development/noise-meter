@@ -1,6 +1,7 @@
 import os
 import json
 import sqlite3
+import uuid
 
 from nor140_format import SPECTRAL_TABLES, round_half_up
 # The session LAeq must be the same number whether it was written by an import
@@ -278,6 +279,7 @@ def _migrate(conn):
     conn.execute('''
         CREATE TABLE IF NOT EXISTS generated_reports (
             id             INTEGER PRIMARY KEY,
+            uid            TEXT,
             session_date   TEXT NOT NULL,
             instrument_serial TEXT NOT NULL DEFAULT '',
             run_number     INTEGER,
@@ -366,6 +368,23 @@ def _migrate(conn):
                   AND r.run_number = generated_reports.run_number
             ) WHERE source_file IS NULL AND run_number IS NOT NULL
         ''')
+    if 'uid' not in gr_cols:
+        # WP9: generated reports replicate between the Pis, and the local
+        # integer id cannot be the replication key — both sides assign their
+        # own. The uid is minted once, at save time, and the peer upserts on
+        # it. Pre-WP9 rows get a fresh uuid4 here, which means the two Pis
+        # hold *different* uids for their pre-existing local rows — correct,
+        # because they ARE different local rows (reports never replicated
+        # before this), not two copies of one report.
+        conn.execute('ALTER TABLE generated_reports ADD COLUMN uid TEXT')
+    for (rid,) in conn.execute(
+            'SELECT id FROM generated_reports WHERE uid IS NULL').fetchall():
+        conn.execute('UPDATE generated_reports SET uid=? WHERE id=?',
+                     (str(uuid.uuid4()), rid))
+    conn.execute('''
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_generated_reports_uid
+            ON generated_reports(uid)
+    ''')
     if not conn.execute('SELECT COUNT(*) FROM report_templates').fetchone()[0]:
         # Imported here rather than at module scope: reports_db imports get_db
         # from this module, so a top-level import would be circular.

@@ -125,11 +125,17 @@ def get_full_sync_payload():
     weather = [dict(r) for r in conn.execute(
         'SELECT date, instrument_serial AS serial, wind_speed, wind_dir, '
         'temp_min, temp_max, precip, hourly_json FROM weather').fetchall()]
+    # Generated reports replicate too — they are append-only evidence, keyed
+    # across the pair by uid, never by the local integer id. Report
+    # *templates* deliberately do not: they are mutable per-Pi state and need
+    # the F6 conflict machinery before they can replicate safely.
+    reports = [dict(r) for r in conn.execute(
+        'SELECT * FROM generated_reports WHERE uid IS NOT NULL').fetchall()]
     conn.close()
     return {'assessments': assessments, 'assessment_locations': locations,
             'assessment_runs': assess_runs, 'sessions_meta': sess_meta,
             'run_tags': run_tags, 'deleted_sessions': deleted_sess,
-            'weather': weather}
+            'weather': weather, 'generated_reports': reports}
 
 
 def apply_full_sync(payload):
@@ -193,6 +199,8 @@ def apply_full_sync(payload):
         _apply_run_tag(conn, rt, coalesce=True)
     for wx in payload.get('weather', []):
         _apply_weather(conn, wx)
+    for gr in payload.get('generated_reports', []):
+        _apply_generated_report(conn, gr)
     conn.commit()
     conn.close()
 
@@ -219,6 +227,64 @@ def _apply_weather(conn, wx):
         VALUES (:date, :serial, {", ".join(":" + c for c in _WEATHER_VALUE_COLS)})
         ON CONFLICT(date, instrument_serial) DO UPDATE SET {sets}
     ''', wx)
+
+
+# Every generated_reports column except the local integer id, which never
+# crosses the wire: each Pi numbers its own rows, and the uid is the identity
+# the pair agrees on.
+_REPORT_COLS = ('uid', 'session_date', 'instrument_serial', 'run_number',
+                'run_label', 'template_id', 'template_name', 'model',
+                'thinking_level', 'sections_json', 'input_tokens',
+                'output_tokens', 'cost_usd', 'created_at', 'source_file',
+                'input_snapshot_json')
+
+
+def _apply_generated_report(conn, row):
+    """Upsert one peer report by uid — never by local id. Caller commits.
+
+    template_id is carried as provenance only: report templates are per-Pi
+    until F6, so the id may name a different (or no) template here;
+    template_name is the value everything renders."""
+    if not row.get('uid'):
+        return   # a row from a pre-WP9 peer has no replication identity
+    row = dict(row)
+    row['instrument_serial'] = resolve_serial(row.get('instrument_serial'), conn)
+    for c in _REPORT_COLS:
+        row.setdefault(c, None)
+    sets = ', '.join(f'{c}=excluded.{c}' for c in _REPORT_COLS if c != 'uid')
+    conn.execute(f'''
+        INSERT INTO generated_reports ({", ".join(_REPORT_COLS)})
+        VALUES ({", ".join(":" + c for c in _REPORT_COLS)})
+        ON CONFLICT(uid) DO UPDATE SET {sets}
+    ''', {c: row[c] for c in _REPORT_COLS})
+
+
+def _with_serial(conn, row, key='instrument_serial'):
+    """Copy of a peer row with its serial normalised: missing or blank (an
+    older peer) becomes this Pi's default. Also defaults source_file, which
+    a peer on the older schema does not send."""
+    row = dict(row)
+    row[key] = resolve_serial(row.get(key), conn)
+    row.setdefault('source_file', None)
+    return row
+
+
+def _apply_run_tag(conn, rt, coalesce=False):
+    """Apply one run_tag row: session by (session_date, serial), run by
+    source_file when the row carries one (the stable identity), else by
+    run_number (older peer)."""
+    rt = _with_serial(conn, rt, key='serial')
+    rt.setdefault('source_file', None)
+    set_sql = ('location_tag=COALESCE(:location_tag, location_tag)' if coalesce
+               else 'location_tag=:location_tag')
+    run_match = ('source_file=:source_file' if rt['source_file']
+                 else 'run_number=:run_number')
+    conn.execute(f'''
+        UPDATE runs SET {set_sql}
+        WHERE session_id=(SELECT id FROM sessions
+                          WHERE date=:session_date AND instrument_serial=:serial)
+          AND {run_match}
+    ''', rt)
 
 
 def apply_sync_event(entity, action, data):
@@ -288,6 +354,14 @@ def apply_sync_event(entity, action, data):
     elif entity == 'run_tag':
         if action == 'upsert':
             _apply_run_tag(conn, data)
+    elif entity == 'generated_report':
+        # Reports replicate by uid (append-only evidence). There is no
+        # 'report_template' entity on purpose — templates stay per-Pi until
+        # the F6 conflict machinery exists.
+        if action == 'upsert':
+            _apply_generated_report(conn, data)
+        elif action == 'delete' and data.get('uid'):
+            conn.execute('DELETE FROM generated_reports WHERE uid=?', (data['uid'],))
     conn.commit()
     conn.close()
 

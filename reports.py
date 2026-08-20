@@ -21,6 +21,7 @@ from config import PI_NAME
 from nor140_format import round_half_up
 from noise_parser import _energy_avg_weighted, run_weight_s
 from webauth import login_required
+from peer_client import sync_event_to_peer
 from noise_db import (get_all_sessions_json, get_session_prof_lafspl,
                       get_run_prof_laeq, percentile as _percentile, resolve_serial)
 from reports_db import (get_report_templates, get_report_template, save_report_template,
@@ -496,6 +497,11 @@ def api_generate_report():
         source_file=source_file,
         input_snapshot_json=json.dumps(snapshot),
     )
+    # Mirror the whole row to the peer (WP9): a report is evidence, and the
+    # Pis are dual-redundant. The peer upserts on uid, so its own local id
+    # numbering is untouched. Fire-and-forget, like every other mutation
+    # event; a missed push self-heals through the full-sync payload.
+    sync_event_to_peer('generated_report', 'upsert', get_generated_report(rid))
     log.info("Report generated [%s] template=%s model=%s thinking=%s: "
             "%s/%s tokens ~ $%.4f",
             date, tmpl['name'], model, thinking_level, tok_in, tok_out, cost_usd)
@@ -645,5 +651,11 @@ def api_list_reports():
 @bp.route('/api/generated-reports/<int:rid>', methods=['DELETE'])
 @login_required
 def api_delete_report(rid):
+    # The uid is read before the row goes: it is the only name the peer knows
+    # the report by (local ids differ per Pi). A pre-WP9 row with no uid never
+    # replicated, so there is nothing to tell the peer about.
+    row = get_generated_report(rid)
     delete_generated_report(rid)
+    if row and row.get('uid'):
+        sync_event_to_peer('generated_report', 'delete', {'uid': row['uid']})
     return jsonify({'ok': True})

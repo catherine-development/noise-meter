@@ -8,6 +8,8 @@ it lives apart from the core noise data layer.
 The report_templates / generated_reports tables themselves are still created by
 noise_db._migrate(), which remains the single schema authority for the app.
 """
+import uuid
+
 from noise_db import get_db, resolve_serial
 
 
@@ -72,6 +74,10 @@ DEFAULT_TEMPLATES = [
 
 
 # ── Report templates ──────────────────────────────────────────────────────────
+# Per-Pi on purpose. Templates are mutable rows edited on either side, so
+# replicating them needs the F6 machinery (UUID keys + conflict surfacing);
+# until then, a template lives on the Pi it was written on. Generated reports,
+# below, are append-only evidence and DO replicate (WP9), keyed by uid.
 
 def get_report_templates():
     conn = get_db()
@@ -135,16 +141,17 @@ def save_generated_report(session_date, template_id, template_name, model,
     input_snapshot_json is the JSON of every input the report was rendered
     from, so view_report can show what was true at generation time.
     instrument_serial names the session with session_date (None/blank = the
-    default serial)."""
+    default serial). uid is minted here (WP9): it is the report's identity
+    across the two Pis — the peer upserts on it, never on the local id."""
     conn = get_db()
     cur = conn.execute(
         'INSERT INTO generated_reports '
-        '  (session_date, instrument_serial, run_number, run_label, template_id, template_name, '
-        '   model, thinking_level, sections_json, input_tokens, output_tokens, cost_usd, '
-        '   source_file, input_snapshot_json) '
-        'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
-        (session_date, resolve_serial(instrument_serial, conn), run_number, run_label,
-         template_id, template_name, model, thinking_level,
+        '  (uid, session_date, instrument_serial, run_number, run_label, template_id, '
+        '   template_name, model, thinking_level, sections_json, input_tokens, '
+        '   output_tokens, cost_usd, source_file, input_snapshot_json) '
+        'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+        (str(uuid.uuid4()), session_date, resolve_serial(instrument_serial, conn),
+         run_number, run_label, template_id, template_name, model, thinking_level,
          sections_json, input_tokens, output_tokens, cost_usd, source_file, input_snapshot_json)
     )
     rid = cur.lastrowid
