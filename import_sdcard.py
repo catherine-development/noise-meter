@@ -99,8 +99,28 @@ def latest_date_on_pi(url, key=None):
         return None
 
 
-def push_to_pi(sessions, url, key):
-    payload = json.dumps({'sessions': sessions}, separators=(',', ':')).encode()
+def mark_complete_dates(sessions):
+    """Stamp complete_date=True on every session in place, and return them.
+
+    This importer is the one caller that can honestly claim completeness: it
+    walked the real card root and fully enumerated every date folder it sent
+    (noise_parser never infers it — path shape inside a ZIP proves nothing,
+    which is how a partial upload used to delete stored runs). The Pi only
+    honours the flag when the payload also carries top-level "prune": true,
+    which push_to_pi() adds; --no-prune leaves both out.
+    """
+    for s in sessions:
+        s['complete_date'] = True
+    return sessions
+
+
+def push_to_pi(sessions, url, key, prune=False):
+    body = {'sessions': sessions}
+    if prune:
+        # The Pi's /import honours a session's complete_date only when the
+        # payload carries this explicit top-level authorisation.
+        body['prune'] = True
+    payload = json.dumps(body, separators=(',', ':')).encode()
     req = urllib.request.Request(
         url.rstrip('/') + '/import',
         data=payload,
@@ -128,6 +148,11 @@ def main():
     parser.add_argument('--serial',  default=SERIAL,
                         help='Instrument serial this card came from (or set INSTRUMENT_SERIAL); '
                              'blank = the Pi\'s default serial')
+    parser.add_argument('--no-prune', action='store_true',
+                        help='Do not delete runs the Pi stores for these dates but the card '
+                             'no longer holds. By default this importer marks each date it '
+                             'fully enumerated as complete, so the Pi prunes stored runs '
+                             'missing from the card (unreadable files are protected).')
     args = parser.parse_args()
 
     sd_root = args.sd_root or SD_ROOT
@@ -136,6 +161,11 @@ def main():
     print(f"Reading SD card from {sd_root}" + (f" (since {since})" if since else "")
           + (f" for instrument {serial}" if serial else " (no --serial: the Pi's default instrument)"))
     sessions = parse_all(sd_root=sd_root, since=since, serial=serial)
+    prune = not args.no_prune
+    if prune and sessions:
+        # This walk enumerated the whole card per date, so — unlike any ZIP
+        # upload — completeness is a fact here, not an inference.
+        mark_complete_dates(sessions)
 
     # Pairs the parser found but could not read. Printed before anything else
     # so a corrupt PROJ folder is never mistaken for a day with one run fewer.
@@ -154,8 +184,14 @@ def main():
         print(f"  {s['d']}  {len(s['projects'])} run(s)  LAeq avg {s['avg']:.1f} dB  max {s['mx']:.1f} dB")
 
     if args.output:
+        out = {'sessions': sessions}
+        if prune:
+            # Replaying this file through /import prunes, because this walk
+            # really did enumerate the whole card; the flag records that fact
+            # explicitly rather than leaving it implied by the sessions.
+            out['prune'] = True
         with open(args.output, 'w') as f:
-            json.dump({'sessions': sessions}, f, separators=(',', ':'))
+            json.dump(out, f, separators=(',', ':'))
         print(f"\nSaved to {args.output}")
 
     if args.push:
@@ -174,8 +210,14 @@ def main():
                 print(f"\n{url}: already up to date (latest: {latest})")
                 continue
             print(f"\nPushing {len(to_send)} new session(s) to {url} (Pi has up to {latest or 'nothing'}) …")
-            result = push_to_pi(to_send, url, key)
+            result = push_to_pi(to_send, url, key, prune=prune)
             print(f"Done: {result}")
+            if result.get('deleted_runs'):
+                print(f"NOTE: the Pi pruned {result['deleted_runs']} stored run(s) "
+                      f"no longer on the card: {', '.join(result.get('deleted', []))}")
+                if result.get('deleted_links'):
+                    print(f"NOTE: {result['deleted_links']} assessment run assignment(s) "
+                          f"were removed with them.")
 
 
 if __name__ == '__main__':

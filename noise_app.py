@@ -347,6 +347,12 @@ def do_upload():
     # serial. Resolved before parsing so the payload pushed to the peer names
     # the serial this Pi actually stored it under.
     serial = resolve_serial(request.form.get('serial'))
+
+    # WP11 (F1): deletion is opt-in, never inferred. The parser no longer
+    # claims complete_date from path shape; only this explicit checkbox may
+    # mark the upload as the whole card for its date(s), and only then are
+    # stored runs missing from it deleted.
+    prune = request.form.get('prune') == '1'
     try:
         if is_folder_upload:
             pairs = [(f.filename, f.read()) for f in folder_files]
@@ -371,10 +377,21 @@ def do_upload():
             flash('No file selected.', 'error')
             return redirect(url_for('upload_page'))
     except Exception as e:
+        # Includes the parser's F8a refusals (ValueError with a readable
+        # reason: too many members, oversized or forged declared sizes).
         if is_folder_upload:
             return _json_error(f'Could not read files: {e}')
         flash(f'Could not read file: {e}', 'error')
         return redirect(url_for('upload_page'))
+
+    # The checkbox is the only thing that may authorise deletion — a .json
+    # payload claiming complete_date for itself (an old export made when the
+    # parser still inferred it) must not delete either (F1).
+    for sess in parsed:
+        if prune:
+            sess['complete_date'] = True
+        else:
+            sess.pop('complete_date', None)
 
     # Pairs the parser found but could not turn into a run. Reported rather than
     # swallowed: "Added 1 session" with a PROJ folder silently missing is how a
@@ -417,8 +434,11 @@ def do_upload():
         known = existing_starts.get((s['d'], resolve_serial(s.get('serial'))), set())
         return any(p['start'] not in known for p in s.get('projects', []))
 
-    new_sessions = [s for s in parsed if _has_new_runs(s)]
-    skipped = [s['d'] for s in parsed if not _has_new_runs(s)]
+    # A prune upload must reach import_sessions() even when every run it
+    # carries is already stored: the point may be exactly that the card now
+    # holds *fewer* runs than the database.
+    new_sessions = list(parsed) if prune else [s for s in parsed if _has_new_runs(s)]
+    skipped = [] if prune else [s['d'] for s in parsed if not _has_new_runs(s)]
 
     if not new_sessions:
         msg = f'All {len(skipped)} session(s) already in database: {", ".join(skipped)}.'
@@ -430,19 +450,35 @@ def do_upload():
 
     # Import sessions. Runs are keyed on their PROJ folder, so a partial upload
     # refreshes or adds runs and never overwrites a different one.
-    import_sessions(new_sessions, metadata=metadata)
+    imported = import_sessions(new_sessions, metadata=metadata)
     if request.form.get('serial') is not None:
         set_setting('last_upload_serial', serial)
 
-    # Push to peer Pi and fetch weather in background
-    push_to_peer(new_sessions)
+    # Push to peer Pi and fetch weather in background. The push carries the
+    # prune authorisation when the operator gave it, so both Pis prune the
+    # same runs instead of the peer's copy resurrecting them on the next pull.
+    push_to_peer(new_sessions, prune=prune)
     threading.Thread(target=_auto_fetch_weather, args=(new_sessions,), daemon=True).start()
 
     msg = f'Added {len(new_sessions)} new session(s)'
     if skipped:
         msg += f' ({len(skipped)} already existed: {", ".join(skipped)})'
     msg += '.' + skip_note
-    if skipped_files:
+    # Deletion is never silent: say exactly what the prune removed — and when
+    # assigned runs went with it, say so, because an assessor must know the
+    # packaging of their evidence changed.
+    if prune:
+        if imported.deleted_runs:
+            msg += (f' Removed {imported.deleted_runs} stored run(s) not in '
+                    f'this upload: '
+                    + ', '.join(f'{d} {sf or "(no source file)"}'
+                                for d, sf in imported.deleted_run_files) + '.')
+            if imported.deleted_links:
+                msg += (f' {imported.deleted_links} assessment run '
+                        f'assignment(s) pointing at them were removed.')
+        else:
+            msg += ' No stored runs needed removing.'
+    if skipped_files or (prune and imported.deleted_runs):
         # Stay on the upload page so the skip note is actually read: the
         # success path redirects to the index, which shows no flashes, and the
         # folder path's 'ok' status navigates away after a second.
@@ -645,20 +681,47 @@ def import_redirect():
 @require_api_key
 def do_import():
     skipped = []
-    if request.files.get('file'):
-        raw = request.files['file'].read()
-        if raw[:2] == b'PK':  # ZIP magic bytes
-            # A ZIP names no instrument itself; ?serial= / form `serial` does,
-            # else the default. JSON payloads carry `serial` per session.
-            sessions = parse_zip(raw, serial=request.args.get('serial')
-                                 or request.form.get('serial'))
-            skipped = list(sessions.skipped)
+    # WP11 (F1): deletion is opt-in per payload. A per-session complete_date
+    # is honoured only when the request carries the top-level authorisation —
+    # "prune": true in a JSON body, or ?prune=1 / form prune=1 beside a ZIP —
+    # so an old peer, exporter or saved JSON file (made when the parser still
+    # inferred complete_date from path shape) can never delete anything.
+    prune = False
+    try:
+        if request.files.get('file'):
+            raw = request.files['file'].read()
+            if raw[:2] == b'PK':  # ZIP magic bytes
+                # A ZIP names no instrument itself; ?serial= / form `serial`
+                # does, else the default. JSON payloads carry `serial` per
+                # session.
+                sessions = parse_zip(raw, serial=request.args.get('serial')
+                                     or request.form.get('serial'))
+                skipped = list(sessions.skipped)
+                prune = (request.args.get('prune') or
+                         request.form.get('prune')) in ('1', 'true')
+                if prune:
+                    # The sender vouches this ZIP is the whole card for its
+                    # date(s); the parser itself never claims that (F1).
+                    for sess in sessions:
+                        sess['complete_date'] = True
+            else:
+                data = json.loads(raw)
+                sessions = data.get('sessions', [data] if 'd' in data else [])
+                prune = data.get('prune') is True
         else:
-            data = json.loads(raw)
+            data = request.get_json(force=True, silent=True) or {}
             sessions = data.get('sessions', [data] if 'd' in data else [])
-    else:
-        data = request.get_json(force=True, silent=True) or {}
-        sessions = data.get('sessions', [data] if 'd' in data else [])
+            prune = data.get('prune') is True
+    except Exception as e:
+        # The parser's F8a refusals (ValueError: zip bomb, forged sizes) and
+        # malformed JSON land here — a readable 400, not a bare 500.
+        app.logger.warning('import refused: %s', e)
+        return jsonify({'error': f'import refused: {e}', 'status': 'error'}), 400
+
+    if not prune:
+        for sess in sessions:
+            if isinstance(sess, dict):
+                sess.pop('complete_date', None)
 
     if not sessions:
         return jsonify({'error': 'no sessions found in payload',
@@ -672,7 +735,18 @@ def do_import():
         # the peer's push_to_peer() records this text as last_push_error.
         app.logger.warning('import rejected: %s', e)
         return jsonify({'error': f'import rejected: {e}', 'status': 'error'}), 409
-    return jsonify({'imported': n, 'status': 'ok', 'skipped': skipped})
+    resp = {'imported': int(n), 'status': 'ok', 'skipped': skipped,
+            'deleted_runs': n.deleted_runs, 'deleted_links': n.deleted_links}
+    if n.deleted_runs:
+        # Deletion is never silent — name what the prune removed, and flag
+        # removed assignments so an assessor knows the packaging changed.
+        resp['deleted'] = [f'{d} {sf or "(no source file)"}'
+                           for d, sf in n.deleted_run_files]
+        resp['message'] = (
+            f'pruned {n.deleted_runs} stored run(s) not in this payload'
+            + (f'; {n.deleted_links} assessment run assignment(s) removed'
+               if n.deleted_links else ''))
+    return jsonify(resp)
 
 
 @app.route('/api/peer-sync', methods=['POST'])

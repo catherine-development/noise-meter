@@ -1085,8 +1085,12 @@ def main(meas_root):
         check('dB' in rep.skipped[0]['reason'] and '140' in rep.skipped[0]['reason'],
               'and says why (level above 140 dB)', rep.skipped[0]['reason'])
         check(rep.skipped[0]['date'] == SESSION_DATE, 'skipped pair carries its date')
-        check(rep[0]['complete_date'] is True and rep[0]['skipped_files'] == ['PROJ0002'],
-              'session marks PROJ0002 as present-but-unreadable',
+        # WP11 (F1): this check used to assert complete_date is True here —
+        # inferred from the date-folder paths. Path shape cannot prove
+        # completeness (a ZIP of one PROJ folder zipped from its parent has
+        # identical paths), so the parser never claims it any more.
+        check(rep[0]['complete_date'] is False and rep[0]['skipped_files'] == ['PROJ0002'],
+              'session marks PROJ0002 as present-but-unreadable, claiming no completeness',
               f"{rep[0]['complete_date']} {rep[0]['skipped_files']}")
         rep2 = _parse_zip(_zip(good1 + [(p2_glob_path, p2_glob)]))
         check(len(rep2.skipped) == 1 and 'only the GLOB' in rep2.skipped[0]['reason'],
@@ -1113,13 +1117,27 @@ def main(meas_root):
         js = r.get_json()
         check(js.get('imported') == 1 and len(js.get('skipped', [])) == 1,
               '/import response lists the skipped pair', str(js)[:200])
-        # It went into the identity DB (the module bound to it). The ZIP held the
-        # date folder with two PROJ folders, so it is a complete date: the other
-        # eight runs are gone from the card and are deleted — but PROJ0002, which
-        # was present and merely unreadable, survives alongside PROJ0001.
-        check([r[1] for r in _runs(pi)] == ['PROJ0001', 'PROJ0002'],
-              'complete-date import over /import deletes absent runs but keeps the skipped one',
+        # WP11 (F1): this used to check that the date-folder ZIP deleted the
+        # eight absent runs — completeness inferred from path shape. Without
+        # the top-level prune authorisation, /import may now only add or
+        # refresh, whatever the ZIP's paths look like.
+        check([r[1] for r in _runs(pi)] == [r[1] for r in base_runs],
+              '/import without prune deletes nothing, date-folder paths or not',
               str([r[1] for r in _runs(pi)]))
+        check(js.get('deleted_runs') == 0, 'and reports zero deletions', str(js)[:200])
+        # With ?prune=1 the sender vouches for completeness: the absent runs
+        # go — but PROJ0002, present on the card and merely unreadable,
+        # survives alongside PROJ0001.
+        r = _c2.post('/import?prune=1',
+                     data={'file': (_io.BytesIO(corrupt_zip), 'x.zip')},
+                     headers={'X-Import-Key': 'test-key'},
+                     content_type='multipart/form-data')
+        js = r.get_json()
+        check([r[1] for r in _runs(pi)] == ['PROJ0001', 'PROJ0002'],
+              '/import with prune deletes absent runs but keeps the skipped one',
+              str([r[1] for r in _runs(pi)]))
+        check(js.get('deleted_runs') == N - 2 and 'pruned' in js.get('message', ''),
+              'and the response says how many runs it removed', str(js)[:200])
         _wa.IMPORT_KEY = ''
         pi.db.import_sessions(restore, metadata=META)
         check(_runs(pi) == base_runs, 'full re-import restores the date again')
