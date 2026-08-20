@@ -92,8 +92,12 @@ def api_update_assessment(aid):
 @bp.route('/api/assessments/<int:aid>', methods=['DELETE'])
 @login_required
 def api_delete_assessment(aid):
-    delete_assessment(aid)
-    sync_event_to_peer('assessment', 'delete', {'id': aid})
+    # The event names the row by uid (the identity the pair agrees on) AND by
+    # local id — a pre-WP10 peer only understands the id, and the ids still
+    # agree while the pair is mid-upgrade. deleted_at rides along so the
+    # peer's tombstone carries the original deletion time.
+    info = delete_assessment(aid)
+    sync_event_to_peer('assessment', 'delete', {'id': aid, **(info or {})})
     return jsonify({'status': 'ok'})
 
 
@@ -132,8 +136,8 @@ def api_update_location(aid, loc_id):
 @bp.route('/api/assessments/<int:aid>/locations/<int:loc_id>', methods=['DELETE'])
 @login_required
 def api_delete_location(aid, loc_id):
-    delete_assessment_location(loc_id)
-    sync_event_to_peer('assessment_location', 'delete', {'id': loc_id})
+    info = delete_assessment_location(loc_id)
+    sync_event_to_peer('assessment_location', 'delete', {'id': loc_id, **(info or {})})
     return jsonify({'status': 'ok'})
 
 
@@ -164,8 +168,8 @@ def api_assign_runs(aid):
 @bp.route('/api/assessment-runs/<int:ar_id>', methods=['DELETE'])
 @login_required
 def api_unassign_run(ar_id):
-    unassign_run(ar_id)
-    sync_event_to_peer('assessment_run', 'delete', {'id': ar_id})
+    info = unassign_run(ar_id)
+    sync_event_to_peer('assessment_run', 'delete', {'id': ar_id, **(info or {})})
     return jsonify({'status': 'ok'})
 
 

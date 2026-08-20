@@ -1199,7 +1199,16 @@ def main(meas_root):
               'offline peer deletes the session on full-sync catch-up')
         check(n_of(b, 'runs') == 0, 'peer runs cascaded')
         check(n_of(b, 'assessment_runs') == 0, 'peer assessment_runs cleared')
-        check(n_of(b, 'assessments') == 1, 'peer assessment itself survives')
+        # Pre-WP10 this asserted == 1: the sender's assessment (same local id)
+        # silently overwrote the peer's own on every full sync — the F6
+        # finding. uid-keyed replication keeps the peer's row AND lands the
+        # sender's as rows of their own.
+        check(n_of(b, 'assessments') == n_of(a, 'assessments') + 1,
+              "peer's own assessment survives, and the sender's arrive beside it "
+              '(uid-keyed since WP10)',
+              f"b={n_of(b, 'assessments')}, a={n_of(a, 'assessments')}")
+        check(b.sql("SELECT COUNT(*) FROM assessments WHERE name='Peer side'")[0][0] == 1,
+              "and the peer's row was not renamed by an id collision")
         check(b.tombstones().get(SESSION_DATE) == tomb[SESSION_DATE],
               'peer relays the tombstone with the original deletion time')
 
@@ -2826,8 +2835,10 @@ def main(meas_root):
         _fp15 = xa.sync.get_full_sync_payload()
         check('generated_reports' in _fp15 and 'weather' in _fp15,
               'the full-sync payload carries reports and weather')
-        check('report_templates' not in _fp15,
-              'and deliberately not report templates (per-Pi until F6)')
+        # WP10/F6: templates replicate now too, uid-keyed with LWW — this
+        # asserted their absence while they were still per-Pi.
+        check('report_templates' in _fp15,
+              'and report templates (replicated by uid since WP10/F6)')
         zc = Side(os.path.join(tmp, 'wp9-full.db'))
         zc.sync.apply_full_sync(json.loads(json.dumps(_fp15, default=str)))
         _zrep = [dict(r) for r in zc.sql(
@@ -2861,8 +2872,8 @@ def main(meas_root):
         _rp15 = open(os.path.join(REPO, 'reports.py'), encoding='utf-8').read()
         check("sync_event_to_peer('generated_report', 'upsert', get_generated_report(rid))" in _rp15,
               'the generate route mirrors the saved row to the peer')
-        check("sync_event_to_peer('generated_report', 'delete', {'uid': row['uid']})" in _rp15,
-              'the delete route mirrors the uid')
+        check("sync_event_to_peer('generated_report', 'delete', info)" in _rp15,
+              'the delete route mirrors the uid (with its tombstone time since WP10)')
 
         # ── 15b. migration of a pre-WP9 database ─────────────────────────────
         print('\n15b. migration of a pre-WP9 database')
