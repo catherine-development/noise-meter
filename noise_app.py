@@ -36,7 +36,7 @@ from noise_db import (init_db, import_sessions, get_all_sessions_json,
                       default_serial, resolve_serial)
 from sync_db import (get_import_log, get_full_sync_payload,
                      apply_full_sync, apply_sync_event, get_last_push_error,
-                     get_sync_conflicts)
+                     get_sync_conflicts, db_now, get_reports_by_uids)
 import users_sync
 from noise_parser import parse_zip, parse_files
 from webauth import (AUTH_AVAILABLE, login_required, require_api_key,
@@ -273,9 +273,17 @@ def api_data():
 @require_api_key
 def api_sync():
     since = request.args.get('since', '1970-01-01T00:00:00')
+    # server_now (WP12/F2): OUR database clock — the same one that stamps
+    # imported_at — for the puller to store as its next watermark, so clock
+    # skew between the Pis cannot strand a session behind a watermark taken
+    # from the receiver's wall clock. Captured before the query: a session
+    # committing while it runs is both included here and re-sent next tick,
+    # which the idempotent import absorbs; captured after, it could be neither.
+    server_now = db_now()
     sessions = get_sessions_since(since)
     return jsonify({'sessions': sessions, 'count': len(sessions),
-                    'pi_name': PI_NAME, 'since': since})
+                    'pi_name': PI_NAME, 'since': since,
+                    'server_now': server_now})
 
 
 def _read_version():
@@ -605,8 +613,11 @@ def edit_session(date):
         notes          = request.form.get('notes', '').strip(),
     )
     serial = _req_serial()
-    update_session_metadata(date, serial=serial, **meta)
-    sync_event_to_peer('session_meta', 'upsert', {'date': date, 'serial': serial, **meta})
+    # The stamps (meta_updated_at/meta_writer, WP12/F4) ride in the event so
+    # the peer applies the edit through the same LWW gate the full sync uses.
+    stamps = update_session_metadata(date, serial=serial, **meta) or {}
+    sync_event_to_peer('session_meta', 'upsert',
+                       {'date': date, 'serial': serial, **meta, **stamps})
     if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
         return jsonify({'status': 'ok', 'date': date, 'serial': serial})
     flash(f'Session {date} updated.', 'success')
@@ -628,10 +639,11 @@ def edit_run_tag(date, run_number):
     # number it was rendered with may be stale by the time this posts, and the
     # peer's numbering can differ while it is missing a run for the date.
     source_file = (body.get('source_file') or '').strip() or None
-    update_run_location_tag(date, run_number, tag, serial=serial, source_file=source_file)
+    stamps = update_run_location_tag(date, run_number, tag, serial=serial,
+                                     source_file=source_file) or {}
     sync_event_to_peer('run_tag', 'upsert', {
         'session_date': date, 'serial': serial, 'run_number': run_number,
-        'source_file': source_file, 'location_tag': tag or None})
+        'source_file': source_file, 'location_tag': tag or None, **stamps})
     return jsonify({'status': 'ok', 'tag': tag or None})
 
 
@@ -768,8 +780,25 @@ def api_peer_sync():
 @app.route('/api/peer-sync-full', methods=['GET'])
 @require_api_key
 def api_peer_sync_full():
-    """Return full syncable state so peer can catch up after being offline."""
-    return jsonify(get_full_sync_payload())
+    """Return full syncable state so peer can catch up after being offline.
+
+    ?light=1 (WP12/F8b): generated reports come back as {uid, created_at}
+    digests instead of full bodies — the 15-minute tick was re-shipping every
+    report's sections_json and input_snapshot_json forever. An old caller
+    never sends the parameter and gets the full payload unchanged."""
+    light = request.args.get('light') == '1'
+    return jsonify(get_full_sync_payload(light=light))
+
+
+@app.route('/api/reports-sync', methods=['GET'])
+@require_api_key
+def api_reports_sync():
+    """Full generated_reports rows for ?uids=a,b,c — the fetch half of the
+    light-mode digest (WP12/F8b). Batch capped at sync_db.REPORTS_SYNC_MAX;
+    the puller chunks accordingly."""
+    uids = [u for u in request.args.get('uids', '').split(',') if u]
+    rows = get_reports_by_uids(uids)
+    return jsonify({'reports': rows, 'count': len(rows)})
 
 
 @app.route('/api/sync-conflicts')
