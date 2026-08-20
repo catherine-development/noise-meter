@@ -14,7 +14,7 @@ import urllib.request
 from datetime import datetime, timezone
 
 from config import PEER_URL, IMPORT_KEY
-from sync_db import apply_full_sync, set_sync_state
+from sync_db import pull_full_sync_from_peer, set_sync_state
 
 log = logging.getLogger(__name__)
 
@@ -37,7 +37,7 @@ def _describe_error(e):
     return f'{type(e).__name__}: {e}'
 
 
-def push_to_peer(sessions, prune=False):
+def push_to_peer(sessions, prune=False, origin='operator-relay'):
     """Push sessions to peer Pi in a background thread (best-effort).
 
     prune=True carries the operator's explicit complete-date authorisation
@@ -45,6 +45,17 @@ def push_to_peer(sessions, prune=False):
     /import requires before honouring any per-session complete_date — so a
     prune the operator asked for lands on both Pis instead of the peer's
     copy resurrecting the runs on the next sync pull.
+
+    origin (WP14): every current caller relays a deliberate operator action —
+    do_upload's immediate relay of a fresh import, /admin/push-to-peer's
+    explicit resend — so the payload's top-level "origin" defaults to
+    'operator-relay': the peer clears any session tombstone (the operator
+    restored the date; both Pis must converge on restored) but applies
+    metadata under the replay rules, never as a second stamped edit (the
+    operator's edit was stamped once, on the Pi where it happened, and
+    replicates through the session_meta LWW gate). A pre-WP14 peer ignores
+    the key and treats the push as a plain operator import — exactly its
+    behaviour today.
 
     Returns the thread (or None when there is nothing to do) so callers that
     need to know the outcome — tests, mainly — can join it. A failure is
@@ -56,7 +67,7 @@ def push_to_peer(sessions, prune=False):
         return None
 
     def _do_push():
-        body = {'sessions': sessions}
+        body = {'sessions': sessions, 'origin': origin}
         if prune:
             body['prune'] = True
         payload = json.dumps(body, separators=(',', ':')).encode()
@@ -113,22 +124,26 @@ def sync_event_to_peer(entity, action, data):
 
 
 def startup_sync_from_peer():
-    """On startup, pull full state from peer and apply it (catches up on offline period)."""
+    """On startup, pull the peer's syncable state and apply it (catches up on
+    the offline period).
+
+    Since WP14/F3 this is the same bounded pull the 15-minute tick makes —
+    sync_db.pull_full_sync_from_peer(): light payload (report digests, not
+    bodies), missing reports fetched by uid in chunks, old-peer fallback to
+    the full payload. It was the one remaining unbounded transfer, re-shipping
+    every report body on every restart, forever. The light call keeps this
+    path's original 15 s timeout; the chunked report fetches have their own.
+    """
     if not PEER_URL or not IMPORT_KEY:
         return
     def _do():
         import time
         time.sleep(8)  # let both Pis finish starting before attempting peer connection
         try:
-            req = urllib.request.Request(
-                PEER_URL.rstrip('/') + '/api/peer-sync-full',
-                headers={'X-Import-Key': IMPORT_KEY, 'User-Agent': _PEER_UA},
-                method='GET',
-            )
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                data = json.loads(resp.read())
-            apply_full_sync(data)
-            log.info('Startup peer sync: applied full payload from peer')
+            fetched = pull_full_sync_from_peer(PEER_URL, IMPORT_KEY,
+                                               light_timeout=15, ua=_PEER_UA)
+            log.info('Startup peer sync: applied light payload from peer%s',
+                     f' ({fetched} report(s) fetched by uid)' if fetched else '')
         except Exception as e:
             log.warning('Startup peer sync failed: %s', e)
         # User sync (WP10 part B): same catch-up, for the flight-tracker

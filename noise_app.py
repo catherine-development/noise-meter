@@ -36,7 +36,8 @@ from noise_db import (init_db, import_sessions, get_all_sessions_json,
                       default_serial, resolve_serial)
 from sync_db import (get_import_log, get_full_sync_payload,
                      apply_full_sync, apply_sync_event, get_last_push_error,
-                     get_sync_conflicts, db_now, get_reports_by_uids)
+                     get_sync_conflicts, db_now, get_reports_by_uids,
+                     get_peer_clock_skew)
 import users_sync
 from noise_parser import parse_zip, parse_files
 from webauth import (AUTH_AVAILABLE, login_required, require_api_key,
@@ -305,7 +306,15 @@ APP_VERSION = _read_version()
 
 @app.route('/health')
 def health():
-    return jsonify({'status': 'ok', 'pi': PI_NAME, 'version': APP_VERSION})
+    # peer_clock_skew_s (WP14/F4): the last skew the sync tick measured
+    # against the peer's server_now, seconds, local minus peer — null until a
+    # tick has measured one (or when the peer predates server_now). LWW
+    # ordering is wall-clock, so this is the number to watch: it degrades
+    # quietly as the clocks drift. peer_clock_skew_at says how fresh it is.
+    skew = get_peer_clock_skew() or {}
+    return jsonify({'status': 'ok', 'pi': PI_NAME, 'version': APP_VERSION,
+                    'peer_clock_skew_s': skew.get('skew_s'),
+                    'peer_clock_skew_at': skew.get('at')})
 
 
 # ── Upload page ────────────────────────────────────────────────────────────────
@@ -465,7 +474,13 @@ def do_upload():
     # Push to peer Pi and fetch weather in background. The push carries the
     # prune authorisation when the operator gave it, so both Pis prune the
     # same runs instead of the peer's copy resurrecting them on the next pull.
-    push_to_peer(new_sessions, prune=prune)
+    # origin='operator-relay' (WP14): the peer receiving this is receiving a
+    # fresh operator import relayed immediately — if the operator restored a
+    # deleted date, the peer's tombstone must go too, or its next full sync
+    # would re-delete the restoration here. Metadata still takes the replay
+    # rules on the peer: the form's metadata was stamped HERE, once, by
+    # import_sessions, and replicates through the session_meta LWW gate.
+    push_to_peer(new_sessions, prune=prune, origin='operator-relay')
     threading.Thread(target=_auto_fetch_weather, args=(new_sessions,), daemon=True).start()
 
     msg = f'Added {len(new_sessions)} new session(s)'
@@ -701,7 +716,24 @@ def do_import():
     # "prune": true in a JSON body, or ?prune=1 / form prune=1 beside a ZIP —
     # so an old peer, exporter or saved JSON file (made when the parser still
     # inferred complete_date from path shape) can never delete anything.
+    #
+    # WP14: a JSON body may also carry a top-level "origin" naming who is
+    # speaking — 'operator-relay' from push_to_peer (a relay of a fresh
+    # operator import: tombstones cleared, metadata under replay rules) or
+    # 'peer' (pure mechanical replay: tombstones respected, metadata through
+    # the LWW gate). Honouring it here is safe because every /import request
+    # is API-key-authenticated (@require_api_key above): only the peer — or
+    # the operator's own tooling — holds the key. An absent or unknown value
+    # means 'operator' (import_sdcard.py, curl by hand, an old peer's push),
+    # which keeps today's restore-and-overwrite semantics; a ZIP body is
+    # always an operator. See noise_db.import_sessions for the decision table.
     prune = False
+    origin = 'operator'
+
+    def _origin_of(payload_dict):
+        o = payload_dict.get('origin')
+        return o if o in ('operator-relay', 'peer') else 'operator'
+
     try:
         if request.files.get('file'):
             raw = request.files['file'].read()
@@ -723,10 +755,12 @@ def do_import():
                 data = json.loads(raw)
                 sessions = data.get('sessions', [data] if 'd' in data else [])
                 prune = data.get('prune') is True
+                origin = _origin_of(data)
         else:
             data = request.get_json(force=True, silent=True) or {}
             sessions = data.get('sessions', [data] if 'd' in data else [])
             prune = data.get('prune') is True
+            origin = _origin_of(data)
     except Exception as e:
         # The parser's F8a refusals (ValueError: zip bomb, forged sizes) and
         # malformed JSON land here — a readable 400, not a bare 500.
@@ -743,7 +777,7 @@ def do_import():
                         'skipped': skipped}), 400
 
     try:
-        n = import_sessions(sessions)
+        n = import_sessions(sessions, origin=origin)
     except sqlite3.IntegrityError as e:
         # Nothing was written (import_sessions commits once, at the end), but
         # say what the database refused rather than 500 with a bare traceback —
@@ -838,7 +872,12 @@ def admin_purge_before():
 @app.route('/admin/push-to-peer', methods=['POST'])
 @require_api_key
 def admin_push_to_peer():
-    """Push specific sessions (by date) or all sessions to peer Pi."""
+    """Push specific sessions (by date) or all sessions to peer Pi.
+
+    Goes as push_to_peer's default origin='operator-relay' (WP14): this is an
+    operator explicitly naming what the peer should hold, i.e. a repair tool
+    — it may restore a date the peer tombstoned. The export payload carries
+    no metadata or stamps, so the peer's stored metadata is untouched."""
     body = request.get_json(silent=True) or {}
     dates = body.get('dates') or request.args.getlist('date') or None
     sessions = get_sessions_export_format(dates=dates)

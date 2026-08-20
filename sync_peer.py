@@ -28,9 +28,9 @@ if _env_file.exists():
                 os.environ.setdefault(k.strip(), v.strip().strip("'\""))
 
 from noise_db import init_db, import_sessions
-from sync_db import (get_last_sync_time, update_last_sync_time,
-                     apply_full_sync, request_since,
-                     report_uids_to_fetch, apply_report_rows, REPORTS_SYNC_MAX)
+from sync_db import (get_last_sync_time, update_last_sync_time, request_since,
+                     pull_full_sync_from_peer, record_peer_clock_skew,
+                     CLOCK_SKEW_WARN_S)
 from users_sync import apply_users
 from weather import fill_weather_gaps
 
@@ -66,13 +66,29 @@ try:
     })
     with urllib.request.urlopen(req, timeout=30) as resp:
         data = json.loads(resp.read())
+    # Peer clock skew (WP14/F4) — measured against the response's server_now
+    # while it is fresh. Observability only: every LWW comparison is
+    # wall-clock ordered, so a slow clock's genuinely-later edit loses; this
+    # is the monitoring hook that makes that hazard visible (in sync_state
+    # and /health) before it bites. An old peer sends no server_now → None,
+    # and the last stored measurement stands, dated by its own timestamp.
+    skew = record_peer_clock_skew(data.get('server_now'))
+    if skew is not None and abs(skew) > CLOCK_SKEW_WARN_S:
+        log.warning('Peer clock skew is %.1f s (local minus peer). LWW '
+                    'ordering is wall-clock: with this much skew, edits made '
+                    'genuinely later on the slower Pi can lose. Check '
+                    'chrony/NTP on both Pis.', skew)
 
     sessions = data.get('sessions', [])
     peer_name = data.get('pi_name', 'peer')
     log.info('Received %d session(s) from %s', len(sessions), peer_name)
 
     if sessions:
-        n = import_sessions(sessions)
+        # origin='peer' (WP14/F1+F2): this is mechanical replay — it may not
+        # overwrite a stamped metadata edit outside the LWW gate, and it may
+        # not resurrect a tombstoned session unless the payload's imported_at
+        # proves the peer's copy postdates the deletion.
+        n = import_sessions(sessions, origin='peer')
         log.info('Imported %d session(s)', n)
         # Weather gap-fill (WP9): a session can arrive without a weather row —
         # the sender had no coordinates yet, or its own fetch had not run.
@@ -101,36 +117,16 @@ try:
     # an edit, that event is gone. The full payload is idempotent and
     # LWW-gated (see sync_db), so pulling it on every 15-minute tick — not
     # only at service startup — bounds the divergence window to one tick
-    # instead of one restart. light=1 (WP12/F8b): generated reports arrive as
-    # {uid, created_at} digests rather than full bodies, and only the ones
-    # missing here are fetched by uid — the tick used to re-ship every
-    # report's sections_json and input snapshot forever. An old peer ignores
-    # the parameter and sends the full payload, which apply_full_sync still
-    # handles (no digest key → nothing extra to fetch). Best-effort: a
-    # failure here must not fail the sync run that already imported the
-    # measurement data.
+    # instead of one restart. The pull itself — light payload, digest diff,
+    # chunked report fetch, old-peer fallback — is
+    # sync_db.pull_full_sync_from_peer() since WP14/F3, shared with the
+    # startup sync in peer_client.py, which used to fetch the full unbounded
+    # payload. Best-effort: a failure here must not fail the sync run that
+    # already imported the measurement data.
     try:
-        full_req = urllib.request.Request(
-            f"{PEER_URL.rstrip('/')}/api/peer-sync-full?light=1",
-            headers={'X-Import-Key': IMPORT_KEY,
-                     'User-Agent': 'noise-meter-sync/1.0'})
-        with urllib.request.urlopen(full_req, timeout=30) as resp:
-            full_payload = json.loads(resp.read())
-        apply_full_sync(full_payload)
-        digest = full_payload.get('generated_reports_digest')
-        fetched = 0
-        if digest is not None:
-            need = report_uids_to_fetch(digest)
-            for i in range(0, len(need), REPORTS_SYNC_MAX):
-                chunk = need[i:i + REPORTS_SYNC_MAX]
-                rep_req = urllib.request.Request(
-                    f"{PEER_URL.rstrip('/')}/api/reports-sync?uids="
-                    + urllib.parse.quote(','.join(chunk)),
-                    headers={'X-Import-Key': IMPORT_KEY,
-                             'User-Agent': 'noise-meter-sync/1.0'})
-                with urllib.request.urlopen(rep_req, timeout=30) as resp:
-                    fetched += apply_report_rows(
-                        json.loads(resp.read()).get('reports', []))
+        fetched = pull_full_sync_from_peer(PEER_URL, IMPORT_KEY,
+                                           light_timeout=30,
+                                           ua='noise-meter-sync/1.0')
         if fetched:
             log.info('Full-sync catch-up applied (%d report(s) fetched by uid)',
                      fetched)

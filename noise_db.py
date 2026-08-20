@@ -876,11 +876,103 @@ class ImportResult(int):
     deleted_run_files = ()
 
 
-def import_sessions(sessions_data, metadata=None):
+# Who is speaking when import_sessions() runs (WP14) — see its docstring for
+# what each one may and may not do to tombstones and metadata.
+IMPORT_ORIGINS = ('operator', 'operator-relay', 'peer')
+
+
+def _replay_session_meta(conn, date, serial, values, in_ts, in_writer):
+    """Peer-origin metadata rules for one session (WP14/F1). Caller commits.
+
+    Mirrors sync_db._apply_session_meta's ordering rules, without its
+    conflict bookkeeping: the 15-minute full-sync tick routes the same row
+    through the real gate, which records the loser in sync_conflicts. This
+    path is a measurement carrier, and its one job is to never regress a
+    stamped edit — the old COALESCE overwrote a newer hand edit with the
+    peer's stale copy while leaving the newer stamp in place, so the stale
+    values then replicated everywhere as the apparent LWW winner.
+
+      - incoming stamped: overwrite all six fields AND the stamps, but only
+        when the (meta_updated_at, meta_writer) tuple is strictly newer than
+        the stored one (NULL stamps compare as '', so a stamped payload beats
+        a never-edited row; an equal tuple is the same write echoed back).
+      - incoming stampless (old peer): fill NULL columns only, and only when
+        the stored row is unstamped — a stamped edit that cleared a field
+        keeps it clear.
+    """
+    row = conn.execute(
+        'SELECT recorder_name, location_label, postcode, lat, lng, notes, '
+        '       meta_updated_at, meta_writer FROM sessions '
+        'WHERE date=? AND instrument_serial=?', (date, serial)).fetchone()
+    if row is None:
+        return
+    if in_ts is None:
+        if row['meta_updated_at'] is not None:
+            return   # a stamped local edit beats unstamped data
+        conn.execute(
+            'UPDATE sessions SET '
+            '  recorder_name=COALESCE(recorder_name, ?), '
+            '  location_label=COALESCE(location_label, ?), '
+            '  postcode=COALESCE(postcode, ?), '
+            '  lat=COALESCE(lat, ?), lng=COALESCE(lng, ?), '
+            '  notes=COALESCE(notes, ?) '
+            'WHERE date=? AND instrument_serial=?',
+            (*values, date, serial))
+        return
+    local_key = ((row['meta_updated_at'] or ''), (row['meta_writer'] or ''))
+    if ((in_ts or ''), (in_writer or '')) <= local_key:
+        return   # stale or already-held write; the tick's gate records losers
+    conn.execute(
+        'UPDATE sessions SET recorder_name=?, location_label=?, postcode=?, '
+        '  lat=?, lng=?, notes=?, meta_updated_at=?, meta_writer=? '
+        'WHERE date=? AND instrument_serial=?',
+        (*values, in_ts, in_writer, date, serial))
+
+
+def import_sessions(sessions_data, metadata=None, origin='operator'):
     """Import sessions. Per-session metadata/weather (as sent by
     get_sessions_since() for peer sync) takes precedence when present;
     the `metadata` kwarg is the fallback used by the single-session manual
     upload form, which has no per-session metadata of its own.
+
+    Origin (WP14). `origin` names who is speaking, because the same payload
+    shape means different things from different mouths — an operator action
+    may restore a deleted date and write metadata as a stamped edit; a
+    mechanical replay may never override a stamped edit and never resurrect
+    a deletion it cannot prove is stale.
+
+    * 'operator' (default — the web upload, import_sdcard.py, and any
+      /import whose payload names no origin): a person deliberately
+      (re)importing a card. Metadata may fill AND overwrite through the
+      COALESCE below, and when that actually changes a stored value the
+      session's meta_updated_at/meta_writer are stamped, so the import is
+      a first-class LWW write that replicates like any hand edit. A
+      session tombstone for the (date, serial) is cleared: re-importing a
+      deleted date is a deliberate restoration.
+    * 'operator-relay' (the peer's /import receiving push_to_peer's
+      immediate relay of a fresh operator import): the restoration must
+      converge on both Pis, so the tombstone is cleared exactly as for
+      'operator' — but metadata follows the replay rules below: the
+      operator's own metadata edit was stamped on the Pi where it
+      happened, once, and replicates through the session_meta LWW gate,
+      not by this relay stamping a second, competing edit here.
+    * 'peer' (sync_peer.py's 15-minute pull, and an /import push whose
+      payload says origin='peer'): mechanical replay. A tombstoned
+      (date, serial) is skipped entirely unless the payload's own
+      imported_at proves the copy is at least as new as the deletion
+      (>= — session-wins-ties, the exact convention
+      sync_db._apply_tombstones uses in the other direction, so both Pis
+      pick the same survivor; F2: WP12's deliberate watermark overlap
+      meant a replay of a recently-imported-then-deleted session
+      resurrected it, because the tombstone was dropped unconditionally).
+      Metadata never takes the COALESCE overwrite: a payload carrying
+      meta_updated_at/meta_writer goes through the same LWW comparison as
+      sync_db's session_meta gate, and a stampless payload (old peer) may
+      only fill columns that are NULL here — never any column of a row
+      that carries a stamp (F1: the old unconditional COALESCE let a
+      peer's stale copy overwrite a newer hand edit *without touching the
+      stamps*, so the corruption then replicated onward as the apparent
+      LWW winner).
 
     Run identity. Runs are upserted on (session_id, source_file) — the PROJ
     folder the measurement came from, which is the meter's own name for it and
@@ -915,6 +1007,8 @@ def import_sessions(sessions_data, metadata=None):
     each removed link so the deletion replicates and a peer's stale full
     sync cannot resurrect it. The counts come back on the ImportResult.
     """
+    if origin not in IMPORT_ORIGINS:
+        raise ValueError(f'unknown import origin: {origin!r}')
     meta = metadata or {}
     conn = get_db()
     imported = 0
@@ -934,23 +1028,83 @@ def import_sessions(sessions_data, metadata=None):
             lat            = sess.get('lat',  meta.get('lat'))
             lng            = sess.get('lng',  meta.get('lng'))
             notes          = sess.get('notes', meta.get('notes')) or None
+            incoming_meta  = (recorder_name, location_label, postcode, lat, lng, notes)
+
+            # Tombstone (WP14/F2). An operator (re)import — or its immediate
+            # relay to the peer — supersedes any earlier deletion of the date:
+            # that is a deliberate restoration, and both Pis must converge on
+            # restored. A mechanical peer replay must NOT: it is skipped
+            # unless the payload's own imported_at (the sender's clock, the
+            # same one deleted_at is compared against everywhere) proves the
+            # copy is at least as new as the deletion. A stampless payload
+            # (old peer, no imported_at key) can never resurrect.
+            if origin == 'peer':
+                tomb = conn.execute(
+                    'SELECT deleted_at FROM deleted_sessions '
+                    'WHERE date=? AND instrument_serial=?', (date, serial)).fetchone()
+                if tomb is not None:
+                    sender_imported = sess.get('imported_at')
+                    if not (sender_imported and sender_imported >= tomb['deleted_at']):
+                        continue   # replay of a deleted session — not resurrected
+            conn.execute('DELETE FROM deleted_sessions WHERE date=? AND instrument_serial=?',
+                         (date, serial))
+
             # run_count / avg_laeq / max_laeq are deliberately not taken from the
             # payload: they describe whatever was uploaded, not what is stored.
             # _recompute_session_aggregates() below fills them from the runs.
-            conn.execute(
-                'INSERT INTO sessions '
-                '  (date, instrument_serial, recorder_name, location_label, postcode, lat, lng, notes) '
-                'VALUES (?,?,?,?,?,?,?,?) '
-                'ON CONFLICT(date, instrument_serial) DO UPDATE SET '
-                '  recorder_name=COALESCE(excluded.recorder_name, sessions.recorder_name), '
-                '  location_label=COALESCE(excluded.location_label, sessions.location_label), '
-                '  postcode=COALESCE(excluded.postcode, sessions.postcode), '
-                '  lat=COALESCE(excluded.lat, sessions.lat), '
-                '  lng=COALESCE(excluded.lng, sessions.lng), '
-                '  notes=COALESCE(excluded.notes, sessions.notes), '
-                '  imported_at=datetime(\'now\')',
-                (date, serial, recorder_name, location_label, postcode, lat, lng, notes)
-            )
+            if origin == 'peer':
+                # Replay semantics (F1): the upsert leaves every stored
+                # metadata column exactly as it is; _replay_session_meta()
+                # below applies the payload's copy under the LWW rules. A
+                # fresh INSERT takes the payload values (and stamps) whole —
+                # there is nothing stored to protect.
+                conn.execute(
+                    'INSERT INTO sessions '
+                    '  (date, instrument_serial, recorder_name, location_label, postcode, '
+                    '   lat, lng, notes, meta_updated_at, meta_writer) '
+                    'VALUES (?,?,?,?,?,?,?,?,?,?) '
+                    'ON CONFLICT(date, instrument_serial) DO UPDATE SET '
+                    '  imported_at=datetime(\'now\')',
+                    (date, serial, recorder_name, location_label, postcode, lat, lng,
+                     notes, sess.get('meta_updated_at'), sess.get('meta_writer'))
+                )
+                _replay_session_meta(conn, date, serial, incoming_meta,
+                                     sess.get('meta_updated_at'), sess.get('meta_writer'))
+            else:
+                # Operator semantics: fill-and-overwrite (payload non-null
+                # wins), and when that actually changes a stored value, stamp
+                # it (WP14/F1) — the import is then a first-class LWW write
+                # that replicates through the session_meta gate instead of
+                # silently diverging from the peer's stamped copy.
+                stored_meta = conn.execute(
+                    'SELECT recorder_name, location_label, postcode, lat, lng, notes '
+                    'FROM sessions WHERE date=? AND instrument_serial=?',
+                    (date, serial)).fetchone()
+                conn.execute(
+                    'INSERT INTO sessions '
+                    '  (date, instrument_serial, recorder_name, location_label, postcode, lat, lng, notes) '
+                    'VALUES (?,?,?,?,?,?,?,?) '
+                    'ON CONFLICT(date, instrument_serial) DO UPDATE SET '
+                    '  recorder_name=COALESCE(excluded.recorder_name, sessions.recorder_name), '
+                    '  location_label=COALESCE(excluded.location_label, sessions.location_label), '
+                    '  postcode=COALESCE(excluded.postcode, sessions.postcode), '
+                    '  lat=COALESCE(excluded.lat, sessions.lat), '
+                    '  lng=COALESCE(excluded.lng, sessions.lng), '
+                    '  notes=COALESCE(excluded.notes, sessions.notes), '
+                    '  imported_at=datetime(\'now\')',
+                    (date, serial, recorder_name, location_label, postcode, lat, lng, notes)
+                )
+                if stored_meta is None:
+                    meta_changed = any(v is not None for v in incoming_meta)
+                else:
+                    merged = tuple(inc if inc is not None else cur
+                                   for inc, cur in zip(incoming_meta, tuple(stored_meta)))
+                    meta_changed = merged != tuple(stored_meta)
+                if meta_changed:
+                    conn.execute(
+                        f'UPDATE sessions SET meta_updated_at=({LWW_NOW_SQL}), meta_writer=? '
+                        'WHERE date=? AND instrument_serial=?',
+                        (local_writer(), date, serial))
             wx = sess.get('wx')
             if wx:
                 # 'hj' is the hourly blob, carried by a WP9+ peer; an older
@@ -969,11 +1123,6 @@ def import_sessions(sessions_data, metadata=None):
                     (date, serial, wx.get('ws'), wx.get('wd'), wx.get('tn'),
                      wx.get('tx'), wx.get('pr'), wx.get('hj'))
                 )
-            # Importing a date supersedes any earlier deletion of it, so drop the
-            # tombstone — otherwise a legitimate SD-card re-import would be deleted
-            # again the next time a peer replayed its full sync payload.
-            conn.execute('DELETE FROM deleted_sessions WHERE date=? AND instrument_serial=?',
-                         (date, serial))
             sess_id = conn.execute(
                 'SELECT id FROM sessions WHERE date=? AND instrument_serial=?',
                 (date, serial)).fetchone()['id']
@@ -1361,7 +1510,15 @@ def get_sessions_since(since):
     own clock (the `server_now` /api/sync returns), so a session whose
     imported_at equals the watermark to the second sits exactly on the
     boundary — with strict >, it was never sent again. Re-sending a boundary
-    session is harmless: import_sessions is a stable-key idempotent upsert."""
+    session is harmless: import_sessions is a stable-key idempotent upsert.
+
+    Each session also carries (WP14): `imported_at` — this sender's clock,
+    which is what lets the puller's origin='peer' import prove a copy newer
+    than its own tombstone instead of never resurrecting — and
+    `meta_updated_at`/`meta_writer`, so the metadata riding the measurement
+    payload arrives with its LWW claim attached and the receiver can route
+    it through the stamp gate rather than blind-merging it (F1). An old
+    receiver ignores all three keys."""
     conn = get_db()
     sessions = conn.execute(
         'SELECT s.*, w.wind_speed, w.wind_dir, w.temp_min, w.temp_max, w.precip, '
@@ -1386,6 +1543,9 @@ def get_sessions_since(since):
             'lat':   sess['lat'],
             'lng':   sess['lng'],
             'notes': sess['notes'],
+            'imported_at':     sess['imported_at'],
+            'meta_updated_at': sess['meta_updated_at'],
+            'meta_writer':     sess['meta_writer'],
             'wx':    _wx(sess, hourly=True),
             'projects': [_run_to_dict(r, full=True) for r in runs],
         })
