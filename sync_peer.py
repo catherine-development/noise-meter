@@ -27,7 +27,8 @@ if _env_file.exists():
                 os.environ.setdefault(k.strip(), v.strip().strip("'\""))
 
 from noise_db import init_db, import_sessions
-from sync_db import get_last_sync_time, update_last_sync_time
+from sync_db import (get_last_sync_time, update_last_sync_time,
+                     apply_full_sync)
 from weather import fill_weather_gaps
 
 PEER_URL  = os.environ.get('PEER_URL', '')
@@ -79,6 +80,25 @@ try:
         log.info('Nothing new')
 
     update_last_sync_time(synced_at)
+
+    # Catch-up for hand-entered data (assessments, session metadata, weather,
+    # generated reports, tombstones). The live mirror of these is a
+    # fire-and-forget event: if this Pi was unreachable when the peer applied
+    # an edit, that event is gone. The full payload is idempotent and
+    # COALESCE-guarded (see sync_db.apply_full_sync), so pulling it on every
+    # 15-minute tick — not only at service startup — bounds the divergence
+    # window to one tick instead of one restart. Best-effort: a failure here
+    # must not fail the sync run that already imported the measurement data.
+    try:
+        full_req = urllib.request.Request(
+            f"{PEER_URL.rstrip('/')}/api/peer-sync-full",
+            headers={'X-Import-Key': IMPORT_KEY,
+                     'User-Agent': 'noise-meter-sync/1.0'})
+        with urllib.request.urlopen(full_req, timeout=30) as resp:
+            apply_full_sync(json.loads(resp.read()))
+        log.info('Full-sync catch-up applied')
+    except Exception as e:
+        log.warning('Full-sync catch-up failed (will retry next tick): %s', e)
 
 except Exception as e:
     log.error('Sync failed: %s', e)
