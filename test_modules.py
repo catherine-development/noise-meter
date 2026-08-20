@@ -2726,6 +2726,266 @@ def main(meas_root):
         check("serial: sess.serial || ''" in _rh,
               'reports.html sends the serial with generate-report')
 
+        # ── 15. session-keyed weather; reports replicate (WP9) ───────────────
+        print('\n15. weather is keyed to the session and replicates; reports replicate')
+        # Weather belongs to the session — its time and location — so it is
+        # keyed (date, instrument_serial) and replicates: the Pis are
+        # dual-redundant, and so are generated reports (append-only evidence,
+        # keyed across the pair by uid, never by local id). Report templates
+        # stay per-Pi until F6.
+        xa = Side(os.path.join(tmp, 'wp9-a.db'))
+        _sA = _payload_copy('WX-A'); _sA['lat'], _sA['lng'] = 53.7997, -1.5492
+        _sB = _payload_copy('WX-B'); _sB['lat'], _sB['lng'] = 51.5072, -0.1276
+        xa.db.import_sessions([_sA, _sB])
+        xa.db.save_weather(SESSION_DATE, {
+            'wind_speed': 7.2, 'wind_dir': 210.0, 'temp_min': 11.0,
+            'temp_max': 19.4, 'precip': 0.2,
+            'hourly_json': '{"temperature_2m":[11.0]}'}, serial='WX-A')
+        xa.db.save_weather(SESSION_DATE, {
+            'wind_speed': 3.1, 'wind_dir': 90.0, 'temp_min': 14.0,
+            'temp_max': 22.0, 'precip': 0.0,
+            'hourly_json': '{"temperature_2m":[14.0]}'}, serial='WX-B')
+        _wxrows = xa.sql('SELECT instrument_serial, wind_speed FROM weather '
+                         'WHERE date=? ORDER BY instrument_serial', SESSION_DATE)
+        check([tuple(r) for r in _wxrows] == [('WX-A', 7.2), ('WX-B', 3.1)],
+              'two same-date sessions hold two distinct weather rows',
+              str([tuple(r) for r in _wxrows]))
+        check(xa.db.get_weather(SESSION_DATE, 'WX-A')['temp_max'] == 19.4
+              and xa.db.get_weather(SESSION_DATE, 'WX-B')['temp_max'] == 22.0,
+              'get_weather(date, serial) reads the right site')
+        _all15 = xa.db.get_all_sessions_json()['sessions']
+        _wxA = next(s for s in _all15 if s['d'] == SESSION_DATE and s['serial'] == 'WX-A')['wx']
+        _wxB = next(s for s in _all15 if s['d'] == SESSION_DATE and s['serial'] == 'WX-B')['wx']
+        check(_wxA['ws'] == 7.2 and _wxB['ws'] == 3.1,
+              'each session card shows its own weather chips',
+              f"{_wxA['ws']} / {_wxB['ws']}")
+        check('hj' not in _wxA, 'the browser payload stays summary-only (no hourly blob)')
+
+        # hourly_json replicates: sync payload carries it as wx.hj, the import
+        # stores it, and an old-format payload (hj missing or None) cannot
+        # erase a stored hourly series.
+        _pl15 = xa.db.get_sessions_since('1970-01-01T00:00:00')
+        _plA = next(p for p in _pl15 if p['serial'] == 'WX-A')
+        check(_plA['wx'].get('hj') == '{"temperature_2m":[11.0]}',
+              "the sync payload's wx dict carries hourly_json as 'hj'",
+              str(_plA['wx']))
+        xb = Side(os.path.join(tmp, 'wp9-b.db'))
+        xb.db.import_sessions(json.loads(json.dumps(_pl15)))   # as the wire delivers it
+        check(xb.db.get_weather(SESSION_DATE, 'WX-A')['hourly_json']
+              == '{"temperature_2m":[11.0]}'
+              and xb.db.get_weather(SESSION_DATE, 'WX-B')['hourly_json']
+              == '{"temperature_2m":[14.0]}',
+              'hourly_json survives the peer round-trip, per serial')
+        _old15 = json.loads(json.dumps(_pl15))
+        for _s15 in _old15:
+            if _s15['serial'] == 'WX-A':
+                _s15['wx'].pop('hj', None)      # pre-WP9 sender: no such key
+            else:
+                _s15['wx']['hj'] = None         # explicit None on the wire
+            _s15['wx']['pr'] = 9.9              # but its summary is fresher
+        xb.db.import_sessions(_old15)
+        _after15 = {r['instrument_serial']: dict(r) for r in xb.sql(
+            'SELECT * FROM weather WHERE date=?', SESSION_DATE)}
+        check(_after15['WX-A']['hourly_json'] == '{"temperature_2m":[11.0]}'
+              and _after15['WX-B']['hourly_json'] == '{"temperature_2m":[14.0]}',
+              'an old-format payload does not erase the stored hourly series')
+        check(_after15['WX-A']['precip'] == 9.9,
+              'while its summary values still refresh the row')
+
+        # A report saved on Side A reaches Side B through the mutation event,
+        # applied by uid — the local ids differ by construction (the decoy
+        # occupies xb's id 1, which is xa's id for the real report).
+        _sections15 = json.dumps({'executive_summary': '<p>quiet</p>'})
+        _snap15 = json.dumps({'stats': {'laeq': 55.5}, 'run_rows': []})
+        rid15 = xa.reports_db.save_generated_report(
+            SESSION_DATE, None, 'WP9 template', 'claude-sonnet-5', 'none',
+            _sections15, 10, 20, 0.01, run_number=1, run_label='Run 1',
+            source_file='PROJ0001', input_snapshot_json=_snap15,
+            instrument_serial='WX-A')
+        rowA15 = xa.reports_db.get_generated_report(rid15)
+        check(bool(rowA15.get('uid')), 'a saved report carries a uid', str(rowA15.get('uid')))
+        xb.reports_db.save_generated_report(
+            SESSION_DATE, None, 'decoy', 'claude-sonnet-5', 'none', '{}', 1, 1, 0.0)
+        _wire15 = json.loads(json.dumps(rowA15, default=str))  # as peer_client sends it
+        xb.sync.apply_sync_event('generated_report', 'upsert', _wire15)
+        _got15 = [dict(r) for r in xb.sql(
+            'SELECT * FROM generated_reports WHERE uid=?', rowA15['uid'])]
+        check(len(_got15) == 1, 'the event lands the report on the peer, keyed by uid')
+        check(_got15[0]['sections_json'] == _sections15
+              and _got15[0]['input_snapshot_json'] == _snap15,
+              'with its sections and input snapshot intact')
+        check(_got15[0]['id'] != rowA15['id'],
+              'under a local id of its own — never the sender\'s',
+              f"{_got15[0]['id']} vs {rowA15['id']}")
+        xb.sync.apply_sync_event('generated_report', 'upsert', _wire15)
+        check(xb.sql('SELECT COUNT(*) FROM generated_reports')[0][0] == 2,
+              'a replayed event upserts rather than twins')
+
+        # …and through the full-sync payload, weather rows included, so an
+        # offline Pi catches up on startup. Templates stay out of it (F6).
+        _fp15 = xa.sync.get_full_sync_payload()
+        check('generated_reports' in _fp15 and 'weather' in _fp15,
+              'the full-sync payload carries reports and weather')
+        check('report_templates' not in _fp15,
+              'and deliberately not report templates (per-Pi until F6)')
+        zc = Side(os.path.join(tmp, 'wp9-full.db'))
+        zc.sync.apply_full_sync(json.loads(json.dumps(_fp15, default=str)))
+        _zrep = [dict(r) for r in zc.sql(
+            'SELECT * FROM generated_reports WHERE uid=?', rowA15['uid'])]
+        check(len(_zrep) == 1 and _zrep[0]['input_snapshot_json'] == _snap15,
+              'full sync lands the report on a fresh Pi, snapshot intact')
+        _zwx = zc.sql('SELECT instrument_serial, hourly_json FROM weather '
+                      'WHERE date=? ORDER BY instrument_serial', SESSION_DATE)
+        check([tuple(r) for r in _zwx] == [
+                  ('WX-A', '{"temperature_2m":[11.0]}'),
+                  ('WX-B', '{"temperature_2m":[14.0]}')],
+              'full sync lands both weather rows, hourly included', str([tuple(r) for r in _zwx]))
+        zc.sync.apply_full_sync(json.loads(json.dumps(_fp15, default=str)))
+        check(zc.sql('SELECT COUNT(*) FROM generated_reports')[0][0] == 1
+              and zc.sql('SELECT COUNT(*) FROM weather')[0][0] == 2,
+              'a replayed full sync changes nothing')
+
+        # deletes replicate by uid; a uid the receiver never had is a no-op
+        xb.sync.apply_sync_event('generated_report', 'delete', {'uid': rowA15['uid']})
+        check(xb.sql('SELECT COUNT(*) FROM generated_reports WHERE uid=?',
+                     rowA15['uid'])[0][0] == 0,
+              'a delete event removes the row by uid')
+        check(xb.sql("SELECT template_name FROM generated_reports")[0][0] == 'decoy',
+              'and leaves the peer\'s own local rows alone')
+        xb.sync.apply_sync_event('generated_report', 'delete', {'uid': 'never-seen'})
+        check(xb.sql('SELECT COUNT(*) FROM generated_reports')[0][0] == 1,
+              'an unknown uid deletes nothing')
+
+        # the routes are wired to the events (the client half of section 11
+        # already generates over HTTP; here the mirroring is what matters)
+        _rp15 = open(os.path.join(REPO, 'reports.py'), encoding='utf-8').read()
+        check("sync_event_to_peer('generated_report', 'upsert', get_generated_report(rid))" in _rp15,
+              'the generate route mirrors the saved row to the peer')
+        check("sync_event_to_peer('generated_report', 'delete', {'uid': row['uid']})" in _rp15,
+              'the delete route mirrors the uid')
+
+        # ── 15b. migration of a pre-WP9 database ─────────────────────────────
+        print('\n15b. migration of a pre-WP9 database')
+        _p15b = os.path.join(tmp, 'prewp9.db')
+        _cx = _sq.connect(_p15b)
+        _cx.executescript("""
+            CREATE TABLE sessions(id INTEGER PRIMARY KEY, date TEXT UNIQUE NOT NULL,
+              run_count INTEGER, avg_laeq REAL, max_laeq REAL, recorder_name TEXT,
+              location_label TEXT, postcode TEXT, lat REAL, lng REAL,
+              imported_at TEXT DEFAULT (datetime('now')), notes TEXT);
+            CREATE TABLE runs(id INTEGER PRIMARY KEY,
+              session_id INTEGER REFERENCES sessions(id) ON DELETE CASCADE,
+              run_number INTEGER, start_time TEXT, n_samples INTEGER,
+              step INTEGER DEFAULT 1, avg_laeq REAL, min_laeq REAL, max_laeq REAL,
+              max_lcpeak REAL, laeq_json TEXT, lcpeak_json TEXT, source_file TEXT,
+              UNIQUE(session_id, run_number));
+            CREATE TABLE deleted_sessions(date TEXT PRIMARY KEY,
+              deleted_at TEXT DEFAULT (datetime('now')));
+            CREATE TABLE weather(date TEXT PRIMARY KEY, wind_speed REAL,
+              wind_dir REAL, temp_min REAL, temp_max REAL, precip REAL,
+              hourly_json TEXT);
+            CREATE TABLE generated_reports(id INTEGER PRIMARY KEY, session_date TEXT NOT NULL,
+              run_number INTEGER, run_label TEXT, template_id INTEGER, template_name TEXT,
+              model TEXT NOT NULL, thinking_level TEXT NOT NULL DEFAULT 'none',
+              sections_json TEXT NOT NULL, input_tokens INTEGER, output_tokens INTEGER,
+              cost_usd REAL, created_at TEXT, source_file TEXT, input_snapshot_json TEXT);
+            CREATE TABLE app_settings(key TEXT PRIMARY KEY, value TEXT);
+            INSERT INTO app_settings VALUES('instrument_serial','1402755');
+            INSERT INTO sessions(id,date,run_count) VALUES(3,'2026-08-12',1);
+            INSERT INTO runs(id,session_id,run_number,start_time,avg_laeq,source_file)
+              VALUES(1,3,1,'12:00:00',55.0,'PROJ0001');
+            INSERT INTO weather VALUES('2026-08-12',7.5,180.0,10.0,20.0,0.0,'{"h":1}'),
+                                      ('2026-08-13',NULL,NULL,NULL,NULL,NULL,NULL);
+            INSERT INTO generated_reports(id,session_date,run_number,model,sections_json)
+              VALUES(1,'2026-08-12',1,'claude-sonnet-5','{}'),
+                    (2,'2026-08-12',NULL,'claude-opus-4-6','{}');
+        """)
+        _cx.commit(); _cx.close()
+        _err = _migrate_only(_p15b)
+        check(_err is None, 'a pre-WP9 database migrates', repr(_err))
+        _cx = _sq.connect(_p15b); _cx.row_factory = _sq.Row
+        _wxm = [dict(r) for r in _cx.execute(
+            'SELECT * FROM weather ORDER BY date').fetchall()]
+        check([(r['date'], r['instrument_serial']) for r in _wxm]
+              == [('2026-08-12', '1402755'), ('2026-08-13', '1402755')],
+              'weather rows re-keyed under the default serial', str(_wxm))
+        check(_wxm[0]['wind_speed'] == 7.5 and _wxm[0]['hourly_json'] == '{"h":1}',
+              'weather values and the hourly blob survive the rebuild')
+        check('PRIMARY KEY (date, instrument_serial)' in _cx.execute(
+            "SELECT sql FROM sqlite_master WHERE name='weather'").fetchone()[0],
+              'the weather PK is now (date, instrument_serial)')
+        _uids = [r['uid'] for r in _cx.execute(
+            'SELECT uid FROM generated_reports ORDER BY id').fetchall()]
+        check(all(_uids) and len(set(_uids)) == 2,
+              'existing reports are backfilled with distinct uids', str(_uids))
+        check(_cx.execute("SELECT sql FROM sqlite_master "
+                          "WHERE name='idx_generated_reports_uid'").fetchone() is not None,
+              'and the uid unique index exists')
+        _cx.close()
+        _err = _migrate_only(_p15b)
+        check(_err is None, 'the migration is idempotent', repr(_err))
+        _cx = _sq.connect(_p15b); _cx.row_factory = _sq.Row
+        check([r['uid'] for r in _cx.execute(
+                  'SELECT uid FROM generated_reports ORDER BY id').fetchall()] == _uids,
+              'a second migration keeps the same uids (they are identity, not state)')
+        check(_cx.execute('SELECT COUNT(*) FROM weather').fetchone()[0] == 2,
+              'and the weather rows are not duplicated')
+        _cx.close()
+        # a weather table with no date column cannot be re-keyed automatically
+        _pbad15 = _build('bad_weather.db',
+            'CREATE TABLE weather(session_id INTEGER PRIMARY KEY, wind_speed REAL);')
+        _err = _migrate_only(_pbad15)
+        check(type(_err).__name__ == 'MigrationUnsafe',
+              'an unmappable weather table refuses the migration', repr(_err))
+
+        # ── 15c. weather gap-fill on the sync-pull path ───────────────────────
+        print('\n15c. the receiving Pi fills weather gaps after a sync pull')
+        # A session can arrive by sync without weather (the sender had not
+        # fetched). sync_peer.py runs fill_weather_gaps() after importing;
+        # the fetch itself is stubbed here.
+        yc = Side(os.path.join(tmp, 'wp9-pull.db'))   # constructed last: the
+        # lazy noise_db import inside weather.py binds to the newest Side
+        _plnc = json.loads(json.dumps(_pl15))
+        for _s15 in _plnc:
+            _s15.pop('wx', None)
+        yc.db.import_sessions(_plnc)
+        check(yc.sql('SELECT COUNT(*) FROM weather')[0][0] == 0,
+              'the pull landed sessions but no weather')
+        import weather as _wxmod15
+        _calls15 = []
+        def _fake_fetch15(date, lat, lng):
+            _calls15.append((date, lat, lng))
+            return {'wind_speed': 1.0, 'wind_dir': 2.0, 'temp_min': 3.0,
+                    'temp_max': 4.0, 'precip': 0.0, 'hourly_json': '{"fake":true}'}
+        _filled15 = _wxmod15.fill_weather_gaps(_plnc, fetch=_fake_fetch15)
+        check(sorted(_filled15) == [(SESSION_DATE, 'WX-A'), (SESSION_DATE, 'WX-B')],
+              'the gap-fill fetches once per weatherless session', str(_filled15))
+        check(sorted(_calls15) == [(SESSION_DATE, 51.5072, -0.1276),
+                                   (SESSION_DATE, 53.7997, -1.5492)],
+              "each fetch uses that session's own stored coordinates", str(_calls15))
+        check(yc.db.get_weather(SESSION_DATE, 'WX-B')['hourly_json'] == '{"fake":true}',
+              'and stores the row under the session serial')
+        _filled15 = _wxmod15.fill_weather_gaps(_plnc, fetch=_fake_fetch15)
+        check(_filled15 == [] and len(_calls15) == 2,
+              'a second pass refetches nothing — the rows exist now')
+        # a session with no coordinates is skipped, not an error
+        _sN = _payload_copy('WX-N')
+        yc.db.import_sessions([_sN])
+        check(_wxmod15.fill_weather_gaps([_sN], fetch=_fake_fetch15) == []
+              and len(_calls15) == 2,
+              'a session without coordinates is skipped')
+        # a failing fetch is logged and skipped, never raised
+        def _boom15(date, lat, lng):
+            raise RuntimeError('api down (test)')
+        yc.exec('DELETE FROM weather')
+        check(_wxmod15.fill_weather_gaps(_plnc, fetch=_boom15) == [],
+              'a failing fetch is contained (best-effort)')
+        _sp15 = open(os.path.join(REPO, 'sync_peer.py'), encoding='utf-8').read()
+        check('fill_weather_gaps(sessions)' in _sp15
+              and _sp15.index('= import_sessions(sessions)')
+                  < _sp15.index('fill_weather_gaps(sessions)'),
+              'sync_peer.py gap-fills right after importing the pull')
+
         print(f'\nAll {_checks} checks passed.')
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
