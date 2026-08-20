@@ -490,6 +490,15 @@ def _migrate(conn):
                 'INSERT INTO report_templates (name, description, prompt, is_default) VALUES (?,?,?,?)',
                 (t['name'], t['description'], t['prompt'], t['is_default'])
             )
+    # WP13: the seed above only fires on an empty table, so a corrected default
+    # prompt would never reach the Pis that seeded theirs months ago. This
+    # rewrites the stored rows that still hold a previously shipped text and
+    # leaves locally edited ones alone. It runs BEFORE the F6 uid backfill
+    # below on purpose: the template uid is uuid5 of name + sha256(prompt), so
+    # refreshing first makes a migrated database and a freshly seeded one
+    # agree on the uid.
+    from reports_db import refresh_default_templates
+    refresh_default_templates(conn)
     conn.executescript('''
         CREATE TABLE IF NOT EXISTS assessments (
             id          INTEGER PRIMARY KEY,

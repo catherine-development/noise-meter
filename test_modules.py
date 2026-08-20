@@ -3696,6 +3696,253 @@ def main(meas_root):
 
         _wa17.IMPORT_KEY = _saved_key17
 
+        # ── 19. WP13: report output sanitizing, BS 4142 prompt corrections ────
+        print('\n19. WP13: report HTML is sanitized; BS 4142 prompts corrected')
+        # Codex F6: all six report sections render with `| safe`, and they are
+        # HTML the model wrote from a prompt carrying user-controlled text
+        # (notes, location, recorder) — so an injection, or a hostile row
+        # arriving over the peer sync, was executable HTML in an evidence
+        # document on both Pis. Codex F7: the enforcement template asked for
+        # specific-vs-background under BS 4142 rather than RATING-vs-background,
+        # and archived Open-Meteo weather was presented as if observed on site.
+        import hashlib as _hl19
+        from html_sanitize import sanitize_html as _san19, sanitize_sections as _sans19
+
+        # (a) the sanitizer itself
+        check(_san19('<p onclick="alert(1)">hi</p>') == '<p>hi</p>',
+              'an event-handler attribute is stripped, the tag kept')
+        check(_san19('<img src=x onerror="alert(1)">text') == 'text',
+              'a disallowed tag is dropped and its text kept')
+        check(_san19('<script>alert(1)</script><p>ok</p>') == '<p>ok</p>',
+              'script is dropped whole — content and all')
+        check(_san19('<style>body{color:red}</style>keep') == 'keep',
+              'so is style')
+        check(_san19('<iframe src="//evil"><p>x</p></iframe>after') == 'after',
+              'and iframe, with everything inside it')
+        check(_san19('<a href="javascript:alert(1)">link</a>') == 'link',
+              'links carry attributes, so <a> is not on the allowlist at all')
+        check(_san19('<span class="band band-crit" id="x" style="color:red">chip</span>')
+              == '<span>chip</span>',
+              'class, id and style are stripped: no CSS injection, no hooks')
+        check(_san19('<table><tr><td colspan="2" style="x">c</td>'
+                     '<th rowspan="3">h</th></tr></table>')
+              == '<table><tr><td colspan="2">c</td><th rowspan="3">h</th></tr></table>',
+              'colspan/rowspan survive on cells — report tables need them')
+        check(_san19('<td colspan="evil(1)">c</td>') == '<td>c</td>',
+              'a non-numeric span is dropped, not echoed back')
+        check(_san19('<p>unclosed <strong>bold') == '<p>unclosed <strong>bold</strong></p>',
+              'unclosed tags are closed, not raised on')
+        check(_san19('<div><b>bold<i>both</b>italic</i></div>')
+              == '<div><b>bold<i>both</i></b>italic</div>',
+              'mis-nesting comes out as a well-formed tree')
+        check(_san19('<p>a &amp; b &nbsp; &#8211; &#x2014;</p>')
+              == '<p>a &amp; b &nbsp; &#8211; &#x2014;</p>',
+              'entities are preserved exactly (evidence text, not paraphrase)')
+        check(_san19('5 < 6 and a > b') == '5 &lt; 6 and a &gt; b',
+              'stray angle brackets in prose are escaped')
+        check(_san19('<!-- c --><?pi?><!DOCTYPE html><p>x</p>') == '<p>x</p>',
+              'comments, processing instructions and doctypes are dropped')
+        check(_san19(None) == '' and _san19(42) == '42',
+              'None and non-strings are handled without raising')
+        _fell_back = []
+        import html_sanitize as _hs19
+        _real_parser19 = _hs19._Sanitizer
+
+        class _BrokenParser19(_real_parser19):
+            def feed(self, data):
+                _fell_back.append(data)
+                raise RuntimeError('parser exploded')
+        _hs19._Sanitizer = _BrokenParser19
+        try:
+            _fb19 = _hs19.sanitize_html('<p onclick="x">boom</p>')
+        finally:
+            _hs19._Sanitizer = _real_parser19
+        check(_fell_back and _fb19 == '&lt;p onclick=&quot;x&quot;&gt;boom&lt;/p&gt;',
+              'a parser failure falls back to html.escape(), never to raw HTML', _fb19)
+        check(_sans19({'a': '<p onclick="x">1</p>', 'b': None}) == {'a': '<p>1</p>', 'b': ''}
+              and _sans19('not a dict') == 'not a dict',
+              'sanitize_sections maps over the six sections')
+
+        # (b) the routes: save path, render path, and the per-route CSP
+        sys.modules.pop('noise_app', None)
+        s19 = Side(os.path.join(tmp, 'wp13.db'))
+        s19.db.import_sessions(_copy.deepcopy(sessions), metadata=META)
+        _app19 = importlib.import_module('noise_app').app
+        _app19.config['TESTING'] = True
+        _cl19 = _app19.test_client()
+        with _cl19.session_transaction() as _s:
+            _s['user'] = 'test'
+            _s['logged_in'] = True
+            _s['_csrf_token'] = SUITE_CSRF
+        _SECT19 = ('executive_summary', 'methodology', 'results_narrative',
+                   'compliance', 'conclusions', 'recommendations')
+        _HOSTILE19 = ('<p>Reading 1</p><img src=x onerror="alert(1)">'
+                      '<script>alert(2)</script><b onmouseover="alert(3)">bold</b>')
+        _prompts19 = []
+
+        def _fake_claude19(prompt, model, thinking_level):
+            _prompts19.append(prompt)
+            return {k: _HOSTILE19 for k in _SECT19}, 100, 50, 0.001
+        s19.reports._call_claude = _fake_claude19
+
+        _r = _cl19.post('/api/generate-report', headers=CSRF_HDR, json={
+            'session_date': SESSION_DATE, 'model': 'claude-sonnet-5',
+            'thinking_level': 'none'})
+        check(_r.status_code == 200, 'a report generates', str(_r.status_code))
+        _rid19 = _r.get_json()['report_id']
+        _stored19 = s19.sql('SELECT sections_json FROM generated_reports WHERE id=?',
+                            _rid19)[0]['sections_json']
+        check('onerror' not in _stored19 and '<script' not in _stored19
+              and 'alert(' not in _stored19,
+              'the save path stores sanitized sections, so the peer never gets the payload')
+        check('<p>Reading 1</p>' in _stored19 and '<b>bold</b>' in _stored19,
+              'and keeps the report prose', _stored19[:120])
+
+        # A legacy row (one of the nine already on the Pis) or a row that
+        # arrived through sync_db._apply_generated_report was never sanitized
+        # on the way in. Write one straight into the table, as those paths do.
+        s19.exec('UPDATE generated_reports SET sections_json=? WHERE id=?',
+                 json.dumps({k: _HOSTILE19 for k in _SECT19}), _rid19)
+        _resp19 = _cl19.get(f'/reports/{_rid19}')
+        _h19 = _resp19.get_data(as_text=True)
+        check(_resp19.status_code == 200, 'the stored hostile report still renders',
+              str(_resp19.status_code))
+        check('onerror' not in _h19 and 'onmouseover' not in _h19
+              and 'alert(' not in _h19,
+              'and renders with the attributes and the script gone')
+        check(_h19.count('<p>Reading 1</p>') == 6,
+              'every one of the six sections still shows its prose',
+              str(_h19.count('<p>Reading 1</p>')))
+
+        _csp19 = _resp19.headers.get('Content-Security-Policy')
+        check(_csp19 and "default-src 'none'" in _csp19,
+              'the report view sends a Content-Security-Policy', str(_csp19))
+        import re as _re19
+        _nonce19 = _re19.search(r"script-src 'nonce-([^']+)'", _csp19 or '')
+        check(bool(_nonce19), 'nonce-based, not unsafe-inline', str(_csp19))
+        check("'unsafe-inline'" not in _csp19 and "'unsafe-eval'" not in _csp19,
+              'so an injected inline script could not run even if one got through')
+        check(_h19.count('nonce="%s"' % _nonce19.group(1)) == 3,
+              'the stylesheet, the CSRF wrapper and the print script carry that nonce',
+              str(_h19.count('nonce="%s"' % _nonce19.group(1))))
+        check('onclick=' not in _h19 and 'style="' not in _h19,
+              'the page itself has no inline handler or style attribute left to block')
+        _csp19b = _cl19.get(f'/reports/{_rid19}').headers.get('Content-Security-Policy')
+        check(_csp19b != _csp19, 'the nonce is per-response, not a constant')
+        _root19 = _cl19.get('/')
+        check(_root19.status_code == 200 and
+              'Content-Security-Policy' not in _root19.headers,
+              'and the CSP is report-view only — index.html runs on inline JS',
+              str(_root19.status_code))
+
+        # (c) the prompts (F7)
+        check('Weather (archived regional data — Open-Meteo, not an on-site observation):'
+              in _prompts19[-1],
+              'the data block labels the weather line as archive, not observation')
+        for _t19 in s19.reports_db.DEFAULT_TEMPLATES:
+            _nm19, _pr19 = _t19['name'], _t19['prompt']
+            check('difference between specific noise level and background' not in _pr19,
+                  '%s: no longer compares the specific level to the background' % _nm19)
+            check('rating level' in _pr19.lower(),
+                  '%s: BS 4142 asks for a rating level' % _nm19)
+            check(all(w in _pr19 for w in ('tonality', 'impulsivity', 'intermittency')),
+                  '%s: names the character corrections' % _nm19)
+            check('+5 dB' in _pr19 and '+10 dB' in _pr19,
+                  '%s: keeps the +5/+10 interpretation, now against the rating level' % _nm19)
+            check('explicit assumption' in _pr19 and 'never invent one' in _pr19,
+                  '%s: corrections are assessor judgement, stated as assumptions' % _nm19)
+            check('archived regional data' in _pr19 and 'not recorded unless' in _pr19,
+                  '%s: archived weather is context only, on-site not recorded' % _nm19)
+            check(_hl19.sha256(_pr19.encode()).hexdigest() not in
+                  s19.reports_db.PREVIOUS_DEFAULT_PROMPT_SHA256.get(_nm19, ()),
+                  '%s: the current text is not listed as a previous one' % _nm19)
+
+        # (d) the in-place refresh of templates already deployed on the Pis
+        _R19 = s19.reports_db
+        _lge19 = next(t for t in _R19.DEFAULT_TEMPLATES
+                      if t['name'] == 'Local Government Enforcement')['prompt']
+        # Rebuild the text the Pis are actually holding: clause (c) as it was,
+        # and no weather caveat. If this reconstruction is right its digest is
+        # the constant the refresh matches on — which checks both at once.
+        _OLDC19 = ('(c) BS 4142:2014+A1:2019 — difference between specific noise level and '
+                   'background LA90 (+10 dB or above: significant adverse impact; '
+                   '+5 dB: likely adverse); ')
+        _i19, _j19 = _lge19.find('(c) BS 4142'), _lge19.find('(d) WHO Environmental')
+        _WX19 = ('The weather line in the measurement data above is archived regional data '
+                 'from Open-Meteo, not an on-site observation: treat it as context only, '
+                 'state that on-site meteorological conditions were not recorded unless the '
+                 'notes say otherwise, and flag that limitation wherever a BS 4142 '
+                 'conclusion depends on wind or precipitation.\n\n')
+        _old_lge19 = (_lge19[:_i19] + _OLDC19 + _lge19[_j19:]).replace(_WX19, '')
+        check(_hl19.sha256(_old_lge19.encode()).hexdigest()
+              == _R19.PREVIOUS_DEFAULT_PROMPT_SHA256['Local Government Enforcement'][0],
+              'the embedded digest is of the text the Pis are really holding')
+
+        # Put a Pi's state back: the enforcement default at its old text, the
+        # occupational one edited by hand, the planning one already current.
+        s19.exec("UPDATE report_templates SET prompt=?, updated_at='2026-01-01 00:00:00' "
+                 "WHERE name='Local Government Enforcement'", _old_lge19)
+        s19.exec("UPDATE report_templates SET prompt=?, updated_at='2026-02-02 00:00:00' "
+                 "WHERE name='Occupational Health'", 'MY OWN VERSION {{session_data}}')
+        _plan_before19 = dict(s19.sql("SELECT prompt, updated_at FROM report_templates "
+                                      "WHERE name='Planning Noise Assessment'")[0])
+        s19.db.init_db()          # the migration a deploy + restart runs
+        _t19 = {r['name']: dict(r) for r in s19.sql('SELECT * FROM report_templates')}
+        check(_t19['Local Government Enforcement']['prompt'] == _lge19,
+              'an untouched default is refreshed in place to the corrected text')
+        check(_t19['Local Government Enforcement']['updated_at']
+              == _R19.DEFAULT_TEMPLATE_REFRESH_AT,
+              'with a fixed updated_at, so the write replicates and both Pis agree',
+              str(_t19['Local Government Enforcement']['updated_at']))
+        check(_t19['Occupational Health']['prompt'] == 'MY OWN VERSION {{session_data}}'
+              and _t19['Occupational Health']['updated_at'] == '2026-02-02 00:00:00',
+              'a locally edited template is left exactly as it was')
+        check(_t19['Planning Noise Assessment']['prompt'] == _plan_before19['prompt']
+              and _t19['Planning Noise Assessment']['updated_at'] == _plan_before19['updated_at'],
+              'a template already carrying the current text is not re-stamped')
+        s19.db.init_db()          # second pass
+        _t19b = {r['name']: dict(r) for r in s19.sql('SELECT * FROM report_templates')}
+        check(_t19b == _t19, 'the refresh is idempotent: a second migration writes nothing')
+
+        # Both Pis migrate on their own clocks. Same input, same deterministic
+        # output, so the pair converges with no conflict recorded either way.
+        _PRE19 = """
+            CREATE TABLE report_templates(id INTEGER PRIMARY KEY, name TEXT NOT NULL,
+              description TEXT, prompt TEXT NOT NULL, is_default INTEGER DEFAULT 0,
+              created_at TEXT DEFAULT (datetime('now')),
+              updated_at TEXT DEFAULT (datetime('now')));
+            CREATE TABLE app_settings(key TEXT PRIMARY KEY, value TEXT);
+            INSERT INTO app_settings VALUES('instrument_serial','1402755');
+        """
+        _p19a = os.path.join(tmp, 'wp13-pi-a.db')
+        _p19b = os.path.join(tmp, 'wp13-pi-b.db')
+        for _pp19 in (_p19a, _p19b):
+            _cx19 = _sq.connect(_pp19)
+            _cx19.executescript(_PRE19)
+            _cx19.execute('INSERT INTO report_templates(id,name,description,prompt,is_default,'
+                          "created_at,updated_at) VALUES(1,'Local Government Enforcement',"
+                          "'Statutory nuisance evidence',?,1,'2026-05-01 09:00:00',"
+                          "'2026-05-01 09:00:00')", (_old_lge19,))
+            _cx19.commit()
+            _cx19.close()
+        _pia = Side(_p19a)
+        _pib = Side(_p19b)
+        _ra19 = dict(_pia.sql('SELECT * FROM report_templates')[0])
+        _rb19 = dict(_pib.sql('SELECT * FROM report_templates')[0])
+        check(_ra19['prompt'] == _rb19['prompt'] == _lge19,
+              'both Pis refresh their deployed default to the same text')
+        check(_ra19['uid'] == _rb19['uid'] and _ra19['updated_at'] == _rb19['updated_at'],
+              'and agree on the uid and the timestamp without talking to each other',
+              '%s / %s' % (_ra19['uid'], _rb19['uid']))
+        _pib.sync.apply_full_sync(_wire16(_pia.sync.get_full_sync_payload()))
+        _pia.sync.apply_full_sync(_wire16(_pib.sync.get_full_sync_payload()))
+        check(_pib.sql('SELECT COUNT(*) FROM report_templates')[0][0] == 1
+              and _pia.sql('SELECT COUNT(*) FROM report_templates')[0][0] == 1,
+              'the first full sync after the refresh twins nothing')
+        check(not _pia.sql('SELECT 1 FROM sync_conflicts')
+              and not _pib.sql('SELECT 1 FROM sync_conflicts'),
+              'and the equal-timestamp write records no conflict on either side')
+
         print(f'\nAll {_checks} checks passed.')
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

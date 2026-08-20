@@ -11,7 +11,10 @@
   Open-Meteo or anywhere else must not leak the token.
 #}
 <meta name="csrf-token" content="{{ csrf_token() }}">
-<script>
+{# The nonce is set only by the report view (WP13/F6), the one route that
+   sends a Content-Security-Policy; every other page renders this tag exactly
+   as before, because csp_nonce is undefined there and Undefined is falsy. #}
+<script{% if csp_nonce %} nonce="{{ csp_nonce }}"{% endif %}>
 (function () {
   var TOKEN = document.querySelector('meta[name="csrf-token"]').content;
   window.CSRF_TOKEN = TOKEN;

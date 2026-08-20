@@ -14,10 +14,12 @@ import json
 import logging
 import math
 import os
+import secrets
 
-from flask import Blueprint, render_template, request, jsonify, abort
+from flask import Blueprint, render_template, request, jsonify, abort, make_response
 
 from config import PI_NAME
+from html_sanitize import sanitize_sections
 from nor140_format import round_half_up
 from noise_parser import _energy_avg_weighted, run_weight_s
 from webauth import login_required
@@ -203,7 +205,7 @@ def _build_session_data_block(sess, run_rows, all_laeq, total_duration_s):
         f"Recorder: {sess.get('name') or 'Not recorded'}\n"
         f"GPS: {gps_str}\n"
         f"Notes: {sess.get('notes') or 'None'}\n"
-        f"Weather: {wx_str}\n\n"
+        f"Weather (archived regional data — Open-Meteo, not an on-site observation): {wx_str}\n\n"
         f"{stat_label}:\n"
         f"  Total duration: {total_duration_s} seconds\n"
         f"  LAeq: {session_leq} dB(A)\n"
@@ -470,6 +472,14 @@ def api_generate_report():
         return jsonify({'error': str(e)}), 500
     # ── end WP5/F12 ──
 
+    # ── WP13/F6: the sections are HTML the model wrote from a prompt that
+    # embeds user-controlled text (notes, location, recorder). Reduce them to
+    # the allowlist BEFORE they are stored, so what is on disk — and what
+    # replicates to the peer — is already safe. view_report sanitizes again on
+    # the way out, which is what covers rows stored before this and rows that
+    # arrived from a peer.
+    sections = sanitize_sections(sections)
+
     run_label = f"Run {run_number}" if run_number else "All runs"
     # Everything view_report renders, frozen at generation time. The narrative
     # sections were already frozen; the statistics table was recomputed live,
@@ -569,7 +579,13 @@ def view_report(rid):
     if not stored:
         abort(404)
 
-    sections = json.loads(stored['sections_json'])
+    # ── WP13/F6: sanitize on the way out, every time. The save path sanitizes
+    # too, but this is the line that covers the rows it cannot reach: reports
+    # generated before WP13 (nine of them across the two live databases) and
+    # reports that arrived from the peer through sync_db._apply_generated_report,
+    # which upserts the sections blob verbatim. Stored rows are deliberately
+    # NOT rewritten — see docs/fix-plan-2026-08-19.md, WP13.
+    sections = sanitize_sections(json.loads(stored['sections_json']))
     date = stored['session_date']
     serial = stored.get('instrument_serial')
 
@@ -626,8 +642,25 @@ def view_report(rid):
         'template_name': stored.get('template_name'),
     }
 
-    return render_template(
+    # ── WP13/F6: a per-route CSP, defence in depth behind the sanitizer.
+    # Nonce-based rather than 'unsafe-inline': this page's only inline script
+    # is the CSRF wrapper from _csrf.html and its only inline style is the
+    # stylesheet in its own <head>, both of which carry the nonce, so anything
+    # that reached the page from a report section could not run even if the
+    # sanitizer let it through (a nonce cannot be guessed, and inline event
+    # handlers are blocked outright when script-src carries one). Report-view
+    # only — index.html's inline JS is not nonced and a global CSP would break
+    # the whole app.
+    nonce = secrets.token_urlsafe(16)
+    csp = ("default-src 'none'; "
+           f"script-src 'nonce-{nonce}'; "
+           f"style-src 'nonce-{nonce}'; "
+           "img-src 'self' data:; "
+           "base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+
+    resp = make_response(render_template(
         'report.html',
+        csp_nonce=nonce,
         date=date,
         pi_name=PI_NAME,
         sess=sess,
@@ -644,7 +677,9 @@ def view_report(rid):
         usage_info=usage_info,
         generated_at=stored.get('created_at', ''),
         provenance=provenance,
-    )
+    ))
+    resp.headers['Content-Security-Policy'] = csp
+    return resp
 
 
 @bp.route('/api/generated-reports', methods=['GET'])
