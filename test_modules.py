@@ -3091,7 +3091,9 @@ def main(meas_root):
             _wire16(dict(fb.sql('SELECT * FROM assessments WHERE uid=?', uidA)[0])))
         check(fa.sql('SELECT name FROM assessments WHERE uid=?', uidA)[0][0]
               == 'Front garden (B newer)', 'LWW works in the other direction too')
-        # a replayed equal-timestamp row is an idempotent apply, not a conflict
+        # a replayed equal-tuple row is a no-op since WP12 (it used to apply,
+        # which is what let same-second edits oscillate — see section 18b),
+        # and either way it must not be a conflict
         check(fa.sql('SELECT COUNT(*) FROM sync_conflicts WHERE uid=?', uidA)[0][0] == 0,
               'the winning apply cleared any stale conflict entry on A')
 
@@ -3436,6 +3438,440 @@ def main(meas_root):
                 os.environ.pop('FLIGHTS_DB_PATH', None)
             else:
                 os.environ['FLIGHTS_DB_PATH'] = _saved_fdb
+
+        # ── 18. WP12: replication ordering (F2, F3, F4, F8b) ─────────────────
+        print("\n18. F2: the measurement watermark is the sender's clock")
+        # sync_peer used to store its OWN wall clock as the watermark and the
+        # sender compared its imported_at with strict > — so clock skew, an
+        # equal-second boundary, or the old 'T'-separated watermark format
+        # (which string-compares greater than every same-day imported_at)
+        # missed sessions permanently: the full-sync payload carries no
+        # measurement sessions, so there was no later recovery. Since WP12 the
+        # watermark is the sender's own `server_now` and the request subtracts
+        # a 300 s overlap, which the idempotent import absorbs.
+        def _w18(obj):
+            return json.loads(json.dumps(obj, default=str))
+
+        import urllib.parse as _up18
+        sa18 = Side(os.path.join(tmp, 'wp12-a.db'))       # the sender, "A"
+        sa18.db.import_sessions([_w18(_payload_copy('WP12-M'))])
+        sys.modules.pop('noise_app', None)
+        _app18 = importlib.import_module('noise_app').app  # bound to sa18
+        _app18.config['TESTING'] = True
+        _cl18 = _app18.test_client()
+        import webauth as _wa18
+        _saved_key18 = _wa18.IMPORT_KEY
+        _wa18.IMPORT_KEY = 'wp12-key'
+        _key18 = {'X-Import-Key': 'wp12-key'}
+        _saved_pi18 = os.environ.get('PI_NAME')
+        try:
+            sb18 = Side(os.path.join(tmp, 'wp12-b.db'))   # the puller, "B"
+
+            def _pull18(since):
+                r = _cl18.get('/api/sync?since=' + _up18.quote(since),
+                              headers=_key18)
+                return r.get_json()
+
+            _d18 = _pull18('1970-01-01T00:00:00')
+            _sn18 = _d18.get('server_now')
+            check(bool(_sn18) and len(_sn18) == 19 and _sn18[10] == ' '
+                  and 'T' not in _sn18,
+                  "/api/sync returns server_now — the sender's database clock, "
+                  'imported_at-formatted', str(_sn18))
+            check(len(_d18['sessions']) == 1, 'the first pull carries the session')
+            sb18.db.import_sessions(_d18['sessions'])
+            _wm18 = _sn18   # what sync_peer now stores as the watermark
+
+            # A imports another session whose imported_at falls BEHIND the
+            # stored watermark (clock skew / commit-vs-clock race — under the
+            # old protocol, permanently missed) and one exactly ON it (the
+            # equal-second boundary strict > used to drop).
+            sa18.db.import_sessions([_w18(_payload_copy('WP12-N'))])
+            sa18.exec("UPDATE sessions SET imported_at=datetime(?, '-200 seconds') "
+                      "WHERE instrument_serial='WP12-N'", _wm18)
+            sa18.db.import_sessions([_w18(_payload_copy('WP12-O'))])
+            sa18.exec("UPDATE sessions SET imported_at=? "
+                      "WHERE instrument_serial='WP12-O'", _wm18)
+            check(sa18.sql('SELECT COUNT(*) FROM sessions '
+                           "WHERE instrument_serial IN ('WP12-N','WP12-O') "
+                           'AND imported_at > ?', _wm18)[0][0] == 0,
+                  'both sit at or behind the watermark — the old strict-> pull '
+                  'would never send them again')
+            _since18 = sb18.sync.request_since(_wm18)
+            _d18 = _pull18(_since18)
+            _got18 = {s['serial'] for s in _d18['sessions']}
+            check({'WP12-N', 'WP12-O'} <= _got18,
+                  'the next pull recovers both (sender-clock watermark, >= '
+                  'comparison, 300 s overlap)', str(sorted(_got18)))
+            sb18.db.import_sessions(_d18['sessions'])
+            check(sb18.sql('SELECT COUNT(*) FROM sessions '
+                           "WHERE instrument_serial IN ('WP12-N','WP12-O')")[0][0] == 2,
+                  'and B holds them — nothing is permanently missed')
+            sb18.db.import_sessions(_d18['sessions'])
+            check(sb18.sql("SELECT COUNT(*) FROM sessions WHERE date=?",
+                           SESSION_DATE)[0][0] == 3,
+                  're-receiving the overlap is an idempotent upsert, not a twin')
+
+            check(sb18.sync.request_since('2026-08-19T10:00:00')
+                  == '2026-08-19 09:55:00',
+                  'request_since parses the old T-format watermark, subtracts '
+                  'the overlap, and emits the imported_at format')
+            check(sb18.sync.request_since('2026-08-19 10:00:00.123')
+                  == '2026-08-19 09:55:00',
+                  'and handles a millisecond space-format watermark')
+            check(sb18.sync.request_since('not-a-timestamp') == 'not-a-timestamp',
+                  'an unparseable watermark echoes unchanged rather than crashing '
+                  'the sync loop')
+            # the 'T' bug the sender-issued cursor also removes: an ISO-'T'
+            # watermark compares greater than every same-day imported_at
+            check('2026-08-19T10:00:00' > '2026-08-19 23:59:59',
+                  "the old 'T'-separated watermark ordered AFTER every same-day "
+                  "imported_at ('T' > ' ') — same-day sessions were unpullable")
+            _sp18 = open(os.path.join(REPO, 'sync_peer.py'), encoding='utf-8').read()
+            check("data.get('server_now')" in _sp18
+                  and 'request_since(get_last_sync_time())' in _sp18,
+                  "sync_peer stores the sender's server_now as the watermark and "
+                  'requests with the overlap')
+            check('urllib.parse.quote(since)' in _sp18,
+                  'and URL-encodes the space-separated since')
+
+            # ── 18b. F3: total-order LWW ─────────────────────────────────────
+            print('\n18b. F3: total-order LWW — same-second edits cannot oscillate')
+            # WP10 stamped edits with second-resolution datetime('now') and
+            # applied equal timestamps, so two Pis editing one row in the same
+            # second swapped values on every exchange, forever, with zero
+            # conflict records. WP12 orders on (millisecond timestamp, writer),
+            # which is total: both sides pick the same winner without talking.
+            os.environ['PI_NAME'] = 'pi-a'
+            p1 = Side(os.path.join(tmp, 'wp12-lww-a.db'))
+            p2 = Side(os.path.join(tmp, 'wp12-lww-b.db'))
+            aid18 = p1.assess.create_assessment('WP12 site')
+            _row18 = dict(p1.sql('SELECT uid, updated_at, writer FROM assessments '
+                                 'WHERE id=?', aid18)[0])
+            check(len(_row18['updated_at']) == 23 and _row18['updated_at'][19] == '.',
+                  'local mutations stamp millisecond updated_at',
+                  _row18['updated_at'])
+            check(_row18['writer'] == 'pi-a',
+                  "and record the writer (the Pi's PI_NAME, read at call time)")
+            uid18 = _row18['uid']
+
+            _wire18 = _w18(dict(p1.sql('SELECT * FROM assessments WHERE id=?',
+                                       aid18)[0]))
+            p2.sync.apply_sync_event('assessment', 'upsert', _wire18)
+            p2.sync.apply_sync_event('assessment', 'upsert', _wire18)   # replay
+            check(p2.sql('SELECT COUNT(*) FROM assessments WHERE uid=?',
+                         uid18)[0][0] == 1
+                  and p2.sql('SELECT COUNT(*) FROM sync_conflicts WHERE uid=?',
+                             uid18)[0][0] == 0,
+                  'a replayed identical write is a no-op — no twin, no conflict')
+
+            # ordering across the transition: a stored second-resolution stamp
+            # loses to any same-second millisecond stamp (string prefix order)
+            p2.exec("UPDATE assessments SET updated_at='2026-08-19 10:00:00', "
+                    'writer=NULL WHERE uid=?', uid18)
+            _msrow = dict(_wire18)
+            _msrow['name'] = 'ms beats s'
+            _msrow['updated_at'] = '2026-08-19 10:00:00.000'
+            _msrow['writer'] = 'pi-a'
+            p2.sync.apply_sync_event('assessment', 'upsert', _w18(_msrow))
+            check(p2.sql('SELECT name FROM assessments WHERE uid=?', uid18)[0][0]
+                  == 'ms beats s',
+                  'a second-resolution stamp orders before any same-second '
+                  'millisecond stamp — old stored timestamps stay valid')
+            # transition echo: an old (pre-WP12) peer stores our row but not
+            # our writer; the echo it sends back must be a no-op, not a conflict
+            _echo = dict(_msrow)
+            _echo['writer'] = None
+            p2.sync.apply_sync_event('assessment', 'upsert', _w18(_echo))
+            check(p2.sql('SELECT name, writer FROM assessments WHERE uid=?',
+                         uid18)[0]['writer'] == 'pi-a'
+                  and p2.sql('SELECT COUNT(*) FROM sync_conflicts WHERE uid=?',
+                             uid18)[0][0] == 0,
+                  "an old peer's writerless echo of the same write is a no-op, "
+                  'not a divergence')
+
+            # the oscillation repro: both Pis edit the same row with the SAME
+            # timestamp (the same-second case, sharpened to the same
+            # millisecond); the writer is the deterministic tie-break
+            _TS18 = '2026-08-19 11:00:00.500'
+            p1.exec('UPDATE assessments SET name=?, updated_at=?, writer=? '
+                    'WHERE uid=?', 'alpha wrote', _TS18, 'pi-a', uid18)
+            p2.exec('UPDATE assessments SET name=?, updated_at=?, writer=? '
+                    'WHERE uid=?', 'beta wrote', _TS18, 'pi-b', uid18)
+
+            def _arow18(side):
+                return _w18(dict(side.sql('SELECT * FROM assessments WHERE uid=?',
+                                          uid18)[0]))
+
+            p2.sync.apply_sync_event('assessment', 'upsert', _arow18(p1))
+            p1.sync.apply_sync_event('assessment', 'upsert', _arow18(p2))
+            check(p1.sql('SELECT name FROM assessments WHERE uid=?', uid18)[0][0]
+                  == 'beta wrote'
+                  and p2.sql('SELECT name FROM assessments WHERE uid=?', uid18)[0][0]
+                  == 'beta wrote',
+                  'same-timestamp edits resolve to the same winner on both sides '
+                  '(writer breaks the tie)')
+            check(p2.sql("SELECT COUNT(*) FROM sync_conflicts WHERE uid=? "
+                         "AND remote_updated_at=?", uid18, _TS18)[0][0] == 1
+                  and p1.sql('SELECT COUNT(*) FROM sync_conflicts WHERE uid=?',
+                             uid18)[0][0] == 0,
+                  'the losing write is recorded on the side that refused it — '
+                  'and only there')
+            # exchange again — the old code swapped values on every exchange
+            p2.sync.apply_sync_event('assessment', 'upsert', _arow18(p1))
+            p1.sync.apply_sync_event('assessment', 'upsert', _arow18(p2))
+            check(p1.sql('SELECT name FROM assessments WHERE uid=?', uid18)[0][0]
+                  == 'beta wrote'
+                  and p2.sql('SELECT name FROM assessments WHERE uid=?', uid18)[0][0]
+                  == 'beta wrote',
+                  'a second exchange changes nothing: one stable value, no '
+                  'oscillation')
+            check(p2.sql('SELECT COUNT(*) FROM sync_conflicts WHERE uid=?',
+                         uid18)[0][0] == 0,
+                  'and the conflict clears once the pair demonstrably holds the '
+                  'same write')
+
+            _info18 = p1.assess.delete_assessment(aid18)
+            check(len(_info18['deleted_at']) == 23 and _info18['deleted_at'][19] == '.',
+                  'uid tombstones carry millisecond deleted_at too',
+                  _info18['deleted_at'])
+
+            # ── 18c. F4: session metadata and run tags under LWW ─────────────
+            print('\n18c. F4: session metadata and run tags replicate under LWW')
+            # These sat outside LWW entirely: apply_full_sync preferred any
+            # non-null peer value, so concurrent edits oscillated every tick
+            # and a report could snapshot whichever copy was passing through.
+            m1 = Side(os.path.join(tmp, 'wp12-meta-a.db'))
+            m2 = Side(os.path.join(tmp, 'wp12-meta-b.db'))
+            for _sd in (m1, m2):
+                _sd.db.import_sessions([_w18(_payload_copy('WP12-F4'))])
+
+            os.environ['PI_NAME'] = 'pi-a'
+            _stA = m1.db.update_session_metadata(
+                SESSION_DATE, 'Catherine Ives-Yim', 'Site A', 'LS1 1AA',
+                53.8, -1.55, notes='from A', serial='WP12-F4')
+            check(_stA and len(_stA['meta_updated_at']) == 23
+                  and _stA['meta_writer'] == 'pi-a',
+                  'update_session_metadata stamps and returns '
+                  'meta_updated_at/meta_writer', str(_stA))
+            os.environ['PI_NAME'] = 'pi-b'
+            m2.db.update_session_metadata(
+                SESSION_DATE, 'Catherine Ives-Yim', 'Site B', 'LS1 1AA',
+                53.8, -1.55, notes='from B', serial='WP12-F4')
+            # sharpen to the same millisecond — the exact concurrent-edit tie
+            _MTS18 = '2026-08-19 12:00:00.250'
+            m1.exec('UPDATE sessions SET meta_updated_at=? '
+                    "WHERE instrument_serial='WP12-F4'", _MTS18)
+            m2.exec('UPDATE sessions SET meta_updated_at=? '
+                    "WHERE instrument_serial='WP12-F4'", _MTS18)
+
+            def _meta_ev(side):
+                return _w18(dict(side.sql(
+                    'SELECT date, instrument_serial AS serial, recorder_name, '
+                    'location_label, postcode, lat, lng, notes, '
+                    'meta_updated_at, meta_writer FROM sessions '
+                    "WHERE instrument_serial='WP12-F4'")[0]))
+
+            m2.sync.apply_sync_event('session_meta', 'upsert', _meta_ev(m1))
+            m1.sync.apply_sync_event('session_meta', 'upsert', _meta_ev(m2))
+            _locs18 = (m1.sql("SELECT location_label FROM sessions "
+                              "WHERE instrument_serial='WP12-F4'")[0][0],
+                       m2.sql("SELECT location_label FROM sessions "
+                              "WHERE instrument_serial='WP12-F4'")[0][0])
+            check(_locs18 == ('Site B', 'Site B'),
+                  'concurrent same-instant metadata edits converge on one '
+                  'deterministic winner', str(_locs18))
+            _muid18 = '%s|%s' % (SESSION_DATE, 'WP12-F4')
+            check(m2.sql("SELECT COUNT(*) FROM sync_conflicts "
+                         "WHERE table_name='session_meta' AND uid=?",
+                         _muid18)[0][0] == 1
+                  and m1.sql("SELECT COUNT(*) FROM sync_conflicts "
+                             "WHERE table_name='session_meta'")[0][0] == 0,
+                  "the losing edit lands in sync_conflicts as 'session_meta', "
+                  'on the refusing side only')
+            m2.sync.apply_full_sync(_w18(m1.sync.get_full_sync_payload()))
+            check(m2.sql("SELECT location_label FROM sessions "
+                         "WHERE instrument_serial='WP12-F4'")[0][0] == 'Site B'
+                  and m2.sql("SELECT COUNT(*) FROM sync_conflicts "
+                             "WHERE table_name='session_meta'")[0][0] == 0,
+                  'the full payload agrees (equal write = no-op) and the '
+                  'conflict clears — no oscillation tick to tick')
+
+            # an SD re-import must not clobber the newer hand edit: a
+            # measurement payload carries no metadata keys, and the
+            # import_sessions COALESCE only fills NULLs from it
+            m1.db.import_sessions([_w18(_payload_copy('WP12-F4'))])
+            _after18 = dict(m1.sql(
+                'SELECT location_label, notes, meta_updated_at FROM sessions '
+                "WHERE instrument_serial='WP12-F4'")[0])
+            check(_after18['location_label'] == 'Site B'
+                  and _after18['notes'] == 'from B'
+                  and _after18['meta_updated_at'] == _MTS18,
+                  'an SD re-import does not clobber a newer hand edit '
+                  '(metadata-less payload, COALESCE keeps stored values)')
+            # an unstamped (old-peer) edit loses to a stamped one, silently
+            m1.sync.apply_sync_event('session_meta', 'upsert', {
+                'date': SESSION_DATE, 'serial': 'WP12-F4',
+                'recorder_name': 'Old Peer', 'location_label': 'Stale',
+                'postcode': None, 'lat': None, 'lng': None, 'notes': None})
+            check(m1.sql("SELECT location_label FROM sessions "
+                         "WHERE instrument_serial='WP12-F4'")[0][0] == 'Site B'
+                  and m1.sql("SELECT COUNT(*) FROM sync_conflicts "
+                             "WHERE table_name='session_meta'")[0][0] == 0,
+                  'an unstamped (old-peer) metadata edit loses to a stamped one '
+                  'without recording a conflict')
+            # …but still applies where nobody has hand-edited since WP12
+            m1.db.import_sessions([_w18(_payload_copy('WP12-U'))])
+            m1.sync.apply_sync_event('session_meta', 'upsert', {
+                'date': SESSION_DATE, 'serial': 'WP12-U',
+                'recorder_name': None, 'location_label': 'Old fills',
+                'postcode': None, 'lat': None, 'lng': None, 'notes': None})
+            check(m1.sql("SELECT location_label FROM sessions "
+                         "WHERE instrument_serial='WP12-U'")[0][0] == 'Old fills',
+                  'the pre-WP12 apply still works for never-edited rows '
+                  '(mixed-version fallback)')
+
+            # run tags, same gate
+            _src18 = m1.sql(
+                'SELECT r.source_file FROM runs r JOIN sessions s '
+                "ON s.id=r.session_id WHERE s.instrument_serial='WP12-F4' "
+                'AND r.run_number=1')[0][0]
+            os.environ['PI_NAME'] = 'pi-a'
+            _tst18 = m1.db.update_run_location_tag(
+                SESSION_DATE, 1, 'K', serial='WP12-F4', source_file=_src18)
+            check(_tst18 and len(_tst18['tag_updated_at']) == 23
+                  and _tst18['tag_writer'] == 'pi-a',
+                  'update_run_location_tag stamps and returns '
+                  'tag_updated_at/tag_writer', str(_tst18))
+            _tev18 = {'session_date': SESSION_DATE, 'serial': 'WP12-F4',
+                      'run_number': 1, 'source_file': _src18,
+                      'location_tag': 'K', **_tst18}
+            m2.sync.apply_sync_event('run_tag', 'upsert', _w18(_tev18))
+            _trow18 = dict(m2.sql(
+                'SELECT r.location_tag, r.tag_updated_at, r.tag_writer '
+                'FROM runs r JOIN sessions s ON s.id=r.session_id '
+                "WHERE s.instrument_serial='WP12-F4' AND r.source_file=?",
+                _src18)[0])
+            check(_trow18['location_tag'] == 'K'
+                  and _trow18['tag_updated_at'] == _tst18['tag_updated_at'],
+                  'a run-tag edit propagates with its stamps')
+            _stale18 = dict(_tev18)
+            _stale18.update(location_tag='OLD',
+                            tag_updated_at='2020-01-01 00:00:00.000')
+            m2.sync.apply_sync_event('run_tag', 'upsert', _w18(_stale18))
+            check(m2.sql('SELECT r.location_tag FROM runs r JOIN sessions s '
+                         "ON s.id=r.session_id WHERE s.instrument_serial='WP12-F4' "
+                         'AND r.source_file=?', _src18)[0][0] == 'K',
+                  'a stale run-tag write is skipped')
+            _tuid18 = '%s|%s|%s' % (SESSION_DATE, 'WP12-F4', _src18)
+            check(m2.sql("SELECT COUNT(*) FROM sync_conflicts "
+                         "WHERE table_name='run_tag' AND uid=?", _tuid18)[0][0] == 1,
+                  "and recorded in sync_conflicts as 'run_tag'")
+            # clearing a tag now replicates — the COALESCE merge never could
+            m1.db.update_run_location_tag(SESSION_DATE, 1, '', serial='WP12-F4',
+                                          source_file=_src18)
+            m2.sync.apply_full_sync(_w18(m1.sync.get_full_sync_payload()))
+            check(m2.sql('SELECT r.location_tag FROM runs r JOIN sessions s '
+                         "ON s.id=r.session_id WHERE s.instrument_serial='WP12-F4' "
+                         'AND r.source_file=?', _src18)[0][0] is None,
+                  'clearing a tag replicates through the full payload '
+                  '(the old COALESCE could never propagate a clear)')
+            _na18 = open(os.path.join(REPO, 'noise_app.py'), encoding='utf-8').read()
+            check('stamps = update_session_metadata' in _na18
+                  and 'stamps = update_run_location_tag' in _na18,
+                  'the edit routes put the stamps in the events they push')
+
+            # ── 18d. F8b: the tick ships report digests, not bodies ──────────
+            print('\n18d. F8b: the tick ships report digests, not bodies')
+            # The 15-minute catch-up re-shipped every generated report's full
+            # sections_json and input_snapshot_json forever — unbounded growth.
+            # light=1 sends {uid, created_at} digests; the puller fetches only
+            # what it is missing through GET /api/reports-sync.
+            r2_18 = Side(os.path.join(tmp, 'wp12-rep-b.db'))
+            r1_18 = Side(os.path.join(tmp, 'wp12-rep-a.db'))   # newest: app binds here
+            r1_18.db.import_sessions([_w18(_payload_copy('WP12-R'))])
+            _rid18 = r1_18.reports_db.save_generated_report(
+                SESSION_DATE, None, 'WP12 tpl', 'claude-sonnet-5', 'none',
+                json.dumps({'executive_summary': '<p>the heavy body</p>'}),
+                10, 20, 0.01, run_number=1, source_file='PROJ0001',
+                input_snapshot_json='{"stats":{"laeq":55.5}}',
+                instrument_serial='WP12-R')
+            _rrow18 = r1_18.reports_db.get_generated_report(_rid18)
+
+            _light18 = r1_18.sync.get_full_sync_payload(light=True)
+            check('generated_reports' not in _light18
+                  and 'generated_reports_digest' in _light18,
+                  'light mode replaces report bodies with a digest')
+            _ltxt18 = json.dumps(_light18)
+            check('sections_json' not in _ltxt18
+                  and 'input_snapshot_json' not in _ltxt18,
+                  'no sections_json or input snapshot anywhere in the tick payload')
+            check(_light18['generated_reports_digest']
+                  == [{'uid': _rrow18['uid'], 'created_at': _rrow18['created_at']}],
+                  'the digest is {uid, created_at} per report')
+
+            _need18 = r2_18.sync.report_uids_to_fetch(
+                _light18['generated_reports_digest'])
+            check(_need18 == [_rrow18['uid']],
+                  'the digest diff names the missing report')
+            r2_18.sync.apply_report_rows(
+                _w18(r1_18.sync.get_reports_by_uids(_need18)))
+            _landed18 = [dict(r) for r in r2_18.sql(
+                'SELECT * FROM generated_reports WHERE uid=?', _rrow18['uid'])]
+            check(len(_landed18) == 1
+                  and _landed18[0]['sections_json'] == _rrow18['sections_json']
+                  and _landed18[0]['input_snapshot_json'] == _rrow18['input_snapshot_json'],
+                  'the missing report is fetched by uid, body and snapshot intact')
+            check(r2_18.sync.report_uids_to_fetch(
+                      _light18['generated_reports_digest']) == [],
+                  'and the next tick has nothing to fetch')
+            _rid18b = [r[0] for r in r2_18.sql(
+                'SELECT id FROM generated_reports WHERE uid=?', _rrow18['uid'])][0]
+            r2_18.reports_db.delete_generated_report(_rid18b)
+            check(r2_18.sync.report_uids_to_fetch(
+                      _light18['generated_reports_digest']) == [],
+                  'a report deleted here is tombstoned, not refetched every tick')
+
+            # the routes: light digest, full fallback for an old puller, fetch
+            sys.modules.pop('noise_app', None)
+            _appd18 = importlib.import_module('noise_app').app   # bound to r1_18
+            _appd18.config['TESTING'] = True
+            _cld18 = _appd18.test_client()
+            _r = _cld18.get('/api/peer-sync-full?light=1', headers=_key18)
+            check(_r.status_code == 200
+                  and 'generated_reports_digest' in _r.get_json()
+                  and b'sections_json' not in _r.data,
+                  '/api/peer-sync-full?light=1 serves the digest, no bodies')
+            _r = _cld18.get('/api/peer-sync-full', headers=_key18)
+            _full18 = _r.get_json()
+            check('generated_reports' in _full18
+                  and _full18['generated_reports'][0]['sections_json'],
+                  'an old puller (no light param) still gets the full payload')
+            _r = _cld18.get('/api/reports-sync?uids=' + _rrow18['uid'],
+                            headers=_key18)
+            check(_r.status_code == 200
+                  and _r.get_json()['reports'][0]['uid'] == _rrow18['uid'],
+                  '/api/reports-sync serves full rows by uid')
+            check(_cld18.get('/api/reports-sync?uids=x').status_code == 403,
+                  'and requires the API key')
+            # old-peer fallback in the other direction: a full payload still
+            # applies (the pre-WP12 tick behaviour, kept for the deploy window)
+            r3_18 = Side(os.path.join(tmp, 'wp12-rep-c.db'))
+            r3_18.sync.apply_full_sync(_w18(_full18))
+            check(r3_18.sql('SELECT COUNT(*) FROM generated_reports WHERE uid=?',
+                            _rrow18['uid'])[0][0] == 1,
+                  "an old peer's full payload still lands reports (fallback path)")
+            _sp18b = open(os.path.join(REPO, 'sync_peer.py'), encoding='utf-8').read()
+            check('/api/peer-sync-full?light=1' in _sp18b
+                  and 'generated_reports_digest' in _sp18b
+                  and '/api/reports-sync?uids=' in _sp18b,
+                  'the 15-minute tick pulls light and fetches the digest gaps')
+        finally:
+            _wa18.IMPORT_KEY = _saved_key18
+            if _saved_pi18 is None:
+                os.environ.pop('PI_NAME', None)
+            else:
+                os.environ['PI_NAME'] = _saved_pi18
 
         print(f'\nAll {_checks} checks passed.')
     finally:
