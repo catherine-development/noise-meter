@@ -157,8 +157,23 @@ body{background:var(--bg);color:var(--text);font-family:var(--font-ui);font-size
 .modal-meta-edit-btn:hover{color:var(--text)}
 .modal-meta-form{border-top:1px solid var(--border);padding:14px 18px;background:var(--bg);margin-bottom:14px}
 .modal-body{padding:18px}
-.modal-main-wrap{height:300px;margin-bottom:16px;background:var(--panel);border:1px solid var(--border);border-radius:4px;overflow:hidden}
+.modal-main-wrap{height:300px;margin-bottom:16px;background:var(--panel);border:1px solid var(--border);border-radius:4px;overflow:hidden;position:relative}
 .modal-main-wrap canvas{display:block;width:100%;height:100%}
+/* Chart notes: fixed-position tooltip (escapes the wrap's overflow:hidden), the
+   in-chart editor pop, and the add-note bar under the modal chart */
+#noteTip{display:none;position:fixed;background:var(--surface);border:1px solid var(--border);border-radius:4px;padding:5px 9px;font-size:11px;pointer-events:none;z-index:3000;max-width:340px;box-shadow:0 2px 8px rgba(0,0,0,.12)}
+#notePop{display:none;position:absolute;top:14px;left:50%;transform:translateX(-50%);z-index:20;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px 12px;box-shadow:0 8px 30px rgba(0,0,0,.25);min-width:280px}
+#notePop .np-title{font-size:12px;font-weight:600;margin-bottom:7px;color:var(--text2)}
+#notePop .np-row{display:flex;align-items:center;gap:8px;margin-bottom:6px}
+#notePop .np-row label{font-size:11px;color:var(--text3);width:34px;flex:none}
+#notePop .np-row input{flex:1;font-size:12px;padding:4px 6px;border:1px solid var(--border);border-radius:4px;background:var(--panel);color:var(--text);font-family:var(--font-ui)}
+#notePop .np-footer{display:flex;align-items:center;gap:8px;margin-top:6px}
+#notePop .np-del{margin-left:auto;background:none;border:1px solid #c0392b;color:#c0392b;border-radius:4px;font-size:11px;padding:4px 9px;cursor:pointer;font-family:var(--font-ui)}
+#notePop .np-status{font-size:11px;color:#c0392b}
+.note-bar{display:flex;align-items:center;gap:10px;margin:-10px 0 14px}
+.note-add-btn{background:none;border:1px solid var(--border);border-radius:4px;color:var(--text2);font-size:11px;padding:3px 9px;cursor:pointer;font-family:var(--font-ui)}
+.note-add-btn:hover{border-color:var(--accent);color:var(--text)}
+.note-hint{font-size:11px;color:var(--text3)}
 .modal-bottom{display:grid;grid-template-columns:200px 1fr 1fr;gap:12px}
 .modal-stats{background:var(--panel);border:1px solid var(--border);border-radius:4px;padding:12px}
 .mstat{display:flex;justify-content:space-between;align-items:baseline;padding:5px 0;border-bottom:1px solid var(--grid-border);gap:8px}
@@ -397,7 +412,25 @@ body{background:var(--bg);color:var(--text);font-family:var(--font-ui);font-size
           <span class="mf-status" id="modal-mf-status"></span>
         </div>
       </div>
-      <div class="modal-main-wrap"><canvas id="modalMainCanvas"></canvas></div>
+      <div class="modal-main-wrap">
+        <canvas id="modalMainCanvas"></canvas>
+        <div id="notePop">
+          <div class="np-title" id="notePopTitle">Add note</div>
+          <div class="np-row"><label for="noteTime">Time</label><input id="noteTime" maxlength="8" placeholder="HH:MM:SS" autocomplete="off"></div>
+          <div class="np-row"><label for="noteEnd">End</label><input id="noteEnd" maxlength="8" placeholder="HH:MM:SS (optional)" autocomplete="off"></div>
+          <div class="np-row"><label for="noteText">Note</label><input id="noteText" maxlength="500" placeholder="e.g. police siren" autocomplete="off"></div>
+          <div class="np-footer">
+            <button class="mf-save" id="noteSaveBtn">Save</button>
+            <button class="mf-cancel" id="noteCancelBtn">Cancel</button>
+            <span class="np-status" id="noteStatus"></span>
+            <button class="np-del" id="noteDelBtn">Delete</button>
+          </div>
+        </div>
+      </div>
+      <div class="note-bar" id="noteBar">
+        <button class="note-add-btn" id="noteAddBtn">&#128221; Add note</button>
+        <span class="note-hint">or click the chart at the moment of the event</span>
+      </div>
       <div class="modal-bottom">
         <div class="modal-stats" id="modalStats"></div>
         <div class="modal-chart-box">
@@ -412,6 +445,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--font-ui);font-size
     </div>
   </div>
 </div>
+<div id="noteTip"></div>
 
 <style>
 #reportOptOverlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:2000;align-items:center;justify-content:center;padding:16px}
@@ -791,10 +825,22 @@ function renderRunsGrid(container, projects, runNums) {
       </div>` : ''}`;
     card.addEventListener('click', () => openRunModal(proj, runNum, selectedDate));
     grid.appendChild(card);
-    runCanvases.push(card.querySelector('canvas'));
+    const canvas = card.querySelector('canvas');
+    canvas._proj = proj;   // the run this canvas belongs to — see drawAllRunCharts
+    runCanvases.push(canvas);
+    // Note hover tooltip. Cards are hover-only (the whole-card click above
+    // opens the modal, where notes are edited); listeners attach per canvas
+    // because the grid is rebuilt on every render. Hit-testing reads what was
+    // actually drawn (canvas._notes/_notesProj), never a closed-over index.
+    const wrap = card.querySelector('.run-chart-wrap');
+    wrap.addEventListener('mousemove', e => {
+      const hit = noteHitAt(e, canvas);
+      if (hit) showNoteTip(e, hit.note, canvas._notesProj); else hideNoteTip();
+    });
+    wrap.addEventListener('mouseleave', hideNoteTip);
   });
 
-  drawAllRunCharts(projects);
+  drawAllRunCharts();
 }
 
 // ── Location tag editing ───────────────────────────────────
@@ -854,6 +900,87 @@ function dynYMin(laeq) {
 function dynYMax(laeq, lcpeak) {
   const hi = Math.max(Math.max(...laeq), lcpeak ? Math.max(...lcpeak) : 0);
   return Math.max(85, Math.ceil(hi / 10) * 10);
+}
+
+// ── Chart notes: time↔x mapping, wall clock, markers ──────
+// A note is anchored in elapsed seconds from the run start (what the backend
+// stores); the wall clock exists only at this UI edge, derived from
+// proj.start "HH:MM:SS". The x mapping goes through the sample-index axis the
+// curves themselves use — i = sec/step, then the same i/(n-1) as xP — NOT
+// proj.n, whose x-labels are the chart's one known axis inconsistency.
+function noteX(sec, proj, PAD, cW) {
+  const n = proj.laeq_profile.length;
+  if (n < 2) return PAD.l + cW / 2;
+  const i = clamp(sec / proj.step, 0, n - 1);
+  return PAD.l + (i / (n - 1)) * cW;
+}
+
+function wallClock(proj, sec) {
+  const m = String(proj.start || '').match(/^(\d{1,2}):(\d{2}):(\d{2})/);
+  if (!m) return '+' + fmtDuration(Math.round(sec));
+  const t = ((+m[1]) * 3600 + (+m[2]) * 60 + (+m[3]) + Math.round(sec)) % 86400;
+  const p = v => String(v).padStart(2, '0');
+  return `${p(Math.floor(t / 3600))}:${p(Math.floor(t / 60) % 60)}:${p(t % 60)}`;
+}
+
+function offsetFromWall(proj, str) {  // 'HH:MM[:SS]' → seconds from run start, or null
+  const m = String(str || '').trim().match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+  if (!m) return null;
+  const wall = (+m[1]) * 3600 + (+m[2]) * 60 + (+(m[3] || 0));
+  const sM = String(proj.start || '').match(/^(\d{1,2}):(\d{2}):(\d{2})/);
+  if (!sM) return wall;   // no start known: read the input as elapsed time
+  const start = (+sM[1]) * 3600 + (+sM[2]) * 60 + (+sM[3]);
+  return ((wall - start) % 86400 + 86400) % 86400;   // wraps past midnight
+}
+
+// Draw every note on a chart; returns [{x, note}] for hit-testing. Called from
+// INSIDE the two chart functions — every redraw path (resize, theme flip,
+// re-render) funnels through them, so anything painted afterwards is wiped.
+function drawNoteMarkers(ctx, proj, PAD, cW, cH, big) {
+  const hits = [];
+  (proj.notes || []).forEach(note => {
+    const x = noteX(note.at, proj, PAD, cW);
+    if (note.end != null) {           // range note: shade its span
+      const x2 = noteX(note.end, proj, PAD, cW);
+      ctx.globalAlpha = .10; ctx.fillStyle = css('--accent');
+      ctx.fillRect(x, PAD.t, Math.max(1, x2 - x), cH);
+      ctx.globalAlpha = 1;
+    }
+    // Bottom-anchored flag-pole: short on the 110px cards (the in-chart
+    // legend owns the top-right headroom), full height on the modal chart.
+    const poleH = big ? cH : 16;
+    ctx.strokeStyle = css('--accent'); ctx.lineWidth = 1; ctx.setLineDash([2, 3]);
+    ctx.beginPath(); ctx.moveTo(x, PAD.t + cH); ctx.lineTo(x, PAD.t + cH - poleH); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.font = (big ? 12 : 10) + 'px ' + css('--font-ui'); ctx.textAlign = 'center';
+    ctx.fillText('\u{1F4DD}', x, big ? PAD.t + 12 : PAD.t + cH - poleH - 2);
+    hits.push({x, note});
+  });
+  return hits;
+}
+
+// Shared hover tooltip (position:fixed — clears the modal wrap's
+// overflow:hidden and needs no positioned ancestor on the cards). Built with
+// DOM text nodes: the note text is user input and never touches markup.
+function showNoteTip(e, note, proj) {
+  const tip = document.getElementById('noteTip');
+  const when = wallClock(proj, note.at) +
+    (note.end != null ? '–' + wallClock(proj, note.end) : '');
+  tip.textContent = '';
+  const strong = document.createElement('strong');
+  strong.textContent = when;
+  tip.append('\u{1F4DD} ', strong, '  ' + note.text);
+  tip.style.display = 'block';
+  tip.style.left = Math.max(4, Math.min(e.clientX + 12, window.innerWidth - tip.offsetWidth - 8)) + 'px';
+  tip.style.top = (e.clientY + 14) + 'px';
+}
+function hideNoteTip() { document.getElementById('noteTip').style.display = 'none'; }
+
+function noteHitAt(e, canvas) {
+  const hits = canvas._notes;
+  if (!hits || !hits.length) return null;
+  const mx = e.clientX - canvas.getBoundingClientRect().left;
+  return hits.find(h => Math.abs(mx - h.x) <= 6) || null;
 }
 
 function drawRunChart(canvas, proj) {
@@ -935,13 +1062,20 @@ function drawRunChart(canvas, proj) {
     ctx.beginPath();ctx.moveTo(lx-26,y+3.5);ctx.lineTo(lx-13,y+3.5);ctx.stroke();
     ctx.globalAlpha=1;ctx.fillStyle=css('--text2');ctx.fillText(lbl,lx,y+7);
   });
+
+  // Note markers last, so they paint on top; hit metadata rides on the canvas
+  // (the drawHistory _bars idiom) so hover always matches what is drawn.
+  canvas._notes = drawNoteMarkers(ctx, proj, PAD, cW, cH, false);
+  canvas._notesProj = proj;
 }
 
-function drawAllRunCharts(projects) {
-  const sess = findSess(selectedDate);
-  if (!sess || !sess.projects) return;
-  sess.projects.forEach((proj, idx) => {
-    if (runCanvases[idx]) drawRunChart(runCanvases[idx], proj);
+function drawAllRunCharts() {
+  // Each canvas redraws the run it was rendered for (stashed by
+  // renderRunsGrid). The old index walk over findSess().projects painted the
+  // wrong run's chart onto filtered cards whenever the assessment filter was
+  // active, because runCanvases holds only the filtered subset.
+  runCanvases.forEach(canvas => {
+    if (canvas && canvas._proj) drawRunChart(canvas, canvas._proj);
   });
 }
 
@@ -1153,6 +1287,17 @@ function exportRunCSV(proj, runIdx, date) {
     row.push(proj.lcpeak_profile[i]);
     rows.push(row);
   });
+  // Operator notes ride at the end so exported evidence carries them; the
+  // text cell is CSV-quoted by downloadCsv.
+  if (proj.notes && proj.notes.length) {
+    rows.push([]);
+    rows.push(['# operator notes']);
+    rows.push(['offset_s', 'time', 'end_time', 'note']);
+    proj.notes.forEach(nt => rows.push([
+      nt.at, wallClock(proj, nt.at),
+      nt.end != null ? wallClock(proj, nt.end) : '', nt.text,
+    ]));
+  }
   downloadCsv('noise-' + date + '-run' + (runIdx + 1) + '.csv', rows);
 }
 
@@ -1255,9 +1400,8 @@ histWrap.addEventListener('click', e=>{
   if(hit && (hit.s.d !== selectedDate || (hit.s.serial || '') !== selectedSerial)){
     selectedDate=hit.s.d;
     selectedSerial=hit.s.serial || '';
-    renderSessionPanel(selectedDate);
+    renderSessionPanel(selectedDate);   // rebuilds the grid, which draws its charts
     drawHistory();
-    drawAllRunCharts(findSess(selectedDate)?.projects||[]);
   }
 });
 
@@ -1285,7 +1429,7 @@ window.addEventListener('resize',()=>{
   clearTimeout(resizeTimer);
   resizeTimer=setTimeout(()=>{
     drawHistory();
-    drawAllRunCharts(findSess(selectedDate)?.projects||[]);
+    drawAllRunCharts();
   },120);
 });
 const obs=new MutationObserver(renderAll);
@@ -1383,6 +1527,11 @@ function drawModalTimeSeries(canvas, proj) {
     ctx.beginPath();ctx.moveTo(mlx-42,y+4);ctx.lineTo(mlx-22,y+4);ctx.stroke();
     ctx.globalAlpha=1;ctx.fillStyle=css('--text2');ctx.fillText(lbl,mlx,y+8);
   });
+  // Note markers on top; the geometry stash lets the click handler invert the
+  // same x mapping the markers were drawn with, rather than re-deriving PAD.
+  canvas._notes = drawNoteMarkers(ctx, proj, PAD, cW, cH, true);
+  canvas._notesProj = proj;
+  canvas._noteGeom = {padL: PAD.l, cW};
 }
 
 // ── Modal: histogram ──────────────────────────────────────
@@ -1571,6 +1720,18 @@ function openRunModal(proj, runNum, date) {
   closeModalMetaEdit();
 
   renderModalStats(proj, null);
+  // Chart notes: remember which run the modal shows, and only offer the note
+  // UI when the run has its stable identity (source_file) to anchor notes to.
+  // The hit/geometry stashes are cleared NOW, not at the rAF draw below: they
+  // still describe the previous run's chart, and a click landing in that gap
+  // (one frame normally; unbounded in a hidden tab, where rAF is starved)
+  // would otherwise act on the wrong run's markers.
+  modalNoteCtx = {proj, runNum, date};
+  modalNoteCanvas._notes = null;
+  modalNoteCanvas._notesProj = null;
+  modalNoteCanvas._noteGeom = null;
+  closeNotePop();
+  document.getElementById('noteBar').style.display = proj.source_file ? '' : 'none';
   document.getElementById('modalExportBtn').onclick = () => exportRunCSV(proj, runIdx, date);
   document.getElementById('modalReportBtn').onclick = () => openReportOpt(date, runIdx + 1, `${date} — Run ${runIdx + 1}`, proj.source_file);
   document.getElementById('modalOverlay').classList.add('open');
@@ -1649,10 +1810,159 @@ function saveModalMetaEdit() {
     status.textContent = 'Error: ' + err.message;
   });
 }
-function closeModal(){document.getElementById('modalOverlay').classList.remove('open');document.body.style.overflow='';}
+function closeModal(){
+  document.getElementById('modalOverlay').classList.remove('open');
+  document.body.style.overflow='';
+  closeNotePop(); hideNoteTip();
+}
 document.getElementById('modalOverlay').addEventListener('click',e=>{if(e.target===e.currentTarget)closeModal();});
 document.getElementById('modalCloseBtn').addEventListener('click',closeModal);
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closeModal();});
+
+// ── Modal: chart notes editor ─────────────────────────────
+// Placement lives here, on the 300px chart, where a click can be precise;
+// the run cards only display markers. Both entry paths — clicking the chart
+// and the "Add note" button — converge on submitNote(). All optimistic, the
+// saveTag idiom: DATA is mutated in place first, both charts redrawn, then
+// the fetch runs and either backfills the uid or rolls the change back.
+let modalNoteCtx = null;    // {proj, runNum, date} for the open run
+let notePopNote = null;     // the note being edited, or null when creating
+const notePopEl = document.getElementById('notePop');
+const modalNoteCanvas = document.getElementById('modalMainCanvas');
+
+function noteUiEnabled() {
+  // source_file is the run's stable identity; without one (legacy runs) the
+  // backend refuses note creation, so the UI doesn't offer it.
+  return modalNoteCtx && modalNoteCtx.proj.source_file;
+}
+
+modalNoteCanvas.addEventListener('mousemove', e => {
+  if (!noteUiEnabled()) { modalNoteCanvas.style.cursor = ''; return; }
+  const hit = noteHitAt(e, modalNoteCanvas);
+  modalNoteCanvas.style.cursor = hit ? 'pointer' : 'crosshair';
+  if (hit) showNoteTip(e, hit.note, modalNoteCtx.proj); else hideNoteTip();
+});
+modalNoteCanvas.addEventListener('mouseleave', hideNoteTip);
+modalNoteCanvas.addEventListener('click', e => {
+  if (!noteUiEnabled()) return;
+  hideNoteTip();
+  const hit = noteHitAt(e, modalNoteCanvas);
+  if (hit) {
+    if (hit.note.uid) openNotePop(hit.note, null);   // uid null = create still in flight
+    return;
+  }
+  const geom = modalNoteCanvas._noteGeom;
+  const proj = modalNoteCtx.proj;
+  const n = proj.laeq_profile.length;
+  if (!geom || n < 2) return;
+  const mx = e.clientX - modalNoteCanvas.getBoundingClientRect().left;
+  if (mx < geom.padL - 6 || mx > geom.padL + geom.cW + 6) return;   // outside the plot
+  const frac = clamp((mx - geom.padL) / geom.cW, 0, 1);
+  openNotePop(null, Math.round(frac * (n - 1) * proj.step));
+});
+
+function openNotePop(note, sec) {
+  const proj = modalNoteCtx.proj;
+  notePopNote = note;
+  document.getElementById('notePopTitle').textContent = note ? 'Edit note' : 'Add note';
+  document.getElementById('noteTime').value = wallClock(proj, note ? note.at : sec);
+  document.getElementById('noteEnd').value =
+    note && note.end != null ? wallClock(proj, note.end) : '';
+  document.getElementById('noteText').value = note ? note.text : '';
+  document.getElementById('noteDelBtn').style.display = note ? '' : 'none';
+  document.getElementById('noteStatus').textContent = '';
+  notePopEl.style.display = 'block';
+  document.getElementById('noteText').focus();
+}
+function closeNotePop() { notePopEl.style.display = 'none'; notePopNote = null; }
+
+function redrawNotes() {
+  if (modalNoteCtx) drawModalTimeSeries(modalNoteCanvas, modalNoteCtx.proj);
+  drawAllRunCharts();
+}
+
+function submitNote() {
+  const {proj, runNum, date} = modalNoteCtx;
+  const status = document.getElementById('noteStatus');
+  const text = document.getElementById('noteText').value.trim().slice(0, 500);
+  const at = offsetFromWall(proj, document.getElementById('noteTime').value);
+  const endRaw = document.getElementById('noteEnd').value.trim();
+  const end = endRaw ? offsetFromWall(proj, endRaw) : null;
+  const maxS = Math.max(proj.duration_s || 0, proj.n || 0,
+                        (proj.laeq_profile.length - 1) * proj.step);
+  if (!text) { status.textContent = 'A note needs some text.'; return; }
+  if (at == null || at > maxS) { status.textContent = 'Time must be within the run.'; return; }
+  if (endRaw && (end == null || end <= at)) { status.textContent = 'End must be after the start.'; return; }
+
+  const editing = notePopNote;
+  const prev = editing ? {at: editing.at, end: editing.end, text: editing.text} : null;
+  let entry;
+  if (editing) {
+    entry = editing;
+    entry.at = at; entry.end = end; entry.text = text;
+  } else {
+    entry = {uid: null, at, end, text};
+    proj.notes = proj.notes || [];
+    proj.notes.push(entry);
+  }
+  proj.notes.sort((a, b) => a.at - b.at);
+  closeNotePop();
+  redrawNotes();
+
+  const req = editing
+    ? fetch(`/api/run-note/${editing.uid}`, {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({text, offset_s: at, end_offset_s: end})})
+    : fetch(`/session/${date}/run/${runNum}/notes${serialQS('?')}`, {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({source_file: proj.source_file, offset_s: at,
+                              end_offset_s: end, text})});
+  req.then(r => r.json()).then(j => {
+    if (j.status !== 'ok') throw new Error(j.error || 'save failed');
+    // Backfill the uid only if the optimistic entry is still present — the
+    // note may have been deleted while the create was in flight.
+    if (!editing && proj.notes.includes(entry)) entry.uid = j.note.uid;
+  }).catch(() => {
+    // Roll the optimistic change back so the chart doesn't lie about what
+    // the database holds; a reload reconciles either way.
+    if (editing) { Object.assign(entry, prev); }
+    else {
+      const i = proj.notes.indexOf(entry);
+      if (i >= 0) proj.notes.splice(i, 1);
+    }
+    proj.notes.sort((a, b) => a.at - b.at);
+    redrawNotes();
+  });
+}
+
+function deleteNoteFromPop() {
+  const proj = modalNoteCtx.proj;
+  const note = notePopNote;
+  if (!note || !note.uid) return;
+  closeNotePop();
+  const i = proj.notes.indexOf(note);
+  if (i >= 0) proj.notes.splice(i, 1);
+  redrawNotes();
+  fetch(`/api/run-note/${note.uid}/delete`, {method: 'POST'})
+    .then(r => r.json()).then(j => { if (j.status !== 'ok') throw new Error(); })
+    .catch(() => {
+      proj.notes.push(note);
+      proj.notes.sort((a, b) => a.at - b.at);
+      redrawNotes();
+    });
+}
+
+document.getElementById('noteAddBtn').addEventListener('click', () => {
+  if (noteUiEnabled()) openNotePop(null, 0);
+});
+document.getElementById('noteSaveBtn').addEventListener('click', submitNote);
+document.getElementById('noteCancelBtn').addEventListener('click', closeNotePop);
+document.getElementById('noteDelBtn').addEventListener('click', deleteNoteFromPop);
+['noteTime', 'noteEnd', 'noteText'].forEach(id =>
+  document.getElementById(id).addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); submitNote(); }
+    if (e.key === 'Escape') { e.stopPropagation(); closeNotePop(); }  // keep the modal open
+  }));
 
 // Filter listeners
 ['fText','fFrom','fTo','fAvg','fMax'].forEach(id =>

@@ -133,6 +133,22 @@ def _supports_thinking(model):
     return not model.startswith(_NO_THINKING_MODELS)
 
 
+def _note_wall_clock(start, offset_s):
+    """A note's wall-clock time: run start 'HH:MM:SS' plus its offset in
+    seconds, wrapping past midnight. Falls back to a '+Ns' elapsed form when
+    the run carries no parseable start. (offset_s + 0.5 floored is half-up on
+    these non-negative offsets — this is a time, not a dB value, but it keeps
+    the module's no-banker's-rounding rule literal.)"""
+    whole = int(offset_s + 0.5)
+    try:
+        hh, mm, ss = str(start or '').split(':')[:3]
+        base = int(hh) * 3600 + int(mm) * 60 + int(ss)
+    except ValueError:
+        return f'+{whole}s'
+    t = (base + whole) % 86400
+    return f'{t // 3600:02d}:{t // 60 % 60:02d}:{t % 60:02d}'
+
+
 def _build_session_data_block(sess, run_rows, all_laeq, total_duration_s):
     """Return the formatted session data text injected into report prompts."""
     loc_parts = [sess.get('loc'), sess.get('post')]
@@ -185,13 +201,27 @@ def _build_session_data_block(sess, run_rows, all_laeq, total_duration_s):
     session_lmax = max(run_lmaxs) if run_lmaxs else (max(all_laeq) if all_laeq else None)
     session_pmx  = max((r.get('pmx', 0) or 0 for r in run_rows), default=None)
 
-    run_lines = [
-        f"  Run {r['run']} ({r['start']}–{r.get('end') or '?'}, {r['n']} s): "
-        f"LAeq {r.get('leq')} dB | LA10 {r.get('la10')} | LA50 {r.get('la50')} | "
-        f"LA90 {r.get('la90')} | LAmax {r.get('lmax')} | LCpeak {r.get('pmx')} | "
-        f"Time≥85dB {r.get('pct85')}%"
-        for r in run_rows
-    ]
+    run_lines = []
+    for r in run_rows:
+        line = (
+            f"  Run {r['run']} ({r['start']}–{r.get('end') or '?'}, {r['n']} s): "
+            f"LAeq {r.get('leq')} dB | LA10 {r.get('la10')} | LA50 {r.get('la50')} | "
+            f"LA90 {r.get('la90')} | LAmax {r.get('lmax')} | LCpeak {r.get('pmx')} | "
+            f"Time≥85dB {r.get('pct85')}%")
+        # Operator-logged chart notes ("police siren"): what the person at the
+        # meter knew about a peak. Fed to the model so a report can attribute
+        # peaks to non-target sources — which matters for BS 4142-style
+        # assessments. Text is free operator input: newlines flattened so it
+        # cannot forge extra data lines in this block.
+        events = []
+        for nt in (r.get('notes') or []):
+            when = _note_wall_clock(r.get('start'), nt.get('at') or 0)
+            if nt.get('end') is not None:
+                when += '–' + _note_wall_clock(r.get('start'), nt['end'])
+            events.append(f"{when} {' '.join(str(nt.get('text') or '').split())}")
+        if events:
+            line += "\n    Noted events (operator-logged): " + '; '.join(events)
+        run_lines.append(line)
 
     gps_str = f"{sess['lat']}, {sess['lng']}" if sess.get('lat') and sess.get('lng') else 'Not recorded'
     scope = f"Run {run_rows[0]['run']} only" if len(run_rows) == 1 else f"Full session ({len(run_rows)} runs)"
@@ -329,7 +359,8 @@ def _prepare_session_for_report(date, run_number=None, source_file=None, serial=
         rn = proj.get('run_number') or (all_projects.index(proj) + 1)
         st = _run_stats(proj, true_laeq=get_run_prof_laeq(date, rn, serial=serial))
         run_rows.append({'run': rn, 'source_file': proj.get('source_file'),
-                         'start': proj['start'], 'end': proj.get('end'), **st})
+                         'start': proj['start'], 'end': proj.get('end'),
+                         'notes': proj.get('notes') or [], **st})
         all_laeq.extend(_expand_run(proj))
     # Meter-stored duration where available (a run stopped mid-period can
     # differ from its 1-second record count); falls back to n for runs
