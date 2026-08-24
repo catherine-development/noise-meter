@@ -834,8 +834,8 @@ function renderRunsGrid(container, projects, runNums) {
     // actually drawn (canvas._notes/_notesProj), never a closed-over index.
     const wrap = card.querySelector('.run-chart-wrap');
     wrap.addEventListener('mousemove', e => {
-      const hit = noteHitAt(e, canvas);
-      if (hit) showNoteTip(e, hit.note, canvas._notesProj); else hideNoteTip();
+      const hits = noteHitsAt(e, canvas);
+      if (hits.length) showNoteTip(e, hits, canvas._notesProj); else hideNoteTip();
     });
     wrap.addEventListener('mouseleave', hideNoteTip);
   });
@@ -926,6 +926,7 @@ function wallClock(proj, sec) {
 function offsetFromWall(proj, str) {  // 'HH:MM[:SS]' → seconds from run start, or null
   const m = String(str || '').trim().match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
   if (!m) return null;
+  if (+m[1] > 23 || +m[2] > 59 || +(m[3] || 0) > 59) return null;  // 12:60:00 is not a time
   const wall = (+m[1]) * 3600 + (+m[2]) * 60 + (+(m[3] || 0));
   const sM = String(proj.start || '').match(/^(\d{1,2}):(\d{2}):(\d{2})/);
   if (!sM) return wall;   // no start known: read the input as elapsed time
@@ -962,25 +963,31 @@ function drawNoteMarkers(ctx, proj, PAD, cW, cH, big) {
 // Shared hover tooltip (position:fixed — clears the modal wrap's
 // overflow:hidden and needs no positioned ancestor on the cards). Built with
 // DOM text nodes: the note text is user input and never touches markup.
-function showNoteTip(e, note, proj) {
+// Takes the full hit list, one line per note, so coincident markers are all
+// visible rather than only the first.
+function showNoteTip(e, hitList, proj) {
   const tip = document.getElementById('noteTip');
-  const when = wallClock(proj, note.at) +
-    (note.end != null ? '–' + wallClock(proj, note.end) : '');
   tip.textContent = '';
-  const strong = document.createElement('strong');
-  strong.textContent = when;
-  tip.append('\u{1F4DD} ', strong, '  ' + note.text);
+  hitList.forEach(h => {
+    const note = h.note;
+    const line = document.createElement('div');
+    const strong = document.createElement('strong');
+    strong.textContent = wallClock(proj, note.at) +
+      (note.end != null ? '–' + wallClock(proj, note.end) : '');
+    line.append('\u{1F4DD} ', strong, '  ' + note.text);
+    tip.appendChild(line);
+  });
   tip.style.display = 'block';
   tip.style.left = Math.max(4, Math.min(e.clientX + 12, window.innerWidth - tip.offsetWidth - 8)) + 'px';
   tip.style.top = (e.clientY + 14) + 'px';
 }
 function hideNoteTip() { document.getElementById('noteTip').style.display = 'none'; }
 
-function noteHitAt(e, canvas) {
+function noteHitsAt(e, canvas) {  // ALL markers within the hit radius, not just the first
   const hits = canvas._notes;
-  if (!hits || !hits.length) return null;
+  if (!hits || !hits.length) return [];
   const mx = e.clientX - canvas.getBoundingClientRect().left;
-  return hits.find(h => Math.abs(mx - h.x) <= 6) || null;
+  return hits.filter(h => Math.abs(mx - h.x) <= 6);
 }
 
 function drawRunChart(canvas, proj) {
@@ -1242,7 +1249,13 @@ function clearFilter() {
 // ── CSV export helpers ─────────────────────────────────────
 function downloadCsv(filename, rows) {
   const csv = rows.map(r => r.map(v => {
-    const s = String(v ?? '');
+    let s = String(v ?? '');
+    // Free-text cells (operator notes, session metadata) must open as literal
+    // text, not execute: spreadsheet apps treat leading = + - @ or a tab as a
+    // formula. Apostrophe-prefix is the spreadsheet convention for "literal".
+    // Applied to string values only, so numeric cells (negative dB included)
+    // stay numbers.
+    if (typeof v === 'string' && /^[=+\-@\t\r]/.test(s)) s = "'" + s;
     return (s.includes(',') || s.includes('"') || s.includes('\n'))
       ? '"' + s.replace(/"/g, '""') + '"' : s;
   }).join(',')).join('\r\n');
@@ -1838,17 +1851,25 @@ function noteUiEnabled() {
 
 modalNoteCanvas.addEventListener('mousemove', e => {
   if (!noteUiEnabled()) { modalNoteCanvas.style.cursor = ''; return; }
-  const hit = noteHitAt(e, modalNoteCanvas);
-  modalNoteCanvas.style.cursor = hit ? 'pointer' : 'crosshair';
-  if (hit) showNoteTip(e, hit.note, modalNoteCtx.proj); else hideNoteTip();
+  const hits = noteHitsAt(e, modalNoteCanvas);
+  modalNoteCanvas.style.cursor = hits.length ? 'pointer' : 'crosshair';
+  if (hits.length) showNoteTip(e, hits, modalNoteCtx.proj); else hideNoteTip();
 });
 modalNoteCanvas.addEventListener('mouseleave', hideNoteTip);
 modalNoteCanvas.addEventListener('click', e => {
   if (!noteUiEnabled()) return;
   hideNoteTip();
-  const hit = noteHitAt(e, modalNoteCanvas);
-  if (hit) {
-    if (hit.note.uid) openNotePop(hit.note, null);   // uid null = create still in flight
+  const hits = noteHitsAt(e, modalNoteCanvas);
+  if (hits.length) {
+    // Coincident (or near-coincident) markers all share one hit position, so
+    // repeated clicks cycle through them — every note stays reachable for
+    // edit/delete, not only the first.
+    const key = hits.map(h => h.note.uid || 'pending').join('|');
+    const cyc = modalNoteCanvas._noteCycle;
+    const i = (cyc && cyc.key === key) ? cyc.i % hits.length : 0;
+    modalNoteCanvas._noteCycle = {key, i: i + 1};
+    const pick = hits[i].note;
+    if (pick.uid) openNotePop(pick, null);   // uid null = create still in flight
     return;
   }
   const geom = modalNoteCanvas._noteGeom;
@@ -1893,6 +1914,7 @@ function submitNote() {
   if (!text) { status.textContent = 'A note needs some text.'; return; }
   if (at == null || at > maxS) { status.textContent = 'Time must be within the run.'; return; }
   if (endRaw && (end == null || end <= at)) { status.textContent = 'End must be after the start.'; return; }
+  if (end != null && end > maxS) { status.textContent = 'End must be within the run.'; return; }
 
   const editing = notePopNote;
   const prev = editing ? {at: editing.at, end: editing.end, text: editing.text} : null;

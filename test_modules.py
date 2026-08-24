@@ -4804,7 +4804,7 @@ def main(meas_root):
 
             # (a) create → event → the peer holds the same note
             os.environ['PI_NAME'] = 'pi-a'
-            n21 = na.db.add_run_note(SESSION_DATE, 312.0, 'police siren',
+            n21 = na.db.add_run_note(SESSION_DATE, 31.0, 'police siren',
                                      serial='NOTE-1', source_file=_src21,
                                      run_number=1)
             check(n21 and n21['uid'] and len(n21['updated_at']) == 23
@@ -4830,18 +4830,18 @@ def main(meas_root):
                   "and it keeps the originating Pi's writer and stamp")
 
             # (b) several notes per run, and a range note
-            n21b = na.db.add_run_note(SESSION_DATE, 400.0, 'lorry reversing',
+            n21b = na.db.add_run_note(SESSION_DATE, 50.0, 'lorry reversing',
                                       serial='NOTE-1', source_file=_src21,
-                                      run_number=1, end_offset_s=445.0)
+                                      run_number=1, end_offset_s=56.0)
             nb.sync.apply_sync_event('run_note', 'upsert', _w18(n21b))
             check(len(nb.sql('SELECT 1 FROM run_notes')) == 2
-                  and _note_of(nb, n21b['uid'])['end_offset_s'] == 445.0,
+                  and _note_of(nb, n21b['uid'])['end_offset_s'] == 56.0,
                   'a run carries several notes, and a range keeps its end')
 
             # (c) the page payload: notes ride on the run, earliest first
             _proj21 = [p for p in na.db.get_all_sessions_json()['sessions']
                        if p['serial'] == 'NOTE-1'][0]['projects'][0]
-            check([x['at'] for x in _proj21['notes']] == [312.0, 400.0]
+            check([x['at'] for x in _proj21['notes']] == [31.0, 50.0]
                   and set(_proj21['notes'][0]) == {'uid', 'at', 'end', 'text'},
                   'get_all_sessions_json carries the notes, in time order',
                   str(_proj21['notes']))
@@ -4927,6 +4927,38 @@ def main(meas_root):
                   "the peer's session-tombstone replay removes its notes and "
                   'tombstones them, so a third copy cannot re-seed them')
 
+            # (g2) a delayed create racing the deletion: the note event arrives
+            #      AFTER its session was deleted here. Storing it would leave
+            #      an orphan that full sync distributes and a re-import
+            #      resurfaces as evidence — it must be dropped and tombstoned.
+            _late21 = {'uid': 'facade00-dead-beef-0000-000000000021',
+                       'session_date': SESSION_DATE,
+                       'instrument_serial': 'NOTE-1',
+                       'source_file': _src21, 'run_number': 1,
+                       'offset_s': 5.0, 'end_offset_s': None,
+                       'text': 'delayed siren',
+                       'created_at': '2026-08-24 09:00:00.000',
+                       'updated_at': '2026-08-24 09:00:00.000',
+                       'writer': 'pi-b'}
+            na.sync.apply_sync_event('run_note', 'upsert', _w18(_late21))
+            check(_note_of(na, _late21['uid']) is None
+                  and na.sql("SELECT COUNT(*) FROM deleted_uids "
+                             "WHERE table_name='run_notes' AND uid=?",
+                             _late21['uid'])[0][0] == 1,
+                  'a note event arriving after its session was deleted is '
+                  'dropped and uid-tombstoned, not stored as an orphan')
+            na.sync.apply_full_sync(_w18({'run_notes': [_late21]}))
+            check(_note_of(na, _late21['uid']) is None,
+                  'and the tombstone keeps the full payload from '
+                  're-introducing it')
+            _ahead21 = dict(_late21,
+                            uid='facade00-dead-beef-0000-000000000022',
+                            session_date='2031-01-01')
+            na.sync.apply_sync_event('run_note', 'upsert', _w18(_ahead21))
+            check(_note_of(na, _ahead21['uid']) is not None,
+                  'while a note for a session never seen here (no tombstone) '
+                  'still waits for its session — the legitimate ordering')
+
             # (h) a complete_date prune drops the notes of runs no longer on
             #     the card — the same treatment it gives assessment links
             np_ = Side(os.path.join(tmp, 'notes-prune.db'))
@@ -5001,7 +5033,15 @@ def main(meas_root):
                      'an infinite offset'),
                     ({'source_file': _srcr, 'offset_s': 1,
                       'end_offset_s': float('inf'), 'text': 'a'},
-                     'an infinite range end')):
+                     'an infinite range end'),
+                    # An anchor when the meter was not recording is not an
+                    # observation — reports and CSV would repeat it as
+                    # evidence. Bound = max(duration_s, n_samples) of the run.
+                    ({'source_file': _srcr, 'offset_s': 1e6, 'text': 'a'},
+                     'an anchor beyond the end of the run'),
+                    ({'source_file': _srcr, 'offset_s': 1,
+                      'end_offset_s': 1e6, 'text': 'a'},
+                     'a range end beyond the end of the run')):
                 check(_cl21.post(_url21, headers=CSRF_HDR,
                                  data=json.dumps(_bad21),
                                  content_type='application/json'
@@ -5039,6 +5079,10 @@ def main(meas_root):
                              json={'end_offset_s': 99}).status_code == 400,
                   'moving only the range end is refused — it would leave the '
                   'anchor behind')
+            check(_cl21.post(f'/api/run-note/{_uid21}', headers=CSRF_HDR,
+                             json={'offset_s': 1e6}).status_code == 400,
+                  'and an edit cannot move the anchor beyond the end of the '
+                  'run either')
             check(_cl21.post('/api/run-note/no-such-uid', headers=CSRF_HDR,
                              json={'text': 'x'}).status_code == 404,
                   'editing an unknown note 404s')

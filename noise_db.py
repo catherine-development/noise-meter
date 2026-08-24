@@ -1824,6 +1824,24 @@ def _note_row(conn, uid):
     return dict(row) if row else None
 
 
+def _check_note_offsets(run_row, offset_s, end_offset_s):
+    """Refuse an anchor beyond the end of the run. A note timestamped when the
+    meter was not recording is not an observation, it is a claim the data
+    cannot support — and reports and CSV exports would repeat it as evidence.
+
+    The bound is the larger of the meter-stored duration (which exceeds the
+    record count when a run was paused — the clock keeps going) and the
+    1-second record count. Raises ValueError; the routes turn that into a 400.
+    """
+    bound = max(run_row['duration_s'] or 0, run_row['n_samples'] or 0)
+    if bound <= 0:
+        return   # no duration stored at all (degenerate legacy row): cannot bound
+    worst = offset_s if end_offset_s is None else max(offset_s, end_offset_s)
+    if worst > bound:
+        raise ValueError(f'note time {worst:g}s is beyond the end of the run '
+                         f'({bound:g}s)')
+
+
 def add_run_note(date, offset_s, text, serial=None, source_file=None,
                  run_number=None, end_offset_s=None):
     """Attach a note to a run at `offset_s` seconds from its start.
@@ -1841,11 +1859,13 @@ def add_run_note(date, offset_s, text, serial=None, source_file=None,
     try:
         serial = resolve_serial(serial, conn)
         row = conn.execute(
-            'SELECT r.run_number FROM runs r JOIN sessions s ON r.session_id = s.id '
+            'SELECT r.run_number, r.n_samples, r.duration_s '
+            'FROM runs r JOIN sessions s ON r.session_id = s.id '
             'WHERE s.date=? AND s.instrument_serial=? AND r.source_file=?',
             (date, serial, source_file)).fetchone()
         if row is None:
             return None
+        _check_note_offsets(row, offset_s, end_offset_s)
         ts = conn.execute(f'SELECT {LWW_NOW_SQL}').fetchone()[0]
         note = {
             'uid': new_uid(), 'session_date': date, 'instrument_serial': serial,
@@ -1875,8 +1895,24 @@ def update_run_note(uid, text=None, offset_s=None, end_offset_s=_UNSET):
     """
     conn = get_db()
     try:
-        if _note_row(conn, uid) is None:
+        note = _note_row(conn, uid)
+        if note is None:
             return None
+        if offset_s is not None or end_offset_s is not _UNSET:
+            # Bound a moved anchor by its run, exactly as on create. The run
+            # can be absent when the note synced ahead of its session; then
+            # there is nothing to bound against and the origin's check stands.
+            run_row = conn.execute(
+                'SELECT r.n_samples, r.duration_s FROM runs r '
+                'JOIN sessions s ON r.session_id = s.id '
+                'WHERE s.date=? AND s.instrument_serial=? AND r.source_file=?',
+                (note['session_date'], note['instrument_serial'],
+                 note['source_file'])).fetchone()
+            if run_row is not None:
+                final_at = offset_s if offset_s is not None else note['offset_s']
+                final_end = (end_offset_s if end_offset_s is not _UNSET
+                             else note['end_offset_s'])
+                _check_note_offsets(run_row, final_at, final_end)
         sets, params = [], {'uid': uid}
         if text is not None:
             sets.append('text=:text')

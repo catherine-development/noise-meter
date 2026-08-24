@@ -937,8 +937,20 @@ def _apply_run_note(conn, rn):
     Unlike run_tag this is a row of its own, not a field on `runs`, so it
     applies whether or not the run is here yet: a note that arrives before its
     session simply waits, and the page — which joins notes to runs by
-    source_file — shows nothing until the run lands. Deleting the session
-    later tombstones it (_apply_tombstones), so nothing is left dangling.
+    source_file — shows nothing until the run lands.
+
+    That wait is only for a session that has never been here. A note whose
+    session is ABSENT AND TOMBSTONED is a delayed create racing a deletion —
+    the session-delete cascade tombstoned every note it could see, but a
+    create still in flight was not visible to it. Storing that note would
+    leave an orphan that a full sync distributes and a later re-import of the
+    same date silently resurfaces as evidence. It is dropped and its uid
+    tombstoned (stamped now, so the tombstone propagates back and removes the
+    peer's copy — delete-wins, exactly as if the note had landed a moment
+    before the delete). An operator edit strictly newer than the tombstone
+    still resurrects, the standard LWW escape hatch. A session that was
+    deleted and then legitimately re-imported has a row again, so its notes
+    apply normally despite the old tombstone.
 
     No pre-note peer ever sent this entity, so there is no legacy id-keyed
     fallback to keep (the report_template precedent): a row without a uid is
@@ -953,6 +965,17 @@ def _apply_run_note(conn, rn):
     if not _lww_should_apply(conn, 'run_notes', rn['uid'],
                              rn['updated_at'], rn.get('writer'), rn):
         return
+    sess_row = conn.execute(
+        'SELECT 1 FROM sessions WHERE date=? AND instrument_serial=?',
+        (rn['session_date'], rn['instrument_serial'])).fetchone()
+    if sess_row is None:
+        dead = conn.execute(
+            'SELECT 1 FROM deleted_sessions WHERE date=? AND instrument_serial=?',
+            (rn['session_date'], rn['instrument_serial'])).fetchone()
+        if dead is not None:
+            conn.execute('DELETE FROM run_notes WHERE uid=?', (rn['uid'],))
+            record_uid_tombstones(conn, 'run_notes', [rn['uid']])
+            return
     conn.execute('''
         INSERT INTO run_notes
             (uid, session_date, instrument_serial, source_file, run_number,

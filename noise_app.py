@@ -718,9 +718,12 @@ def add_run_note_route(date, run_number):
         return jsonify({'status': 'error', 'error': 'source_file is required'}), 400
     if not text:
         return jsonify({'status': 'error', 'error': 'text is required'}), 400
-    note = add_run_note(date, offset_s, text, serial=serial,
-                        source_file=source_file, run_number=run_number,
-                        end_offset_s=end_offset_s)
+    try:
+        note = add_run_note(date, offset_s, text, serial=serial,
+                            source_file=source_file, run_number=run_number,
+                            end_offset_s=end_offset_s)
+    except ValueError as e:   # anchor beyond the end of the run
+        return jsonify({'status': 'error', 'error': str(e)}), 400
     if note is None:
         return jsonify({'status': 'error', 'error': 'run not found'}), 404
     sync_event_to_peer('run_note', 'upsert', note)
@@ -751,7 +754,10 @@ def edit_run_note_route(uid):
                         'error': 'send offset_s with end_offset_s'}), 400
     if not fields:
         return jsonify({'status': 'error', 'error': 'nothing to update'}), 400
-    note = update_run_note(uid, **fields)
+    try:
+        note = update_run_note(uid, **fields)
+    except ValueError as e:   # anchor beyond the end of the run
+        return jsonify({'status': 'error', 'error': str(e)}), 400
     if note is None:
         return jsonify({'status': 'error', 'error': 'note not found'}), 404
     sync_event_to_peer('run_note', 'upsert', note)
