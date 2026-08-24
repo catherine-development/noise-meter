@@ -808,6 +808,43 @@ def _migrate(conn):
             PRIMARY KEY (table_name, uid)
         )
     ''')
+    # Time-anchored notes on a run's chart ("police siren", "lorry reversing"):
+    # what the operator knows about a peak that the meter cannot record.
+    #
+    # A table rather than a column on `runs` because a run carries several
+    # independent notes and both Pis can be edited while apart: per-note uids
+    # merge, where one JSON blob under a single LWW stamp would silently drop
+    # whichever side lost. Keyed like assessment_runs — (session_date,
+    # instrument_serial, source_file) names the run, in plain text columns with
+    # no FK, so the four deletion paths clean it explicitly (delete_session,
+    # purge_sessions_before, the complete_date prune, and the peer's tombstone
+    # replay in sync_db._apply_tombstones).
+    #
+    # Deliberately no unique index on the run key: two notes at the same second
+    # are two notes. Every note is minted once with new_uid() at its origin, so
+    # unlike assessment_runs there is no stable natural key to converge on and
+    # none of that uid-adoption machinery applies. offset_s is REAL — profile
+    # steps can be sub-second.
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS run_notes (
+            id                INTEGER PRIMARY KEY,
+            uid               TEXT,
+            session_date      TEXT NOT NULL,
+            instrument_serial TEXT NOT NULL DEFAULT '',
+            source_file       TEXT,
+            run_number        INTEGER,
+            offset_s          REAL NOT NULL,
+            end_offset_s      REAL,
+            text              TEXT NOT NULL DEFAULT '',
+            created_at        TEXT DEFAULT (datetime('now','localtime')),
+            updated_at        TEXT,
+            writer            TEXT
+        )
+    ''')
+    conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_run_notes_uid '
+                 'ON run_notes(uid)')
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_run_notes_session '
+                 'ON run_notes(session_date, instrument_serial)')
 
     conn.commit()
 
@@ -1153,6 +1190,7 @@ def import_sessions(sessions_data, metadata=None, origin='operator'):
                     # source_file has no stable key to match; its links, if
                     # any, are what audit_assessment_run_keys() reports.
                     link_uids = []
+                    note_uids = []
                     for row in doomed:
                         if not row['source_file']:
                             continue
@@ -1165,7 +1203,20 @@ def import_sessions(sessions_data, metadata=None, origin='operator'):
                             'DELETE FROM assessment_runs WHERE session_date=? '
                             'AND instrument_serial=? AND source_file=?',
                             (date, serial, row['source_file'])).rowcount
+                        # The run's chart notes go with it, tombstoned the same
+                        # way — they are anchored to a run that is no longer on
+                        # the card.
+                        note_uids += [u[0] for u in conn.execute(
+                            'SELECT uid FROM run_notes WHERE session_date=? '
+                            'AND instrument_serial=? AND source_file=? '
+                            'AND uid IS NOT NULL',
+                            (date, serial, row['source_file'])).fetchall()]
+                        conn.execute(
+                            'DELETE FROM run_notes WHERE session_date=? '
+                            'AND instrument_serial=? AND source_file=?',
+                            (date, serial, row['source_file']))
                     record_uid_tombstones(conn, 'assessment_runs', link_uids)
+                    record_uid_tombstones(conn, 'run_notes', note_uids)
                     conn.execute(
                         f'DELETE FROM runs WHERE id IN ({",".join("?" * len(doomed))})',
                         [row['id'] for row in doomed])
@@ -1402,6 +1453,19 @@ def get_all_sessions_json():
     for row in sess_assess_rows:
         sess_assessments.setdefault(
             (row['session_date'], row['instrument_serial']), []).append(row['name'])
+    # (date, serial, source_file) -> the run's notes, earliest first. One query
+    # for every session on the page, like the assessment names above.
+    note_rows = conn.execute(
+        'SELECT uid, session_date, instrument_serial, source_file, '
+        'offset_s, end_offset_s, text FROM run_notes '
+        'ORDER BY offset_s'
+    ).fetchall()
+    run_notes = {}
+    for row in note_rows:
+        run_notes.setdefault(
+            (row['session_date'], row['instrument_serial'], row['source_file']),
+            []).append({'uid': row['uid'], 'at': row['offset_s'],
+                        'end': row['end_offset_s'], 'text': row['text']})
     result = []
     for sess in sessions:
         runs = conn.execute(
@@ -1438,6 +1502,8 @@ def get_all_sessions_json():
                 **_run_to_dict(r, full=False),
                 'loc_tag': r['location_tag'],
                 'assess':  r['assess_locs'],
+                'notes':   run_notes.get(
+                    (sess['date'], sess['instrument_serial'], r['source_file']), []),
             } for r in runs],
         })
     conn.close()
@@ -1743,6 +1809,114 @@ def update_run_location_tag(date, run_number, tag, serial=None, source_file=None
     return {'tag_updated_at': ts, 'tag_writer': writer}
 
 
+# The wire shape of a run note: what the route returns, what the sync event
+# carries, and what _apply_run_note binds. The local integer id is deliberately
+# absent — across the pair a note is its uid.
+RUN_NOTE_COLS = ('uid', 'session_date', 'instrument_serial', 'source_file',
+                 'run_number', 'offset_s', 'end_offset_s', 'text',
+                 'created_at', 'updated_at', 'writer')
+
+
+def _note_row(conn, uid):
+    row = conn.execute(
+        f'SELECT {", ".join(RUN_NOTE_COLS)} FROM run_notes WHERE uid=?',
+        (uid,)).fetchone()
+    return dict(row) if row else None
+
+
+def add_run_note(date, offset_s, text, serial=None, source_file=None,
+                 run_number=None, end_offset_s=None):
+    """Attach a note to a run at `offset_s` seconds from its start.
+
+    The run is named by source_file — its stable identity. Returns None when
+    that run does not exist here, so the caller can 404 rather than store a
+    note anchored to nothing; the run_number stored alongside comes from the
+    matched row, not from the caller, because the number the page rendered
+    with may already be stale (see get_run_prof_by_source).
+
+    Returns the whole note, uid and LWW stamps included, for the JSON response
+    and the peer event.
+    """
+    conn = get_db()
+    try:
+        serial = resolve_serial(serial, conn)
+        row = conn.execute(
+            'SELECT r.run_number FROM runs r JOIN sessions s ON r.session_id = s.id '
+            'WHERE s.date=? AND s.instrument_serial=? AND r.source_file=?',
+            (date, serial, source_file)).fetchone()
+        if row is None:
+            return None
+        ts = conn.execute(f'SELECT {LWW_NOW_SQL}').fetchone()[0]
+        note = {
+            'uid': new_uid(), 'session_date': date, 'instrument_serial': serial,
+            'source_file': source_file, 'run_number': row['run_number'],
+            'offset_s': offset_s, 'end_offset_s': end_offset_s,
+            'text': text or '', 'created_at': ts, 'updated_at': ts,
+            'writer': local_writer(),
+        }
+        conn.execute(
+            f'INSERT INTO run_notes ({", ".join(RUN_NOTE_COLS)}) '
+            f'VALUES ({", ".join(":" + c for c in RUN_NOTE_COLS)})', note)
+        conn.commit()
+        return note
+    finally:
+        conn.close()
+
+
+_UNSET = object()
+
+
+def update_run_note(uid, text=None, offset_s=None, end_offset_s=_UNSET):
+    """Edit a note by uid, re-stamping it so the edit replicates.
+
+    Only the fields supplied move; end_offset_s takes None as a real value
+    (clearing a range back to a point), hence the sentinel default. Returns
+    the whole updated note, or None when the uid is unknown here.
+    """
+    conn = get_db()
+    try:
+        if _note_row(conn, uid) is None:
+            return None
+        sets, params = [], {'uid': uid}
+        if text is not None:
+            sets.append('text=:text')
+            params['text'] = text
+        if offset_s is not None:
+            sets.append('offset_s=:offset_s')
+            params['offset_s'] = offset_s
+        if end_offset_s is not _UNSET:
+            sets.append('end_offset_s=:end_offset_s')
+            params['end_offset_s'] = end_offset_s
+        params['updated_at'] = conn.execute(f'SELECT {LWW_NOW_SQL}').fetchone()[0]
+        params['writer'] = local_writer()
+        sets += ['updated_at=:updated_at', 'writer=:writer']
+        conn.execute(f'UPDATE run_notes SET {", ".join(sets)} WHERE uid=:uid', params)
+        conn.commit()
+        return _note_row(conn, uid)
+    finally:
+        conn.close()
+
+
+def delete_run_note(uid):
+    """Delete a note and tombstone its uid, so the deletion replicates instead
+    of being resurrected by the next full sync from a Pi that still holds it.
+    Returns {'uid', 'deleted_at'} for the peer event, or None if unknown here.
+    """
+    conn = get_db()
+    try:
+        if _note_row(conn, uid) is None:
+            return None
+        conn.execute('DELETE FROM run_notes WHERE uid=?', (uid,))
+        record_uid_tombstones(conn, 'run_notes', [uid])
+        deleted_at = conn.execute(
+            "SELECT deleted_at FROM deleted_uids WHERE table_name='run_notes' "
+            'AND uid=?', (uid,)).fetchone()['deleted_at']
+        conn.commit()
+        return {'uid': uid, 'deleted_at': deleted_at}
+    finally:
+        conn.close()
+
+
 def delete_session(date, serial=None):
     """Delete the (date, serial) session and its runs (cascaded via FK) plus
     its assessment assignments — assessment_runs.session_date is a plain text
@@ -1764,11 +1938,19 @@ def delete_session(date, serial=None):
     ar_uids = [r[0] for r in conn.execute(
         'SELECT uid FROM assessment_runs WHERE session_date=? AND '
         'instrument_serial=? AND uid IS NOT NULL', (date, serial)).fetchall()]
+    # Chart notes are keyed by (date, serial, source_file) in plain columns, so
+    # they need the same explicit removal and tombstoning as the links above.
+    note_uids = [r[0] for r in conn.execute(
+        'SELECT uid FROM run_notes WHERE session_date=? AND '
+        'instrument_serial=? AND uid IS NOT NULL', (date, serial)).fetchall()]
     conn.execute('DELETE FROM assessment_runs WHERE session_date=? AND instrument_serial=?',
+                 (date, serial))
+    conn.execute('DELETE FROM run_notes WHERE session_date=? AND instrument_serial=?',
                  (date, serial))
     conn.execute('DELETE FROM sessions WHERE date=? AND instrument_serial=?', (date, serial))
     _record_tombstones(conn, [(date, serial)])
     record_uid_tombstones(conn, 'assessment_runs', ar_uids)
+    record_uid_tombstones(conn, 'run_notes', note_uids)
     conn.commit()
     conn.close()
 
@@ -2003,7 +2185,11 @@ def purge_sessions_before(before_date):
         ar_uids = [r[0] for r in conn.execute(
             f'SELECT uid FROM assessment_runs WHERE session_date IN ({ph}) '
             'AND uid IS NOT NULL', old).fetchall()]
+        note_uids = [r[0] for r in conn.execute(
+            f'SELECT uid FROM run_notes WHERE session_date IN ({ph}) '
+            'AND uid IS NOT NULL', old).fetchall()]
         conn.execute(f'DELETE FROM assessment_runs WHERE session_date IN ({ph})', old)
+        conn.execute(f'DELETE FROM run_notes WHERE session_date IN ({ph})', old)
         # Weather goes with the purge. The table is keyed (date, serial) since
         # WP9 (_migrate rebuilds any older variant before this can run), but
         # the purge is date-scoped by definition — every serial's session
@@ -2016,6 +2202,7 @@ def purge_sessions_before(before_date):
         conn.execute(f'DELETE FROM sessions WHERE date IN ({ph})', old)
         _record_tombstones(conn, keys)
         record_uid_tombstones(conn, 'assessment_runs', ar_uids)
+        record_uid_tombstones(conn, 'run_notes', note_uids)
         conn.commit()
     conn.close()
     return old

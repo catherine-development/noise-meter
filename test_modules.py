@@ -4780,6 +4780,294 @@ def main(meas_root):
             else:
                 os.environ['PI_NAME'] = _saved_pi20
 
+        # ── 21. Chart notes: time-anchored annotations, replicated ──────────
+        print('\n21. chart notes replicate by uid, with LWW and tombstones')
+        # A note is a row of its own rather than a field on `runs`: a run
+        # carries several, both Pis can add while apart, and per-note uids
+        # merge where one blob under a single stamp would drop a side.
+        _saved_pi21 = os.environ.get('PI_NAME')
+        try:
+            os.environ['PI_NAME'] = 'pi-a'
+            na = Side(os.path.join(tmp, 'notes-a.db'))
+            os.environ['PI_NAME'] = 'pi-b'
+            nb = Side(os.path.join(tmp, 'notes-b.db'))
+            for _sd21 in (na, nb):
+                _sd21.db.import_sessions([_w18(_payload_copy('NOTE-1'))])
+            _src21 = na.sql(
+                'SELECT r.source_file FROM runs r JOIN sessions s '
+                "ON s.id=r.session_id WHERE s.instrument_serial='NOTE-1' "
+                'AND r.run_number=1')[0][0]
+
+            def _note_of(side, uid):
+                rows = side.sql('SELECT * FROM run_notes WHERE uid=?', uid)
+                return dict(rows[0]) if rows else None
+
+            # (a) create → event → the peer holds the same note
+            os.environ['PI_NAME'] = 'pi-a'
+            n21 = na.db.add_run_note(SESSION_DATE, 312.0, 'police siren',
+                                     serial='NOTE-1', source_file=_src21,
+                                     run_number=1)
+            check(n21 and n21['uid'] and len(n21['updated_at']) == 23
+                  and n21['writer'] == 'pi-a' and n21['run_number'] == 1,
+                  'add_run_note mints a uid, stamps it, and returns the row',
+                  str({k: n21[k] for k in ('offset_s', 'writer', 'run_number')}))
+            check(na.db.add_run_note(SESSION_DATE, 5.0, 'x', serial='NOTE-1',
+                                     source_file='NO-SUCH-RUN') is None,
+                  'a note for a run that is not here is refused, not stored '
+                  'anchored to nothing')
+            nb.sync.apply_sync_event('run_note', 'upsert', _w18(n21))
+            _rb21 = _note_of(nb, n21['uid'])
+            # Every wire column compared, not a sample: a column present in
+            # RUN_NOTE_COLS but missing from _apply_run_note's INSERT would be
+            # dropped in silence, which is how this codebase has lost synced
+            # fields before.
+            _miss21 = {c: (n21[c], _rb21[c]) for c in na.db.RUN_NOTE_COLS
+                       if _rb21 is None or _rb21[c] != n21[c]}
+            check(_rb21 is not None and not _miss21,
+                  'the note propagates whole — every column of RUN_NOTE_COLS '
+                  'survives the event', str(_miss21))
+            check(_rb21['writer'] == 'pi-a' and len(_rb21['updated_at']) == 23,
+                  "and it keeps the originating Pi's writer and stamp")
+
+            # (b) several notes per run, and a range note
+            n21b = na.db.add_run_note(SESSION_DATE, 400.0, 'lorry reversing',
+                                      serial='NOTE-1', source_file=_src21,
+                                      run_number=1, end_offset_s=445.0)
+            nb.sync.apply_sync_event('run_note', 'upsert', _w18(n21b))
+            check(len(nb.sql('SELECT 1 FROM run_notes')) == 2
+                  and _note_of(nb, n21b['uid'])['end_offset_s'] == 445.0,
+                  'a run carries several notes, and a range keeps its end')
+
+            # (c) the page payload: notes ride on the run, earliest first
+            _proj21 = [p for p in na.db.get_all_sessions_json()['sessions']
+                       if p['serial'] == 'NOTE-1'][0]['projects'][0]
+            check([x['at'] for x in _proj21['notes']] == [312.0, 400.0]
+                  and set(_proj21['notes'][0]) == {'uid', 'at', 'end', 'text'},
+                  'get_all_sessions_json carries the notes, in time order',
+                  str(_proj21['notes']))
+
+            # (d) LWW both directions
+            os.environ['PI_NAME'] = 'pi-b'
+            _newer21 = nb.db.update_run_note(n21['uid'], text='two-tone siren')
+            os.environ['PI_NAME'] = 'pi-a'
+            _stale21 = dict(n21, text='STALE',
+                            updated_at='2020-01-01 00:00:00.000')
+            nb.sync.apply_sync_event('run_note', 'upsert', _w18(_stale21))
+            check(_note_of(nb, n21['uid'])['text'] == 'two-tone siren',
+                  'a stale note edit is skipped')
+            check(nb.sql("SELECT COUNT(*) FROM sync_conflicts "
+                         "WHERE table_name='run_notes' AND uid=?",
+                         n21['uid'])[0][0] == 1,
+                  "and lands in sync_conflicts as 'run_notes'")
+            na.sync.apply_sync_event('run_note', 'upsert', _w18(_newer21))
+            check(_note_of(na, n21['uid'])['text'] == 'two-tone siren',
+                  'the newer edit applies the other way')
+            nb.sync.apply_sync_event('run_note', 'upsert', _w18(_newer21))
+            check(nb.sql("SELECT COUNT(*) FROM sync_conflicts "
+                         "WHERE table_name='run_notes' AND uid=?",
+                         n21['uid'])[0][0] == 0,
+                  'and replaying the winner clears the conflict')
+
+            # (e) delete tombstones, and a full sync cannot resurrect
+            _del21 = na.db.delete_run_note(n21['uid'])
+            check(_del21 and _del21['deleted_at']
+                  and na.sql("SELECT COUNT(*) FROM deleted_uids "
+                             "WHERE table_name='run_notes' AND uid=?",
+                             n21['uid'])[0][0] == 1,
+                  'delete_run_note removes the row and tombstones the uid')
+            check(na.db.delete_run_note(n21['uid']) is None,
+                  'deleting it twice reports not-found rather than a second '
+                  'tombstone')
+            na.sync.apply_full_sync(_w18(nb.sync.get_full_sync_payload()))
+            check(_note_of(na, n21['uid']) is None,
+                  "a full sync from the peer still holding the note cannot "
+                  "resurrect it")
+            nb.sync.apply_sync_event('run_note', 'delete', _w18(_del21))
+            check(_note_of(nb, n21['uid']) is None
+                  and nb.sql("SELECT COUNT(*) FROM deleted_uids "
+                             "WHERE table_name='run_notes' AND uid=?",
+                             n21['uid'])[0][0] == 1,
+                  'the delete event removes it on the peer and tombstones there too')
+
+            # (f) the full payload carries notes to a Pi that never saw them
+            nc = Side(os.path.join(tmp, 'notes-c.db'))
+            nc.db.import_sessions([_w18(_payload_copy('NOTE-1'))])
+            nc.sync.apply_full_sync(_w18(na.sync.get_full_sync_payload()))
+            check(_note_of(nc, n21b['uid']) is not None
+                  and _note_of(nc, n21['uid']) is None,
+                  'the full payload carries the live note and honours the '
+                  'tombstone for the deleted one')
+
+            # (g) a note whose session is deleted goes with it, and the peer's
+            #     replay of that session tombstone takes its copies too
+            os.environ['PI_NAME'] = 'pi-a'
+            na.db.delete_session(SESSION_DATE, 'NOTE-1')
+            check(not na.sql('SELECT 1 FROM run_notes')
+                  and na.sql("SELECT COUNT(*) FROM deleted_uids "
+                             "WHERE table_name='run_notes' AND uid=?",
+                             n21b['uid'])[0][0] == 1,
+                  'delete_session removes the notes and tombstones them')
+            _ts21 = [t for t in na.sync.get_full_sync_payload()['deleted_sessions']
+                     if t['serial'] == 'NOTE-1']
+            check(_note_of(nc, n21b['uid']) is not None,
+                  'the third Pi still holds the note before the tombstone lands')
+            # imported_at and a session's deleted_at are both second-resolution
+            # datetime('now'), and the whole suite runs inside one second — so
+            # the replay's "re-imported here after the peer's delete" guard
+            # would otherwise keep the session on a tie. Date the import as it
+            # would really be: before the delete.
+            nc.set_imported_at(SESSION_DATE, '2020-01-01 00:00:00')
+            _conn21 = nc.db.get_db()
+            nc.sync._apply_tombstones(_conn21, _w18(_ts21))
+            _conn21.commit(); _conn21.close()
+            check(_note_of(nc, n21b['uid']) is None
+                  and nc.sql("SELECT COUNT(*) FROM deleted_uids "
+                             "WHERE table_name='run_notes' AND uid=?",
+                             n21b['uid'])[0][0] == 1,
+                  "the peer's session-tombstone replay removes its notes and "
+                  'tombstones them, so a third copy cannot re-seed them')
+
+            # (h) a complete_date prune drops the notes of runs no longer on
+            #     the card — the same treatment it gives assessment links
+            np_ = Side(os.path.join(tmp, 'notes-prune.db'))
+            np_.db.import_sessions([_w18(_payload_copy('NOTE-P', n_projects=2))])
+            _rows21 = np_.sql(
+                'SELECT r.source_file FROM runs r JOIN sessions s '
+                "ON s.id=r.session_id WHERE s.instrument_serial='NOTE-P' "
+                'ORDER BY r.run_number')
+            _keep21, _drop21 = _rows21[0][0], _rows21[1][0]
+            _nk21 = np_.db.add_run_note(SESSION_DATE, 10.0, 'kept',
+                                        serial='NOTE-P', source_file=_keep21)
+            _nd21 = np_.db.add_run_note(SESSION_DATE, 20.0, 'pruned',
+                                        serial='NOTE-P', source_file=_drop21)
+            _pay21 = _w18(_payload_copy('NOTE-P', n_projects=1))
+            _pay21['complete_date'] = True
+            np_.db.import_sessions([_pay21])
+            check(_note_of(np_, _nk21['uid']) is not None
+                  and _note_of(np_, _nd21['uid']) is None
+                  and np_.sql("SELECT COUNT(*) FROM deleted_uids "
+                              "WHERE table_name='run_notes' AND uid=?",
+                              _nd21['uid'])[0][0] == 1,
+                  'a complete_date prune drops the pruned run\'s notes '
+                  '(tombstoned) and keeps the surviving run\'s')
+
+            # (i) the routes, driven for real: create, edit, delete, and the
+            #     validation that keeps a malformed anchor out of the database
+            nr = Side(os.path.join(tmp, 'notes-routes.db'))
+            nr.db.import_sessions([_w18(_payload_copy('NOTE-R'))])
+            _srcr = nr.sql(
+                'SELECT r.source_file FROM runs r JOIN sessions s '
+                "ON s.id=r.session_id WHERE s.instrument_serial='NOTE-R' "
+                'AND r.run_number=1')[0][0]
+            sys.modules.pop('noise_app', None)
+            _na_mod21 = importlib.import_module('noise_app')     # bound to nr
+            _app21 = _na_mod21.app
+            NOTE_TEXT_MAX_21 = _na_mod21.NOTE_TEXT_MAX
+            _app21.config['TESTING'] = True
+            _cl21 = _app21.test_client()
+            with _cl21.session_transaction() as _s21:
+                _s21['user'] = 'test'
+                _s21['logged_in'] = True
+                _s21['_csrf_token'] = SUITE_CSRF
+            _url21 = f'/session/{SESSION_DATE}/run/1/notes?serial=NOTE-R'
+            _r21 = _cl21.post(_url21, headers=CSRF_HDR, json={
+                'source_file': _srcr, 'offset_s': 42.5, 'text': ' siren  '})
+            _j21 = _r21.get_json()
+            check(_r21.status_code == 200 and _j21['status'] == 'ok'
+                  and _j21['note']['offset_s'] == 42.5
+                  and _j21['note']['text'] == 'siren'
+                  and _j21['note']['instrument_serial'] == 'NOTE-R',
+                  'the create route stores the note and returns it, trimmed',
+                  str(_j21))
+            _uid21 = _j21['note']['uid']
+            for _bad21, _why21 in (
+                    ({'source_file': _srcr, 'offset_s': 'x', 'text': 'a'},
+                     'a non-numeric offset'),
+                    ({'source_file': _srcr, 'offset_s': -1, 'text': 'a'},
+                     'a negative offset'),
+                    ({'source_file': _srcr, 'offset_s': 1, 'text': '   '},
+                     'empty text'),
+                    ({'offset_s': 1, 'text': 'a'},
+                     'no source_file'),
+                    ({'source_file': _srcr, 'offset_s': 10,
+                      'end_offset_s': 5, 'text': 'a'},
+                     'a range that ends before it starts'),
+                    # nan/inf pass a bare ">= 0" test, anchor to nowhere, and
+                    # json.dumps writes them as bare NaN/Infinity — not valid
+                    # JSON, so the peer event would carry an unparseable token.
+                    ({'source_file': _srcr, 'offset_s': float('nan'), 'text': 'a'},
+                     'a NaN offset'),
+                    ({'source_file': _srcr, 'offset_s': float('inf'), 'text': 'a'},
+                     'an infinite offset'),
+                    ({'source_file': _srcr, 'offset_s': 1,
+                      'end_offset_s': float('inf'), 'text': 'a'},
+                     'an infinite range end')):
+                check(_cl21.post(_url21, headers=CSRF_HDR,
+                                 data=json.dumps(_bad21),
+                                 content_type='application/json'
+                                 ).status_code == 400,
+                      f'the create route rejects {_why21}')
+            # 0 is the run's first second — a real anchor, and falsy
+            _z21 = _cl21.post(_url21, headers=CSRF_HDR, json={
+                'source_file': _srcr, 'offset_s': 0, 'text': 'loud from the off'})
+            check(_z21.status_code == 200
+                  and _z21.get_json()['note']['offset_s'] == 0.0,
+                  'but offset_s 0 is accepted — the first second is anchorable')
+            check(_cl21.post(f'/api/run-note/'
+                             f'{_z21.get_json()["note"]["uid"]}/delete',
+                             headers=CSRF_HDR).status_code == 200,
+                  'and that note deletes cleanly')
+            _long21 = _cl21.post(_url21, headers=CSRF_HDR, json={
+                'source_file': _srcr, 'offset_s': 7, 'text': 'z' * 900})
+            check(len(_long21.get_json()['note']['text']) == NOTE_TEXT_MAX_21,
+                  f'note text is capped at {NOTE_TEXT_MAX_21} characters')
+            _cl21.post(f'/api/run-note/{_long21.get_json()["note"]["uid"]}/delete',
+                       headers=CSRF_HDR)
+            check(_cl21.post(f'/session/{SESSION_DATE}/run/1/notes?serial=NOTE-R',
+                             headers=CSRF_HDR,
+                             json={'source_file': 'NO-SUCH', 'offset_s': 1,
+                                   'text': 'a'}).status_code == 404,
+                  'and 404s for a run it does not have')
+            check(len(nr.sql('SELECT 1 FROM run_notes')) == 1,
+                  'none of the refusals left a row behind')
+            _e21 = _cl21.post(f'/api/run-note/{_uid21}', headers=CSRF_HDR,
+                              json={'text': 'two-tone siren'}).get_json()
+            check(_e21['note']['text'] == 'two-tone siren'
+                  and _e21['note']['offset_s'] == 42.5,
+                  'the edit route changes the text and leaves the anchor alone')
+            check(_cl21.post(f'/api/run-note/{_uid21}', headers=CSRF_HDR,
+                             json={'end_offset_s': 99}).status_code == 400,
+                  'moving only the range end is refused — it would leave the '
+                  'anchor behind')
+            check(_cl21.post('/api/run-note/no-such-uid', headers=CSRF_HDR,
+                             json={'text': 'x'}).status_code == 404,
+                  'editing an unknown note 404s')
+            _d21 = _cl21.post(f'/api/run-note/{_uid21}/delete', headers=CSRF_HDR)
+            check(_d21.status_code == 200 and _d21.get_json()['deleted_at']
+                  and not nr.sql('SELECT 1 FROM run_notes'),
+                  'the delete route removes it and reports the tombstone time')
+            check(_cl21.post(f'/api/run-note/{_uid21}/delete',
+                             headers=CSRF_HDR).status_code == 404,
+                  'deleting it again 404s')
+            check(_cl21.post(_url21, json={'source_file': _srcr, 'offset_s': 1,
+                                           'text': 'a'}).status_code == 403,
+                  'and the note routes are CSRF-protected like every other '
+                  'mutation')
+            _na21 = open(os.path.join(REPO, 'noise_app.py'), encoding='utf-8').read()
+            check("sync_event_to_peer('run_note', 'upsert', note)" in _na21
+                  and "sync_event_to_peer('run_note', 'delete', res)" in _na21,
+                  'the note routes push the stored row / tombstone to the peer')
+            check("'run_notes'" in open(os.path.join(REPO, 'sync_db.py'),
+                                        encoding='utf-8').read().split(
+                      '_UID_TABLES')[0].split('_LWW_TABLES')[1],
+                  'run_notes is on the uid-table whitelist — the boundary that '
+                  'lets a tombstone name it')
+        finally:
+            if _saved_pi21 is None:
+                os.environ.pop('PI_NAME', None)
+            else:
+                os.environ['PI_NAME'] = _saved_pi21
+
         print(f'\nAll {_checks} checks passed.')
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

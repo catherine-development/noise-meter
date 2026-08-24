@@ -6,6 +6,7 @@ Runs on Raspberry Pi; data uploaded via web interface or import_sdcard.py
 import csv
 import io
 import logging
+import math
 import os
 import json
 import sqlite3
@@ -31,6 +32,7 @@ from noise_db import (init_db, import_sessions, get_all_sessions_json,
                       get_all_sessions_list, update_session_metadata, delete_session,
                       save_weather,
                       update_run_location_tag, purge_sessions_before,
+                      add_run_note, update_run_note, delete_run_note,
                       get_sessions_export_format, get_run_prof_by_source,
                       get_setting, set_setting, get_full_run_row,
                       default_serial, resolve_serial)
@@ -660,6 +662,110 @@ def edit_run_tag(date, run_number):
         'session_date': date, 'serial': serial, 'run_number': run_number,
         'source_file': source_file, 'location_tag': tag or None, **stamps})
     return jsonify({'status': 'ok', 'tag': tag or None})
+
+
+# ── Chart notes ──────────────────────────────────────────────────────────────
+# Time-anchored annotations on a run's chart. POST-only, like every other
+# mutation here (deletes included); CSRF comes from the global before_request
+# hook, and the page's fetch wrapper supplies the header.
+
+NOTE_TEXT_MAX = 500
+
+
+def _note_offsets(body):
+    """(offset_s, end_offset_s, error). Offsets are seconds from the run's
+    start — the page converts to and from wall clock, since the chart's own
+    x-axis is elapsed time and only the UI knows the run's start string.
+
+    Non-finite values are refused rather than clamped: nan/inf anchor to
+    nowhere on the chart, and json.dumps writes them as bare NaN/Infinity,
+    which is not valid JSON — the peer event would carry a token a strict
+    parser rejects.
+    """
+    try:
+        offset_s = float(body['offset_s'])
+    except (KeyError, TypeError, ValueError):
+        return None, None, 'offset_s must be a number'
+    if not math.isfinite(offset_s) or offset_s < 0:
+        return None, None, 'offset_s must be a finite number >= 0'
+    end_raw = body.get('end_offset_s')
+    if end_raw is None or end_raw == '':
+        return offset_s, None, None
+    try:
+        end_offset_s = float(end_raw)
+    except (TypeError, ValueError):
+        return None, None, 'end_offset_s must be a number'
+    if not math.isfinite(end_offset_s):
+        return None, None, 'end_offset_s must be a finite number'
+    if not end_offset_s > offset_s:
+        return None, None, 'end_offset_s must be after offset_s'
+    return offset_s, end_offset_s, None
+
+
+@app.route('/session/<date>/run/<int:run_number>/notes', methods=['POST'])
+@login_required
+def add_run_note_route(date, run_number):
+    body = request.json or {}
+    serial = _req_serial()
+    # source_file names the run, as for the tag route: run_number is only a
+    # position and may be stale by the time this posts.
+    source_file = (body.get('source_file') or '').strip() or None
+    text = (body.get('text') or '').strip()[:NOTE_TEXT_MAX]
+    offset_s, end_offset_s, err = _note_offsets(body)
+    if err:
+        return jsonify({'status': 'error', 'error': err}), 400
+    if not source_file:
+        return jsonify({'status': 'error', 'error': 'source_file is required'}), 400
+    if not text:
+        return jsonify({'status': 'error', 'error': 'text is required'}), 400
+    note = add_run_note(date, offset_s, text, serial=serial,
+                        source_file=source_file, run_number=run_number,
+                        end_offset_s=end_offset_s)
+    if note is None:
+        return jsonify({'status': 'error', 'error': 'run not found'}), 404
+    sync_event_to_peer('run_note', 'upsert', note)
+    return jsonify({'status': 'ok', 'note': note})
+
+
+@app.route('/api/run-note/<uid>', methods=['POST'])
+@login_required
+def edit_run_note_route(uid):
+    body = request.json or {}
+    fields = {}
+    if 'text' in body:
+        text = (body.get('text') or '').strip()[:NOTE_TEXT_MAX]
+        if not text:
+            return jsonify({'status': 'error', 'error': 'text is required'}), 400
+        fields['text'] = text
+    if 'offset_s' in body:
+        offset_s, end_offset_s, err = _note_offsets(body)
+        if err:
+            return jsonify({'status': 'error', 'error': err}), 400
+        fields['offset_s'] = offset_s
+        # An offset move carries the range with it: end_offset_s absent from
+        # such a body means "no range", not "leave the old one behind the new
+        # start" — which could otherwise end up before it.
+        fields['end_offset_s'] = end_offset_s
+    elif 'end_offset_s' in body:
+        return jsonify({'status': 'error',
+                        'error': 'send offset_s with end_offset_s'}), 400
+    if not fields:
+        return jsonify({'status': 'error', 'error': 'nothing to update'}), 400
+    note = update_run_note(uid, **fields)
+    if note is None:
+        return jsonify({'status': 'error', 'error': 'note not found'}), 404
+    sync_event_to_peer('run_note', 'upsert', note)
+    return jsonify({'status': 'ok', 'note': note})
+
+
+@app.route('/api/run-note/<uid>/delete', methods=['POST'])
+@login_required
+def delete_run_note_route(uid):
+    res = delete_run_note(uid)
+    if res is None:
+        return jsonify({'status': 'error', 'error': 'note not found'}), 404
+    sync_event_to_peer('run_note', 'delete', res)
+    return jsonify({'status': 'ok', **res})
 
 
 @app.route('/session/<date>/run/<int:run_number>/export/nor140/<report_type>')

@@ -51,7 +51,8 @@ from datetime import datetime, timedelta, timezone
 
 from noise_db import (get_db, delete_session, purge_sessions_before, _record_tombstones,
                       resolve_serial, record_uid_tombstones, LWW_NOW_SQL,
-                      uid_for_assessment, uid_for_location, uid_for_assessment_run)
+                      uid_for_assessment, uid_for_location, uid_for_assessment_run,
+                      RUN_NOTE_COLS)
 
 
 def _apply_tombstones(conn, tombstones):
@@ -83,11 +84,17 @@ def _apply_tombstones(conn, tombstones):
         ar_uids = [r[0] for r in conn.execute(
             'SELECT uid FROM assessment_runs WHERE session_date=? AND '
             'instrument_serial=? AND uid IS NOT NULL', (date, serial)).fetchall()]
+        note_uids = [r[0] for r in conn.execute(
+            'SELECT uid FROM run_notes WHERE session_date=? AND '
+            'instrument_serial=? AND uid IS NOT NULL', (date, serial)).fetchall()]
         conn.execute('DELETE FROM assessment_runs WHERE session_date=? AND instrument_serial=?',
+                     (date, serial))
+        conn.execute('DELETE FROM run_notes WHERE session_date=? AND instrument_serial=?',
                      (date, serial))
         conn.execute('DELETE FROM sessions WHERE date=? AND instrument_serial=?', (date, serial))
         _record_tombstones(conn, [(date, serial)], deleted_at=deleted_at)
         record_uid_tombstones(conn, 'assessment_runs', ar_uids, deleted_at=deleted_at)
+        record_uid_tombstones(conn, 'run_notes', note_uids, deleted_at=deleted_at)
 
 
 def get_last_sync_time():
@@ -228,6 +235,11 @@ def get_full_sync_payload(light=False):
         'FROM runs r JOIN sessions s ON r.session_id=s.id '
         'WHERE r.location_tag IS NOT NULL OR r.tag_updated_at IS NOT NULL'
     ).fetchall()]
+    # Chart notes replicate in full, in both light and full mode: a handful of
+    # short rows per session, nothing like the report bodies F8b had to bound.
+    notes = [dict(r) for r in conn.execute(
+        f'SELECT {", ".join(RUN_NOTE_COLS)} FROM run_notes '
+        'WHERE uid IS NOT NULL').fetchall()]
     deleted_sess = [dict(r) for r in conn.execute(
         'SELECT date, instrument_serial AS serial, deleted_at FROM deleted_sessions').fetchall()]
     # uid tombstones (F6): deletes of the uid-keyed tables keep propagating
@@ -251,7 +263,8 @@ def get_full_sync_payload(light=False):
         'SELECT * FROM report_templates WHERE uid IS NOT NULL').fetchall()]
     payload = {'assessments': assessments, 'assessment_locations': locations,
                'assessment_runs': assess_runs, 'sessions_meta': sess_meta,
-               'run_tags': run_tags, 'deleted_sessions': deleted_sess,
+               'run_tags': run_tags, 'run_notes': notes,
+               'deleted_sessions': deleted_sess,
                'deleted_uids': deleted_uids, 'weather': weather,
                'report_templates': templates}
     if light:
@@ -287,6 +300,8 @@ def apply_full_sync(payload):
         _apply_session_meta(conn, sm, coalesce=True)
     for rt in payload.get('run_tags', []):
         _apply_run_tag(conn, rt, coalesce=True)
+    for rn in payload.get('run_notes', []):
+        _apply_run_note(conn, rn)
     for wx in payload.get('weather', []):
         _apply_weather(conn, wx)
     for gr in payload.get('generated_reports', []):
@@ -300,7 +315,7 @@ def apply_full_sync(payload):
 # The tables replication may touch by uid — a whitelist, because the table
 # name arrives inside tombstone payloads and is interpolated into SQL.
 _LWW_TABLES = ('assessments', 'assessment_locations', 'assessment_runs',
-               'report_templates')
+               'report_templates', 'run_notes')
 _UID_TABLES = _LWW_TABLES + ('generated_reports',)
 
 _ASSESSMENT_COLS = ('uid', 'name', 'purpose', 'standard', 'address', 'postcode',
@@ -916,6 +931,47 @@ def _apply_run_tag(conn, rt, coalesce=False):
         (rt['location_tag'], rt['tag_updated_at'], rt['tag_writer'], row['id']))
 
 
+def _apply_run_note(conn, rn):
+    """Apply one chart note, keyed by uid under the standard LWW gate.
+
+    Unlike run_tag this is a row of its own, not a field on `runs`, so it
+    applies whether or not the run is here yet: a note that arrives before its
+    session simply waits, and the page — which joins notes to runs by
+    source_file — shows nothing until the run lands. Deleting the session
+    later tombstones it (_apply_tombstones), so nothing is left dangling.
+
+    No pre-note peer ever sent this entity, so there is no legacy id-keyed
+    fallback to keep (the report_template precedent): a row without a uid is
+    unroutable and dropped, as is one without the offset that anchors it.
+    """
+    rn = _with_serial(conn, rn)
+    if not rn.get('uid') or rn.get('offset_s') is None:
+        return
+    for c in RUN_NOTE_COLS:
+        rn.setdefault(c, None)
+    rn['text'] = rn['text'] or ''
+    if not _lww_should_apply(conn, 'run_notes', rn['uid'],
+                             rn['updated_at'], rn.get('writer'), rn):
+        return
+    conn.execute('''
+        INSERT INTO run_notes
+            (uid, session_date, instrument_serial, source_file, run_number,
+             offset_s, end_offset_s, text, created_at, updated_at, writer)
+        VALUES (:uid, :session_date, :instrument_serial, :source_file, :run_number,
+                :offset_s, :end_offset_s, :text, :created_at, :updated_at, :writer)
+        ON CONFLICT(uid) DO UPDATE SET
+            session_date=excluded.session_date,
+            instrument_serial=excluded.instrument_serial,
+            source_file=excluded.source_file,
+            run_number=excluded.run_number,
+            offset_s=excluded.offset_s,
+            end_offset_s=excluded.end_offset_s,
+            text=excluded.text,
+            updated_at=excluded.updated_at,
+            writer=excluded.writer
+    ''', {c: rn[c] for c in RUN_NOTE_COLS})
+
+
 def apply_sync_event(entity, action, data):
     """Apply a single sync event pushed from the peer after a mutation.
 
@@ -962,6 +1018,13 @@ def apply_sync_event(entity, action, data):
     elif entity == 'run_tag':
         if action == 'upsert':
             _apply_run_tag(conn, data)
+    elif entity == 'run_note':
+        # Chart notes: a row per note, uid-keyed with a real delete (unlike
+        # run_tag, where clearing is an upsert to NULL).
+        if action == 'upsert':
+            _apply_run_note(conn, data)
+        elif action == 'delete':
+            _apply_uid_delete(conn, 'run_notes', data)
     elif entity == 'generated_report':
         # Reports replicate by uid (append-only evidence). Deletes tombstone
         # the uid (F6) so a later full sync cannot resurrect the row.
