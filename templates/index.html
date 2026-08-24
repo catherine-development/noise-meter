@@ -204,6 +204,8 @@ body{background:var(--bg);color:var(--text);font-family:var(--font-ui);font-size
 .meta-strip{border-top:1px solid var(--border);padding:10px 16px;background:var(--panel);display:flex;align-items:center;gap:10px;flex-wrap:wrap;min-height:40px}
 .meta-chips{display:flex;gap:7px;flex-wrap:wrap;flex:1;min-width:0}
 .meta-chip{font-size:11px;color:var(--text3);background:var(--bg);border:1px solid var(--border);border-radius:12px;padding:2px 9px;white-space:nowrap}
+a.meta-chip-link{text-decoration:none;cursor:pointer}
+a.meta-chip-link:hover{border-color:var(--accent);color:var(--text)}
 .meta-chip strong{color:var(--text2);font-weight:500}
 .meta-chip.empty{font-style:italic}
 .meta-edit-btn{font-size:11px;color:var(--text3);border:1px solid var(--border);border-radius:4px;padding:3px 9px;background:var(--bg);cursor:pointer;white-space:nowrap;font-family:var(--font)}
@@ -639,7 +641,13 @@ function metaChipsHtml(sess) {
   if (sess.loc)   chips.push(`<span class="meta-chip">${esc(sess.loc)}</span>`);
   if (sess.post)  chips.push(`<span class="meta-chip">${esc(sess.post)}</span>`);
   if (sess.lat != null && sess.lng != null)
-    chips.push(`<span class="meta-chip">${sess.lat.toFixed(5)}, ${sess.lng.toFixed(5)}</span>`);
+    // Google's documented universal maps URL: opens the native app on phones,
+    // the web map elsewhere. Coordinates are numbers (toFixed), so the URL
+    // needs no escaping.
+    chips.push(`<a class="meta-chip meta-chip-link" target="_blank" rel="noopener"
+      title="Open in maps"
+      href="https://www.google.com/maps/search/?api=1&query=${sess.lat.toFixed(5)},${sess.lng.toFixed(5)}"
+      onclick="event.stopPropagation()">📍 ${sess.lat.toFixed(5)}, ${sess.lng.toFixed(5)}</a>`);
   if (sess.notes) chips.push(`<span class="meta-chip" title="${esc(sess.notes)}">📝 ${esc(sess.notes.length > 60 ? sess.notes.slice(0,57)+'…' : sess.notes)}</span>`);
   return chips.length
     ? chips.join('')
